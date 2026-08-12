@@ -159,7 +159,10 @@ def test_dashboard_has_no_write_routes(dashboard: tuple[DashboardContext, RingBu
     context, _ = dashboard
     app = create_app(context)
 
-    assert all(route.methods is None or route.methods <= {"GET", "HEAD"} for route in app.routes)
+    assert all(
+        methods is None or methods <= {"GET", "HEAD"}
+        for methods in (getattr(route, "methods", None) for route in app.routes)
+    )
 
 
 def test_ui_keeps_raw_data_behind_explicit_debug_controls() -> None:

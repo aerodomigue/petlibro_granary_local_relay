@@ -46,7 +46,7 @@ from .delivery_pump import DeliveryPump
 from .device_registry import DeviceIdentity
 from .local_responder import Decision, LocalResponder, UpstreamState
 from .message_queue import MessageQueue
-from .observability.telemetry import RelayTelemetry
+from .observability.telemetry import RelayTelemetry, UpstreamTransition, UpstreamTransitionKind
 from .replay_policy import coalesce_key_for, extract_command, policy_for
 from .state_cache import StateCache
 
@@ -174,6 +174,7 @@ class MqttBridge:
         self._legacy_wildcard_filter = f"{self._topic_prefix}/#"
         self._pending_upstream_subscriptions: dict[int, str] = {}
         self._foreign_topics_seen: set[str] = set()
+        self._stopping = False
 
         self._local_client = self._build_client(LOCAL_CLIENT_ID)
         self._local_client.on_connect = self._on_local_connect
@@ -223,7 +224,7 @@ class MqttBridge:
     def run_forever(self) -> None:
         """Connect both clients, start the delivery pumps, and block until `stop()`."""
         if self._telemetry is not None:
-            self._telemetry.upstream_connect_attempt()
+            self._log_upstream_transition(self._telemetry.upstream_connect_attempt())
         self._local_client.connect_async(
             self._config.local_host, self._config.local_port, keepalive=self._config.keepalive_seconds
         )
@@ -239,6 +240,7 @@ class MqttBridge:
     def stop(self) -> None:
         """Stop the delivery pumps and disconnect both MQTT clients."""
         _LOGGER.info("Stopping relay")
+        self._stopping = True
         self._local_to_upstream_pump.stop()
         self._upstream_to_local_pump.stop()
 
@@ -335,18 +337,17 @@ class MqttBridge:
         # does not: PETLIBRO has been observed accepting the socket, ignoring
         # the CONNECT for ~30s, then resetting.
         if reason_code.is_failure:
-            _LOGGER.warning("Upstream refused the connection (reason=%s)", reason_code)
             self._upstream_state = UpstreamState.DISCONNECTED
             if self._telemetry is not None:
-                self._telemetry.upstream_refused()
+                self._log_upstream_transition(self._telemetry.upstream_refused(str(reason_code)))
+            else:
+                _LOGGER.warning("Upstream CONNACK refused reason_code=%s", reason_code)
             return
-        was_offline = not self._upstream_state.is_online
         self._upstream_state = UpstreamState.ONLINE
         if self._telemetry is not None:
-            self._telemetry.upstream_online()
-        if was_offline:
-            _LOGGER.info("UPSTREAM restored")
-        _LOGGER.info("Connected to upstream PETLIBRO broker (reason=%s)", reason_code)
+            self._log_upstream_transition(self._telemetry.upstream_online())
+        else:
+            _LOGGER.info("UPSTREAM restored reason_code=%s", reason_code)
         # Only the explicit "/sub" (cloud -> device) topics. Never a wildcard:
         # besides being denied by the cloud ACL, "<prefix>/#" would also match
         # the "/post" topics this same client publishes upstream, so the
@@ -362,9 +363,11 @@ class MqttBridge:
         # A TCP connect that succeeds but never receives a CONNACK (observed with
         # some of mqtt.us.petlibro.com's DNS-round-robin IPs) surfaces instead as
         # an on_disconnect warning once the keepalive timeout gives up on it.
-        _LOGGER.warning("Failed to establish TCP connection to upstream PETLIBRO broker, retrying")
         if self._telemetry is not None:
-            self._telemetry.upstream_connect_failed()
+            self._log_upstream_transition(self._telemetry.upstream_connect_failed())
+        else:
+            _LOGGER.debug("Upstream TCP connect failed")
+        self._upstream_state = UpstreamState.DISCONNECTED
 
     def _on_upstream_subscribe(
         self,
@@ -391,11 +394,19 @@ class MqttBridge:
         reason_code: ReasonCode,
         properties: Properties | None,
     ) -> None:
-        self._upstream_state = UpstreamState.DISCONNECTED
-        _LOGGER.warning("Disconnected from upstream PETLIBRO broker (reason=%s)", reason_code)
+        if self._stopping:
+            self._upstream_state = UpstreamState.DISCONNECTED
+            _LOGGER.debug("Upstream MQTT stopped intentionally (reason=%s)", reason_code)
+            return
         if self._telemetry is not None:
-            self._telemetry.upstream_disconnected(str(reason_code))
-            self._telemetry.upstream_connect_attempt()
+            transition = self._telemetry.upstream_disconnected(
+                str(reason_code), disconnect_flags=str(disconnect_flags)
+            )
+            self._log_upstream_transition(transition)
+            self._log_upstream_transition(self._telemetry.upstream_connect_attempt())
+        else:
+            _LOGGER.debug("Upstream reconnect failed reason=%s", reason_code)
+        self._upstream_state = UpstreamState.DISCONNECTED
 
     def _on_upstream_message(self, client: Client, userdata: object, message: MQTTMessage) -> None:
         _LOGGER.debug(
@@ -435,3 +446,59 @@ class MqttBridge:
             self._telemetry.increment("ntp_requests")
         elif command == "NTP_SYNC":
             self._telemetry.increment(f"ntp_sync_from_{source}")
+
+    def _log_upstream_transition(self, transition: UpstreamTransition) -> None:
+        """Emit semantically accurate upstream logs from telemetry decisions."""
+        if transition.kind is UpstreamTransitionKind.CONNECT_ATTEMPT:
+            _LOGGER.debug(
+                "Upstream MQTT CONNECT attempt=%d state_before=%s state_after=%s",
+                transition.attempt,
+                transition.state_before,
+                transition.state_after,
+            )
+            return
+        if transition.kind is UpstreamTransitionKind.SESSION_LOST:
+            _LOGGER.warning(
+                "UPSTREAM lost reason=%s session_duration=%.1fs state_before=%s disconnect_flags=%s",
+                transition.reason,
+                transition.session_duration_seconds or 0.0,
+                transition.state_before,
+                transition.disconnect_flags,
+            )
+            return
+        if transition.kind is UpstreamTransitionKind.CONNACK_REFUSED:
+            _LOGGER.warning(
+                "Upstream CONNACK refused reason_code=%s attempt=%d state_before=%s",
+                transition.reason_code,
+                transition.attempt,
+                transition.state_before,
+            )
+        elif transition.kind is UpstreamTransitionKind.ONLINE:
+            _LOGGER.info(
+                "UPSTREAM online downtime=%.1fs state_before=%s",
+                transition.downtime_seconds or 0.0,
+                transition.state_before,
+            )
+            return
+        elif transition.kind is UpstreamTransitionKind.RESTORED:
+            _LOGGER.info(
+                "UPSTREAM restored downtime=%.1fs failed_attempts=%d state_before=%s",
+                transition.downtime_seconds or 0.0,
+                transition.failed_attempts,
+                transition.state_before,
+            )
+            return
+        else:
+            _LOGGER.debug(
+                "Upstream reconnect failed attempt=%d reason=%s state_before=%s",
+                transition.attempt,
+                transition.reason,
+                transition.state_before,
+            )
+        if transition.offline_summary_due:
+            _LOGGER.warning(
+                "UPSTREAM still offline downtime=%.1fs attempts=%d last_reason=%s",
+                transition.downtime_seconds or 0.0,
+                transition.attempt,
+                transition.reason,
+            )
