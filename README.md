@@ -222,6 +222,89 @@ don't understand late beats silently dropping it.
   container restart (crash, redeploy, `docker compose down`) doesn't lose
   anything in flight either - only a fresh `docker volume rm` would.
 
+## State shadow and local responder
+
+Beyond relaying, the relay keeps a persistent shadow of what it has learned
+(`state_shadow.py`, SQLite) and can answer a small set of the feeder's
+requests itself when the cloud is unreachable (`local_responder.py`).
+
+**Off by default.** `PETLIBRO_LOCAL_RESPONDER` gates everything, with a flag
+per function (`_LOCAL_NTP`, `_LOCAL_CONFIG`, `_LOCAL_FEEDING_PLAN`). With
+them unset the relay behaves exactly as before.
+
+The shadow separates three kinds of knowledge by owner:
+
+- **reported** - physical facts the device states (heartbeat, RSSI, firmware,
+  grain output). The device owns these; the relay only observes and never
+  synthesises them.
+- **desired** - settings the cloud last pushed. The cloud owns these; the
+  newest valid push becomes the last-known-good.
+- **feeding plans** - the last *complete* plan set, stored whole rather than
+  merged, so a deleted plan cannot be resurrected. The device's own
+  `/post` names plan ids with no schedule, and is explicitly rejected as a
+  plan definition so it cannot overwrite the real one.
+
+Unrecognised traffic is archived verbatim in `raw_messages` rather than
+interpreted.
+
+### What is answered locally
+
+| Command | Answer | Source of truth |
+|---|---|---|
+| `NTP` | `NTP_SYNC` with the current UTC offset and the next two DST transitions | generated locally - clocks are a safe local service |
+| `FEEDING_PLAN_SERVICE` | the cached complete plan set, echoing the request's `msgId` | cloud's last-known-good |
+| `ATTR_GET_SERVICE` | the cached settings, echoing the request's `msgId` | cloud's last-known-good |
+
+**Never answered locally**, whatever the cache holds:
+`MANUAL_FEEDING_SERVICE`, `DEVICE_REBOOT`, `RESET`, `RESTORE`, OTA, Wi-Fi and
+binding commands - they act on the physical world or on the device's cloud
+association. Unknown commands are forwarded and logged
+(`NO LOCAL RESPONSE unknown cmd=...`), never guessed at: a wrong synthesised
+reply can leave the device in a state nobody can debug, which is worse than
+it retrying later.
+
+If a cache is empty, nothing is invented - the request is simply forwarded
+and a warning logged.
+
+### "Upstream is available" means CONNACK
+
+`UpstreamState` distinguishes `DISCONNECTED` / `TCP_CONNECTING` /
+`MQTT_CONNECTING` / `ONLINE`, and only `ONLINE` (CONNACK 0 received, session
+live) counts. This matters because PETLIBRO's broker has repeatedly been
+observed accepting the TCP connection, never answering the CONNECT, and
+resetting ~30s later - treating a completed TCP handshake as availability
+would leave the feeder waiting on a cloud that never replies.
+
+### Avoiding a double answer
+
+When a request is answered locally, that occurrence is **not** forwarded
+upstream, so the cloud is never asked the same question twice. As a second
+guard, the `msgId` answered locally is remembered for
+`PETLIBRO_HANDLED_MSG_ID_TTL_SECONDS` (120s); a cloud message arriving later
+with that same `msgId` is dropped rather than delivered
+(`SUPPRESSED late cloud response`). This is in-memory: a restart clears it,
+which is harmless since the corresponding request is long gone.
+
+NTP is exempt from correlation because the device's `NTP` request carries no
+`msgId` at all (confirmed on our traffic and by icex2) - a late cloud
+`NTP_SYNC` is just another clock sync, so it is harmless.
+
+### Protocol grounding
+
+Payload shapes come from this device's real traffic first. Notably, this
+firmware's `NTP_SYNC` carries `timezoneOffsetSeconds`, `nextDSTOffsetSeconds`,
+`nextDSTTransitionTs` and their "second next" counterparts, which icex2's
+older firmware does not document; the locally generated reply reproduces
+those fields, and `dst_schedule.py` computes them from the IANA zone. Against
+the real cloud payload captured on 2026-08-12 for `Europe/Paris`, all five
+values match exactly.
+
+Caveat, stated plainly: we have observed `NTP_SYNC` from the cloud, but never
+managed to capture a `NTP` request and its reply *in the same exchange*, so
+whether the cloud always answers an `NTP` post with `NTP_SYNC` (rather than a
+`cmd: NTP` reply, which icex2 also documents) is not fully confirmed for this
+firmware. That is why `PETLIBRO_LOCAL_NTP` ships off.
+
 ## References
 
 - [`icex2/plaf203`](https://github.com/icex2/plaf203) - independently reverse-engineered

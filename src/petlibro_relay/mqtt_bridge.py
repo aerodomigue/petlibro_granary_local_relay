@@ -44,6 +44,7 @@ from paho.mqtt.reasoncodes import ReasonCode
 from .config import RelayConfig
 from .delivery_pump import DeliveryPump
 from .device_registry import DeviceIdentity
+from .local_responder import Decision, LocalResponder, UpstreamState
 from .message_queue import MessageQueue
 from .replay_policy import coalesce_key_for, extract_command, policy_for
 from .state_cache import StateCache
@@ -135,7 +136,12 @@ class MqttBridge:
     """Relays MQTT traffic between the feeder's local broker and the PETLIBRO cloud."""
 
     def __init__(
-        self, config: RelayConfig, identity: DeviceIdentity, state_cache: StateCache, queue: MessageQueue
+        self,
+        config: RelayConfig,
+        identity: DeviceIdentity,
+        state_cache: StateCache,
+        queue: MessageQueue,
+        responder: LocalResponder | None = None,
     ) -> None:
         """Initialize the bridge, its two MQTT clients, and their delivery pumps.
 
@@ -146,11 +152,15 @@ class MqttBridge:
                 `CredentialCaptureProxy` from the feeder's own CONNECT packet.
             state_cache: Cache used to persist the last payload per topic.
             queue: Durable queue backing both delivery directions.
+            responder: Optional local responder. When absent the bridge is a
+                pure pipe, exactly as before this feature existed.
         """
         self._config = config
         self._identity = identity
         self._state_cache = state_cache
         self._queue = queue
+        self._responder = responder
+        self._upstream_state = UpstreamState.DISCONNECTED
         self._topic_prefix = config.topic_prefix_override or f"dl/PLAF203/{identity.client_id}"
         # Device -> cloud only. Never a wildcard covering the "/sub" topics we
         # republish onto locally, or the bridge would consume its own output.
@@ -273,6 +283,21 @@ class MqttBridge:
             return
         _LOGGER.debug("local -> queue(%s): %s (%d bytes)", LOCAL_TO_UPSTREAM, message.topic, len(message.payload))
         self._state_cache.update(message.topic, message.payload)
+
+        if self._responder is not None:
+            action = self._responder.decide(
+                self._identity.client_id, message.topic, message.payload, self._upstream_state
+            )
+            if action.decision is Decision.RESPOND_LOCAL:
+                # Answered from local knowledge, so this occurrence is not sent
+                # upstream: the cloud must not later answer the same question a
+                # second time (see README, "Local responder").
+                if action.response_topic is not None and action.response_payload is not None:
+                    client.publish(action.response_topic, action.response_payload, qos=QOS_AT_MOST_ONCE)
+                return
+            if action.decision is Decision.IGNORE:
+                return
+
         self._enqueue(LOCAL_TO_UPSTREAM, message, is_cloud_to_device=False)
 
     # -- upstream (cloud) callbacks ----------------------------------------------
@@ -285,6 +310,17 @@ class MqttBridge:
         reason_code: ReasonCode,
         properties: Properties | None,
     ) -> None:
+        # Only a CONNACK makes the cloud "online". A completed TCP handshake
+        # does not: PETLIBRO has been observed accepting the socket, ignoring
+        # the CONNECT for ~30s, then resetting.
+        if reason_code.is_failure:
+            _LOGGER.warning("Upstream refused the connection (reason=%s)", reason_code)
+            self._upstream_state = UpstreamState.DISCONNECTED
+            return
+        was_offline = not self._upstream_state.is_online
+        self._upstream_state = UpstreamState.ONLINE
+        if was_offline:
+            _LOGGER.info("UPSTREAM restored")
         _LOGGER.info("Connected to upstream PETLIBRO broker (reason=%s)", reason_code)
         # Only the explicit "/sub" (cloud -> device) topics. Never a wildcard:
         # besides being denied by the cloud ACL, "<prefix>/#" would also match
@@ -328,6 +364,7 @@ class MqttBridge:
         reason_code: ReasonCode,
         properties: Properties | None,
     ) -> None:
+        self._upstream_state = UpstreamState.DISCONNECTED
         _LOGGER.warning("Disconnected from upstream PETLIBRO broker (reason=%s)", reason_code)
 
     def _on_upstream_message(self, client: Client, userdata: object, message: MQTTMessage) -> None:
@@ -335,6 +372,16 @@ class MqttBridge:
             "upstream -> queue(%s): %s (%d bytes)", UPSTREAM_TO_LOCAL, message.topic, len(message.payload)
         )
         self._state_cache.update(message.topic, message.payload)
+
+        if self._responder is not None:
+            # Learn from the cloud first: this is where last-known-good config
+            # and feeding plans come from.
+            self._responder.observe_cloud_message(
+                self._identity.client_id, message.topic, message.payload
+            )
+            if self._responder.is_suppressed_cloud_response(message.payload):
+                return
+
         self._enqueue(UPSTREAM_TO_LOCAL, message, is_cloud_to_device=True)
 
     # -- shared ------------------------------------------------------------------

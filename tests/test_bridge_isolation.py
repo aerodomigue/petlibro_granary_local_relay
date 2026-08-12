@@ -16,6 +16,7 @@ import pytest
 
 from petlibro_relay.config import RelayConfig
 from petlibro_relay.device_registry import DeviceIdentity
+from petlibro_relay.local_responder import LocalResponderSettings
 from petlibro_relay.message_queue import MessageQueue
 from petlibro_relay.mqtt_bridge import LOCAL_TO_UPSTREAM, MqttBridge
 from petlibro_relay.state_cache import StateCache
@@ -54,6 +55,9 @@ def bridge(tmp_path: Path) -> Iterator[tuple[MqttBridge, MessageQueue]]:
         queue_db_path=str(tmp_path / "queue.sqlite3"),
         device_registry_db_path=str(tmp_path / "registry.sqlite3"),
         device_retention_hours=72,
+        state_shadow_db_path=str(tmp_path / "shadow.sqlite3"),
+        handled_msg_id_ttl_seconds=120.0,
+        local_responder=LocalResponderSettings(),
         max_queue_size=100,
         log_level="INFO",
     )

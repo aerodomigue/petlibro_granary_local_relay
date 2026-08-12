@@ -10,10 +10,12 @@ from types import FrameType
 from .config import RelayConfig
 from .credential_capture_proxy import CredentialCaptureProxy
 from .device_registry import SECONDS_PER_HOUR, DeviceIdentity, DeviceRegistry
+from .local_responder import LocalResponder
 from .logging_config import configure_logging
 from .message_queue import MessageQueue
 from .mqtt_bridge import MqttBridge, prime_local_subscription
 from .state_cache import StateCache
+from .state_shadow import StateShadow
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -84,6 +86,7 @@ def main() -> None:
     _install_shutdown_handler(stop_event)
 
     state_cache = StateCache(config.state_cache_path)
+    shadow = StateShadow(config.state_shadow_db_path)
     queue = MessageQueue(config.queue_db_path, config.max_queue_size)
     registry = DeviceRegistry(
         config.device_registry_db_path,
@@ -111,7 +114,21 @@ def main() -> None:
             _LOGGER.info("Shutdown requested before a device identity was available")
             return
 
-        bridge = MqttBridge(config, identity, state_cache, queue)
+        responder = LocalResponder(
+            config.local_responder, shadow, config.handled_msg_id_ttl_seconds
+        )
+        if config.local_responder.enabled:
+            _LOGGER.info(
+                "Local responder enabled (ntp=%s, config=%s, feeding_plan=%s, tz=%s)",
+                config.local_responder.ntp,
+                config.local_responder.config,
+                config.local_responder.feeding_plan,
+                config.local_responder.device_timezone,
+            )
+        else:
+            _LOGGER.info("Local responder disabled - relay is a pure pipe")
+
+        bridge = MqttBridge(config, identity, state_cache, queue, responder)
         bridge.run_forever()
         try:
             stop_event.wait()
@@ -121,6 +138,7 @@ def main() -> None:
         capture_proxy.stop()
         queue.close()
         registry.close()
+        shadow.close()
         _LOGGER.info("Relay stopped")
 
 
