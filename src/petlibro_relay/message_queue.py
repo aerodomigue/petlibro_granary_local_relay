@@ -11,6 +11,7 @@ back, and gets replayed in the original order.
 from __future__ import annotations
 
 import logging
+import json
 import sqlite3
 import threading
 import time
@@ -250,6 +251,7 @@ class MessageQueue:
                     "created_at": float(created_at),
                     "age_seconds": now - float(created_at),
                     "replay_policy": policy_name,
+                    "payload": _decode_payload(payload),
                 }
             )
         return {
@@ -264,3 +266,11 @@ class MessageQueue:
         """Close the underlying database connection."""
         with self._lock:
             self._connection.close()
+
+
+def _decode_payload(payload: bytes) -> object:
+    """Return queue payloads for the dashboard's explicit debug view only."""
+    try:
+        return json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return payload.decode("utf-8", errors="replace")

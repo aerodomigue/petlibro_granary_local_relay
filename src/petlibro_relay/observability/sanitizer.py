@@ -38,6 +38,8 @@ def mask_username(username: str) -> str:
 
 def sanitize_value(value: Any) -> Any:
     """Recursively redact sensitive mapping keys before an API response is sent."""
+    if isinstance(value, str):
+        return sanitize_text(value)
     if isinstance(value, dict):
         return {
             key: REDACTED_VALUE if _is_sensitive_key(str(key)) else sanitize_value(item)

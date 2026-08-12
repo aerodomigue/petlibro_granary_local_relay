@@ -18,11 +18,13 @@ from petlibro_relay.observability.telemetry import RelayTelemetry
 from petlibro_relay.state_shadow import StateShadow
 from petlibro_relay.web.app import _stream_logs, create_app
 from petlibro_relay.web.context import DashboardContext
+from petlibro_relay.web.static import DASHBOARD_HTML
 
 DEVICE_ID = "TESTDEVICE0000000001"
 USERNAME = "USER12345678"
 PASSWORD = "must-not-appear"
 CANDIDATE_PASSWORD = "candidate-must-not-appear"
+QUEUE_SECRET = "queue-secret-must-not-appear"
 
 
 @pytest.fixture
@@ -58,7 +60,12 @@ def dashboard(tmp_path: Path) -> Iterator[tuple[DashboardContext, RingBufferLogH
     registry.record(identity)
     registry.record(DeviceIdentity("CANDIDATE0000000001", "CANDIDATEUSER", CANDIDATE_PASSWORD))
     queue = MessageQueue(config.queue_db_path, config.max_queue_size)
-    queue.enqueue("local-to-upstream", "dl/PLAF203/test/device/event/post", b'{"cmd":"HEART"}', 0)
+    queue.enqueue(
+        "local-to-upstream",
+        "dl/PLAF203/test/device/event/post",
+        b'{"cmd":"HEART","password":"queue-secret-must-not-appear"}',
+        0,
+    )
     shadow = StateShadow(config.state_shadow_db_path)
     shadow.record_raw(DEVICE_ID, "dl/PLAF203/test/device/service/post", b'{"password":"hidden"}', "TEST")
     shadow.record_raw(DEVICE_ID, "dl/PLAF203/test/device/ntp/post", b'{"cmd":"NTP","ts":1}', "NTP")
@@ -115,11 +122,12 @@ def test_health_remains_ok_when_petlibro_is_down(client: TestClient) -> None:
 def test_api_masks_credentials_and_sanitizes_raw_state(client: TestClient) -> None:
     """No learned password or full username can escape through read endpoints."""
     payload = " ".join(
-        client.get(path).text for path in ("/api/devices", "/api/state", "/api/status", "/api/logs")
+        client.get(path).text for path in ("/api/devices", "/api/state", "/api/status", "/api/logs", "/api/queues")
     )
 
     assert PASSWORD not in payload
     assert CANDIDATE_PASSWORD not in payload
+    assert QUEUE_SECRET not in payload
     assert USERNAME not in payload
     assert "<redacted>" in client.get("/api/state").text
 
@@ -152,6 +160,22 @@ def test_dashboard_has_no_write_routes(dashboard: tuple[DashboardContext, RingBu
     app = create_app(context)
 
     assert all(route.methods is None or route.methods <= {"GET", "HEAD"} for route in app.routes)
+
+
+def test_ui_keeps_raw_data_behind_explicit_debug_controls() -> None:
+    """The page provides formatted observability views and explicit raw-data controls."""
+    for helper in (
+        "formatDuration",
+        "formatAge",
+        "formatTimestamp",
+        "formatPercent",
+        "formatBoolean",
+        "statusBadge",
+        "escapeHtml",
+    ):
+        assert helper in DASHBOARD_HTML
+    assert "Raw JSON" in DASHBOARD_HTML
+    assert "EventSource('/api/logs/stream')" in DASHBOARD_HTML
 
 
 def test_sse_emits_new_sanitized_log(dashboard: tuple[DashboardContext, RingBufferLogHandler]) -> None:

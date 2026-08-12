@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import socket
 import threading
+from collections.abc import Callable
 
 from .device_registry import DeviceIdentity, DeviceRegistry
 from .mqtt_connect_packet import MalformedConnectPacketError, read_connect_packet
@@ -27,7 +28,15 @@ LISTEN_BACKLOG = 8
 class CredentialCaptureProxy:
     """Listens for the feeder's connection, captures its identity, then pipes it through."""
 
-    def __init__(self, listen_host: str, listen_port: int, broker_host: str, broker_port: int, registry: DeviceRegistry) -> None:
+    def __init__(
+        self,
+        listen_host: str,
+        listen_port: int,
+        broker_host: str,
+        broker_port: int,
+        registry: DeviceRegistry,
+        device_connected_callback: Callable[[str], None] | None = None,
+    ) -> None:
         """Initialize the proxy.
 
         Args:
@@ -37,12 +46,15 @@ class CredentialCaptureProxy:
             broker_host: Hostname of the real local mosquitto broker.
             broker_port: Port of the real local mosquitto broker.
             registry: Store to persist learned device identities into.
+            device_connected_callback: Optional observability callback with
+                the connecting device's LAN address. It never affects proxying.
         """
         self._listen_host = listen_host
         self._listen_port = listen_port
         self._broker_host = broker_host
         self._broker_port = broker_port
         self._registry = registry
+        self._device_connected_callback = device_connected_callback
         self._server_socket: socket.socket | None = None
         self._stop_event = threading.Event()
         self._accept_thread = threading.Thread(target=self._accept_loop, name="capture-proxy-accept", daemon=True)
@@ -84,6 +96,8 @@ class CredentialCaptureProxy:
                 _LOGGER.exception("Error accepting a connection")
                 continue
             _LOGGER.info("Feeder connection from %s", client_address)
+            if self._device_connected_callback is not None:
+                self._device_connected_callback(client_address[0])
             threading.Thread(
                 target=self._handle_connection, args=(client_socket,), daemon=True
             ).start()

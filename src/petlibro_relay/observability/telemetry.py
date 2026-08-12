@@ -93,6 +93,7 @@ class RelayTelemetry:
         """Record a broker-level CONNACK rejection."""
         with self._lock:
             self._counters["connack_refused"] += 1
+            self._counters["reconnect_failures"] += 1
             self._upstream_state = UpstreamState.DISCONNECTED
         self.record_event("upstream_refused", "PETLIBRO MQTT CONNACK refused")
 
@@ -100,6 +101,7 @@ class RelayTelemetry:
         """Record failure before the TCP connection exists."""
         with self._lock:
             self._counters["tcp_failures"] += 1
+            self._counters["reconnect_failures"] += 1
             self._upstream_state = UpstreamState.DISCONNECTED
         self.record_event("upstream_tcp_failure", "Upstream TCP/DNS connection failed")
 
@@ -107,8 +109,10 @@ class RelayTelemetry:
         """Record disconnected session and classify the visible reason."""
         now = time.time()
         with self._lock:
+            was_online = self._upstream_state is UpstreamState.ONLINE
             if self._upstream_state is UpstreamState.MQTT_CONNECTING:
                 self._counters["connack_timeouts"] += 1
+                self._counters["reconnect_failures"] += 1
                 kind = UpstreamFailureKind.CONNECT_TIMEOUT
             elif reason == "Normal disconnection":
                 self._counters["clean_disconnects"] += 1
@@ -116,6 +120,8 @@ class RelayTelemetry:
             else:
                 self._counters["disconnects"] += 1
                 kind = UpstreamFailureKind.OTHER_DISCONNECT
+            if was_online:
+                self._counters["sessions_lost"] += 1
             if self._last_online_started_at is not None:
                 self._session_durations.append(now - self._last_online_started_at)
             self._last_online_started_at = None

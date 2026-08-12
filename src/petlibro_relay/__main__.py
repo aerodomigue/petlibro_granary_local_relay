@@ -110,6 +110,7 @@ def main() -> None:
         broker_host=config.local_host,
         broker_port=config.local_port,
         registry=registry,
+        device_connected_callback=dashboard_context.set_device_ip,
     )
     capture_proxy.start()
 

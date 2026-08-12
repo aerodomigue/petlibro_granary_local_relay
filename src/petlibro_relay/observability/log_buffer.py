@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import re
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -12,6 +13,9 @@ from typing import Any
 from .sanitizer import sanitize_text
 
 DEFAULT_LOG_BUFFER_SIZE = 5000
+DEVICE_TOPIC_PATTERN = re.compile(r"dl/[^/]+/([^/]+)/")
+CLIENT_ID_PATTERN = re.compile(r"client_id=([A-Za-z0-9_-]+)")
+COMMAND_PATTERN = re.compile(r"\bcmd[= ]([A-Z][A-Z0-9_]+)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +27,8 @@ class BufferedLogEntry:
     level: str
     component: str
     message: str
+    device_id: str | None
+    cmd: str | None
 
     def as_dict(self) -> dict[str, Any]:
         """Return JSON-compatible representation."""
@@ -49,6 +55,8 @@ class RingBufferLogHandler(logging.Handler):
                     level=record.levelname,
                     component=_component_from_logger(record.name),
                     message=sanitize_text(rendered),
+                    device_id=_device_id_from_record(record, rendered),
+                    cmd=_command_from_record(record, rendered),
                 )
                 self._next_sequence += 1
                 self._entries.append(entry)
@@ -89,3 +97,24 @@ def _component_from_logger(logger_name: str | None) -> str:
         if logger_name.endswith(suffix):
             return component
     return "system"
+
+
+def _device_id_from_record(record: logging.LogRecord, message: str) -> str | None:
+    """Extract a non-secret device identifier when a log line contains one."""
+    explicit = getattr(record, "device_id", None)
+    if isinstance(explicit, str):
+        return explicit
+    topic_match = DEVICE_TOPIC_PATTERN.search(message)
+    if topic_match is not None:
+        return topic_match.group(1)
+    client_match = CLIENT_ID_PATTERN.search(message)
+    return client_match.group(1) if client_match is not None else None
+
+
+def _command_from_record(record: logging.LogRecord, message: str) -> str | None:
+    """Extract an optional MQTT command for client-side log filtering."""
+    explicit = getattr(record, "cmd", None)
+    if isinstance(explicit, str):
+        return explicit
+    match = COMMAND_PATTERN.search(message)
+    return match.group(1) if match is not None else None

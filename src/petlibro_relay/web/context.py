@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import platform
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -40,6 +41,7 @@ class DashboardContext:
         self._lock = threading.Lock()
         self._identity: DeviceIdentity | None = None
         self._responder: LocalResponder | None = None
+        self._device_ip: str | None = None
 
     @property
     def logs(self) -> RingBufferLogHandler:
@@ -51,6 +53,11 @@ class DashboardContext:
         with self._lock:
             self._identity = identity
             self._responder = responder
+
+    def set_device_ip(self, device_ip: str) -> None:
+        """Record the latest source address observed by the TCP proxy."""
+        with self._lock:
+            self._device_ip = device_ip
 
     def status(self) -> dict[str, Any]:
         """Return the compact overview used by the dashboard header."""
@@ -93,6 +100,7 @@ class DashboardContext:
         ]
         with self._lock:
             identity = self._identity
+            device_ip = self._device_ip
         if active is not None and identity is not None:
             active["model"] = "PLAF203"
             reported = self._shadow.get_reported(identity.client_id)
@@ -102,6 +110,7 @@ class DashboardContext:
             active["ttl_remaining_seconds"] = max(
                 0.0, cast(float, snapshot["retention_seconds"]) - float(active["age_seconds"])
             )
+            active["ip"] = device_ip
         return {
             "active": active,
             "candidates": candidates,
@@ -170,6 +179,7 @@ class DashboardContext:
                 _file_metadata("queue", self._config.queue_db_path),
                 _file_metadata("state_shadow", self._config.state_shadow_db_path),
             ],
+            "runtime": _runtime_metadata(Path(self._config.state_shadow_db_path).parent),
         }
 
 
@@ -203,3 +213,27 @@ def _file_metadata(name: str, path: str) -> dict[str, Any]:
     """Return safe database metadata without reading its contents."""
     candidate = Path(path)
     return {"name": name, "path": str(candidate), "size_bytes": candidate.stat().st_size if candidate.exists() else 0}
+
+
+def _runtime_metadata(storage_path: Path) -> dict[str, Any]:
+    """Collect light host metrics without adding a monitoring dependency."""
+    disk = shutil.disk_usage(storage_path)
+    return {
+        "cpu_load_1m": os.getloadavg()[0] if hasattr(os, "getloadavg") else None,
+        "memory": _memory_metadata(),
+        "disk": {"total_bytes": disk.total, "used_bytes": disk.used, "free_bytes": disk.free},
+    }
+
+
+def _memory_metadata() -> dict[str, int] | None:
+    """Read Linux container memory facts when procfs is available."""
+    try:
+        lines = Path("/proc/meminfo").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    values = {line.split(":", 1)[0]: int(line.split()[1]) * 1024 for line in lines if ":" in line}
+    total = values.get("MemTotal")
+    available = values.get("MemAvailable")
+    if total is None or available is None:
+        return None
+    return {"total_bytes": total, "used_bytes": total - available, "available_bytes": available}
