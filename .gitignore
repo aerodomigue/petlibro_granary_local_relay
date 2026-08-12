@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets and runtime state - never commit device credentials or the local cache/queue
+.env
+.env.*
+!.env.example
+/data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Type checker cache
+.mypy_cache/

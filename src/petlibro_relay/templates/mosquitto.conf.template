@@ -1,0 +1,26 @@
+# Rendered by `petlibro_relay.mosquitto_config` (run once as the
+# "mosquitto-config" service) from the environment variables of that
+# container, then written to a volume the stock, unmodified mosquitto
+# image mounts read-only. Every tunable value below comes from the
+# environment - nothing is hardcoded in an image.
+#
+# Local broker the PLAF203 feeder connects to once DNS for mqtt.us.petlibro.com
+# is redirected to this host. No TLS/auth to mirror what the real device speaks
+# (plain MQTT 3.1 on 1883, no TLS) - this broker is only reachable on the LAN.
+listener ${MOSQUITTO_LISTENER_PORT} 0.0.0.0
+allow_anonymous ${MOSQUITTO_ALLOW_ANONYMOUS}
+
+persistence true
+persistence_location /mosquitto/data/
+persistent_client_expiration ${MOSQUITTO_PERSISTENT_CLIENT_EXPIRATION}
+
+# The feeder connects with clean_session=false and QoS 0; without this,
+# mosquitto drops QoS 0 messages for a temporarily offline client instead of
+# holding them for its persistent session.
+queue_qos0_messages ${MOSQUITTO_QUEUE_QOS0_MESSAGES}
+max_queued_messages ${MOSQUITTO_MAX_QUEUED_MESSAGES}
+
+log_dest stdout
+log_type error
+log_type warning
+log_type notice

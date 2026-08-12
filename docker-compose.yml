@@ -1,0 +1,42 @@
+services:
+  # One-shot: renders mosquitto.conf from env vars using our own code
+  # (petlibro_relay.mosquitto_config) and writes it to a volume mosquitto
+  # mounts read-only. The mosquitto image itself is never modified.
+  mosquitto-config:
+    build: .
+    command: ["python", "-m", "petlibro_relay.mosquitto_config"]
+    env_file:
+      - .env
+    volumes:
+      - mosquitto-config:/mosquitto-config
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: petlibro-relay-mosquitto
+    restart: unless-stopped
+    depends_on:
+      mosquitto-config:
+        condition: service_completed_successfully
+    ports:
+      - "${MOSQUITTO_HOST_PORT:-1883}:${MOSQUITTO_LISTENER_PORT:-1883}"
+    volumes:
+      - mosquitto-config:/mosquitto/config:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+
+  relay:
+    build: .
+    container_name: petlibro-relay
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+    env_file:
+      - .env
+    volumes:
+      - relay-data:/data
+
+volumes:
+  mosquitto-config:
+  mosquitto-data:
+  mosquitto-log:
+  relay-data:

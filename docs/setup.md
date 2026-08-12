@@ -1,0 +1,101 @@
+# petlibro-relay setup
+
+Transparent MQTT proxy sitting between the PLAF203 feeder and
+`mqtt.us.petlibro.com`. Three services:
+
+- `mosquitto-config`: one-shot, runs `petlibro_relay.mosquitto_config` to
+  render `mosquitto.conf` from the same env vars as everything else, onto a
+  shared volume, then exits. The stock mosquitto image is never modified.
+- `mosquitto`: local broker the feeder connects to instead of the cloud,
+  started only once `mosquitto-config` has finished successfully.
+- `relay`: bridges `mosquitto` and the real PETLIBRO cloud broker in both
+  directions, with a durable on-disk queue so neither side blocks the other
+  and any outage gets replayed once the destination is back.
+
+## 1. Run it
+
+```sh
+docker compose up -d --build
+docker compose logs -f relay
+```
+
+Expect, in order:
+
+```
+Connected to local broker (reason=Success)
+Connected to upstream PETLIBRO broker (reason=Success)
+Upstream subscription dl/PLAF203/<CLIENT_ID>/device/service/sub -> granted (code=...)
+```
+
+If a subscription line says `denied`, that category isn't allowed for this
+device identity - harmless, some server->device pushes still arrive over the
+session's pre-existing subscription (see project notes).
+
+## 2. Redirect the feeder to the local broker (DNS override)
+
+The feeder resolves its MQTT host itself and connects in plain MQTT (no TLS
+on port 1883), so a DNS override is enough - no certificates, no on-device
+changes.
+
+Our own capture of this device (firmware 3.0.30) only ever queried
+`mqtt.us.petlibro.com`. The independently reverse-engineered
+[`icex2/plaf203`](https://github.com/icex2/plaf203) project documents two
+additional fallback hostnames the firmware is built to try:
+
+```
+mqtt.us.petlibro.com      <- primary, confirmed on this device's own traffic
+us-mqtt-0.aiotlibro.com   <- documented fallback (icex2), not observed here
+us-mqtt-0.dl-aiot.com     <- documented fallback (icex2), not observed here
+```
+
+On your Pi-hole / dnsmasq / router, add a local DNS (`A`) record for **all
+three** hostnames, pointing to the same LAN IP - the machine running the
+`mosquitto` container:
+
+```
+mqtt.us.petlibro.com      -> <LAN IP of the mosquitto host>
+us-mqtt-0.aiotlibro.com   -> <LAN IP of the mosquitto host>
+us-mqtt-0.dl-aiot.com     -> <LAN IP of the mosquitto host>
+```
+
+Redirecting only the primary leaves an escape hatch: if the firmware ever
+falls back to one of the other two on a failed connection, that attempt
+would resolve straight to the real cloud, bypassing the proxy entirely.
+
+Do **not** override any other `*.petlibro.com` / `*.dl-aiot.com` hostname
+(REST API, camera/Kalay, or the `sit-svc.` / `demo-svc.` / `test.svc.`
+staging hosts icex2 found in the firmware binary but that aren't expected in
+normal production traffic) - only the MQTT hosts move local, everything else
+keeps talking straight to the cloud as before.
+
+To roll back at any time: remove the three DNS overrides. No changes are
+needed on the feeder itself - it will simply resolve the real cloud IPs
+again on its next DNS lookup/reconnect.
+
+## 3. Reconnect the feeder
+
+Only power-cycle or reconnect the feeder's Wi-Fi **after** the DNS override
+is in place and `docker compose logs -f relay` shows a healthy upstream
+connection. Reconnecting it beforehand just has it talk to the real cloud
+directly, same as always - harmless, but defeats the point of testing the
+proxy.
+
+## What this does and doesn't give you
+
+- **Does**: keeps the app/cloud features (remote feed, settings, camera,
+  notifications) working through a single choke point you control, logs and
+  caches every message, and buffers traffic during a PETLIBRO cloud outage so
+  it's replayed once the cloud is reachable again.
+- **Doesn't**: give the feeder new autonomous offline behavior. The
+  already-synced feeding schedule executes on-device regardless of
+  connectivity (that's firmware, unrelated to this proxy) - this relay only
+  affects the cloud-dependent features (manual feed, live settings changes,
+  camera, notifications), which still require the upstream connection to
+  eventually come back to take effect.
+
+## Credentials
+
+`.env` holds the device's real MQTT identity (`PETLIBRO_DEVICE_CLIENT_ID` /
+`_USERNAME` / `_PASSWORD` = client ID / `DL_PRODUCT_KEY` / `DL_PRODUCT_SECRET`
+extracted from the device's own CONNECT packet). It is git-ignored - never
+commit it.
