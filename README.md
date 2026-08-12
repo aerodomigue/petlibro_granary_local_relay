@@ -63,12 +63,30 @@ subscribed. `prime_local_subscription()` therefore registers the local
 subscription up front, as the same `clean_session=False` client, so the
 broker holds those messages until the bridge connects for real.
 
-Learned identities expire (`PETLIBRO_DEVICE_RETENTION_HOURS`, 72h): anything
-on the LAN can reach the capture proxy and get itself recorded, and the most
-recently seen identity is the one adopted, so entries must not linger
-forever. They are deliberately *not* validated against the cloud first - the
-relay's whole purpose is to keep working while the cloud is unreachable, so
-cloud availability must never gate it.
+### Active vs candidate devices
+
+Anything on the LAN can reach the capture proxy and get itself recorded, so
+"whichever identity was seen most recently" would let a test client - or a
+second feeder - displace the real device just by connecting after it. The
+registry therefore keeps a **sticky active identity**:
+
+| Situation | Result |
+|---|---|
+| no active device yet | the connecting device becomes active |
+| the active device reconnects | stays active; credentials and `last_seen_at` refreshed (credentials can legitimately rotate) |
+| a different device connects | stored as a **candidate**, logged as `Learned foreign candidate device B; active device remains A` - it never takes over on its own |
+| active device quiet past the TTL | it expires, the role goes vacant, and the next device to connect takes it |
+
+The active device is a pointer (`registry_state.active_client_id`) rather
+than a per-row flag, so "exactly one active" holds by construction. A restart
+re-reads that pointer, so the active device survives a restart even when a
+candidate has a more recent `last_seen_at`.
+
+The TTL is `PETLIBRO_DEVICE_RETENTION_HOURS` (72h) and applies to candidates
+too. Identities are deliberately *not* validated against the cloud before
+being trusted - the relay's whole purpose is to keep working while the cloud
+is unreachable (which, observed in practice, means TCP accepted then no
+CONNACK for ~30s before a reset), so cloud reachability must never gate it.
 
 **One device per relay.** The local subscription is device-agnostic (it has
 to be, to exist before the identity is known), but the bridge holds exactly

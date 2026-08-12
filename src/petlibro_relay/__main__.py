@@ -55,9 +55,9 @@ def _resolve_identity(
     )
     polls = 0
     while not stop_event.is_set():
-        identity = registry.get_most_recently_seen()
+        identity = registry.get_active()
         if identity is not None:
-            _LOGGER.info("Learned device identity from local traffic: client_id=%s", identity.client_id)
+            _LOGGER.info("Using active device identity from registry: client_id=%s", identity.client_id)
             return identity
         polls += 1
         if polls % IDENTITY_WAIT_LOG_EVERY_N_POLLS == 0:
