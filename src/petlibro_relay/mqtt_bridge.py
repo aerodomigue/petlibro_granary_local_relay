@@ -32,6 +32,7 @@ strict and directional:
 from __future__ import annotations
 
 import logging
+import time
 from typing import List, Sequence
 
 import paho.mqtt.client as mqtt
@@ -53,9 +54,21 @@ MQTT_PROTOCOL_VERSION = mqtt.MQTTv31
 QOS_AT_MOST_ONCE = 0
 MIN_RECONNECT_DELAY_SECONDS = 1
 MAX_RECONNECT_DELAY_SECONDS = 60
+PRIME_SUBSCRIBE_SETTLE_SECONDS = 1.0
 
 LOCAL_TO_UPSTREAM = "local-to-upstream"
 UPSTREAM_TO_LOCAL = "upstream-to-local"
+
+# Client ID the relay uses on the local broker. Fixed, and always paired with
+# clean_session=False, so the broker keeps this session (and its queued
+# messages) across relay restarts.
+LOCAL_CLIENT_ID = "relay-local"
+
+# Device-agnostic device -> cloud filter. Matches any product/serial, so the
+# subscription can be registered before we know which device will connect,
+# and still only ever covers "/post" (never the "/sub" topics we publish
+# locally, which is what would make the bridge consume its own output).
+ANY_DEVICE_POST_FILTER = "dl/+/+/device/+/post"
 
 # Server -> device message categories, per the dl/<product>/<client_id>/device/<category>/sub
 # topic pattern reverse-engineered from the device's own MQTT traffic.
@@ -69,6 +82,53 @@ UPSTREAM_SUBSCRIBE_CATEGORIES: Sequence[str] = (
     "config",
     "system",
 )
+
+
+def prime_local_subscription(config: RelayConfig) -> None:
+    """Register the local subscription before the device's identity is known.
+
+    On a fresh install the bridge can only start once `CredentialCaptureProxy`
+    has learned an identity - which requires the feeder to connect first. The
+    feeder then publishes its opening burst (`DEVICE_START_EVENT` and the NTP
+    handshake) in the second or two before the bridge subscribes, and those
+    messages are lost.
+
+    Connecting briefly here as the same `clean_session=False` client the
+    bridge will use, and subscribing to the device-agnostic "/post" filter,
+    makes the broker hold matching messages for that session while it is
+    offline (mosquitto's `queue_qos0_messages`). They are delivered as soon as
+    the bridge connects for real, so nothing published during the gap is
+    dropped.
+
+    Failure here is not fatal: it only costs that first burst, so it is logged
+    and execution continues.
+
+    Args:
+        config: Relay runtime configuration (local broker address).
+    """
+    client = mqtt.Client(
+        callback_api_version=CallbackAPIVersion.VERSION2,
+        client_id=LOCAL_CLIENT_ID,
+        protocol=MQTT_PROTOCOL_VERSION,
+        clean_session=False,
+    )
+    try:
+        client.connect(config.local_host, config.local_port, keepalive=config.keepalive_seconds)
+        client.loop_start()
+        client.subscribe(ANY_DEVICE_POST_FILTER, qos=QOS_AT_MOST_ONCE)
+        # Give the SUBSCRIBE a moment to reach the broker before dropping the
+        # connection, otherwise the session is stored without it.
+        time.sleep(PRIME_SUBSCRIBE_SETTLE_SECONDS)
+        client.loop_stop()
+        client.disconnect()
+    except OSError as error:
+        _LOGGER.warning(
+            "Could not pre-register the local subscription (%s); messages the feeder "
+            "publishes before the bridge starts may be missed",
+            error,
+        )
+        return
+    _LOGGER.info("Pre-registered local subscription %s for session %s", ANY_DEVICE_POST_FILTER, LOCAL_CLIENT_ID)
 
 
 class MqttBridge:
@@ -94,11 +154,13 @@ class MqttBridge:
         self._topic_prefix = config.topic_prefix_override or f"dl/PLAF203/{identity.client_id}"
         # Device -> cloud only. Never a wildcard covering the "/sub" topics we
         # republish onto locally, or the bridge would consume its own output.
-        self._local_topic_filter = f"{self._topic_prefix}/device/+/post"
+        # Same filter the startup priming registered, so the session the broker
+        # already holds matches exactly and its queued messages are delivered.
+        self._local_topic_filter = ANY_DEVICE_POST_FILTER
         self._legacy_wildcard_filter = f"{self._topic_prefix}/#"
         self._pending_upstream_subscriptions: dict[int, str] = {}
 
-        self._local_client = self._build_client("relay-local")
+        self._local_client = self._build_client(LOCAL_CLIENT_ID)
         self._local_client.on_connect = self._on_local_connect
         self._local_client.on_message = self._on_local_message
         self._local_client.on_disconnect = self._on_local_disconnect

@@ -12,7 +12,7 @@ from .credential_capture_proxy import CredentialCaptureProxy
 from .device_registry import DeviceIdentity, DeviceRegistry
 from .logging_config import configure_logging
 from .message_queue import MessageQueue
-from .mqtt_bridge import MqttBridge
+from .mqtt_bridge import MqttBridge, prime_local_subscription
 from .state_cache import StateCache
 
 _LOGGER = logging.getLogger(__name__)
@@ -95,6 +95,11 @@ def main() -> None:
         registry=registry,
     )
     capture_proxy.start()
+
+    # Register the local subscription before the feeder can connect, so the
+    # broker holds its opening burst for us instead of dropping it while we
+    # are still waiting to learn the device's identity from that same burst.
+    prime_local_subscription(config)
 
     try:
         identity = _resolve_identity(config, registry, stop_event)
