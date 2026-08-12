@@ -159,6 +159,7 @@ class MqttBridge:
         self._local_topic_filter = ANY_DEVICE_POST_FILTER
         self._legacy_wildcard_filter = f"{self._topic_prefix}/#"
         self._pending_upstream_subscriptions: dict[int, str] = {}
+        self._foreign_topics_seen: set[str] = set()
 
         self._local_client = self._build_client(LOCAL_CLIENT_ID)
         self._local_client.on_connect = self._on_local_connect
@@ -255,6 +256,21 @@ class MqttBridge:
         _LOGGER.warning("Disconnected from local broker (reason=%s)", reason_code)
 
     def _on_local_message(self, client: Client, userdata: object, message: MQTTMessage) -> None:
+        # The subscription is device-agnostic so it can be registered before any
+        # identity is known (see prime_local_subscription). This bridge however
+        # holds exactly one device's upstream session, so anything published by
+        # a *different* device must not be forwarded over it - the cloud would
+        # receive one device's traffic authenticated as another.
+        if not message.topic.startswith(f"{self._topic_prefix}/"):
+            if message.topic not in self._foreign_topics_seen:
+                self._foreign_topics_seen.add(message.topic)
+                _LOGGER.warning(
+                    "Ignoring %s: published by a different device than the one this relay bridges (%s). "
+                    "Multiple devices are not supported yet - run one relay per device.",
+                    message.topic,
+                    self._identity.client_id,
+                )
+            return
         _LOGGER.debug("local -> queue(%s): %s (%d bytes)", LOCAL_TO_UPSTREAM, message.topic, len(message.payload))
         self._state_cache.update(message.topic, message.payload)
         self._enqueue(LOCAL_TO_UPSTREAM, message, is_cloud_to_device=False)

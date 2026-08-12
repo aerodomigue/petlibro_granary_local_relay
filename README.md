@@ -56,6 +56,26 @@ run the relay before the feeder has ever connected locally, e.g. during
 development). Otherwise it blocks, polling the registry, until the feeder's
 first local connection has taught it who it is.
 
+Because the bridge can only start *after* an identity is known, and the
+identity comes from the feeder's own connection, the feeder's opening burst
+(`DEVICE_START_EVENT`, NTP handshake) would land before anything is
+subscribed. `prime_local_subscription()` therefore registers the local
+subscription up front, as the same `clean_session=False` client, so the
+broker holds those messages until the bridge connects for real.
+
+Learned identities expire (`PETLIBRO_DEVICE_RETENTION_HOURS`, 72h): anything
+on the LAN can reach the capture proxy and get itself recorded, and the most
+recently seen identity is the one adopted, so entries must not linger
+forever. They are deliberately *not* validated against the cloud first - the
+relay's whole purpose is to keep working while the cloud is unreachable, so
+cloud availability must never gate it.
+
+**One device per relay.** The local subscription is device-agnostic (it has
+to be, to exist before the identity is known), but the bridge holds exactly
+one device's upstream session, so messages from any other device are ignored
+with a warning rather than forwarded over the wrong identity. Run a second
+relay instance for a second feeder.
+
 Two independent MQTT connections, never one client relaying through the
 other's socket directly:
 

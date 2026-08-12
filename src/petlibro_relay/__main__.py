@@ -9,7 +9,7 @@ from types import FrameType
 
 from .config import RelayConfig
 from .credential_capture_proxy import CredentialCaptureProxy
-from .device_registry import DeviceIdentity, DeviceRegistry
+from .device_registry import SECONDS_PER_HOUR, DeviceIdentity, DeviceRegistry
 from .logging_config import configure_logging
 from .message_queue import MessageQueue
 from .mqtt_bridge import MqttBridge, prime_local_subscription
@@ -85,7 +85,11 @@ def main() -> None:
 
     state_cache = StateCache(config.state_cache_path)
     queue = MessageQueue(config.queue_db_path, config.max_queue_size)
-    registry = DeviceRegistry(config.device_registry_db_path)
+    registry = DeviceRegistry(
+        config.device_registry_db_path,
+        retention_seconds=config.device_retention_hours * SECONDS_PER_HOUR,
+    )
+    registry.purge_expired()
 
     capture_proxy = CredentialCaptureProxy(
         listen_host=config.capture_proxy_listen_host,

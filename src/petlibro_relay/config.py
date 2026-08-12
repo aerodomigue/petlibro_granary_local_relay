@@ -15,6 +15,7 @@ DEFAULT_KEEPALIVE_SECONDS = 90
 DEFAULT_STATE_CACHE_PATH = "/data/state_cache.json"
 DEFAULT_QUEUE_DB_PATH = "/data/relay_queue.sqlite3"
 DEFAULT_DEVICE_REGISTRY_DB_PATH = "/data/device_registry.sqlite3"
+DEFAULT_DEVICE_RETENTION_HOURS = 72
 DEFAULT_MAX_QUEUE_SIZE = 5000
 DEFAULT_LOG_LEVEL = "INFO"
 
@@ -45,6 +46,7 @@ class RelayConfig:
     state_cache_path: str
     queue_db_path: str
     device_registry_db_path: str
+    device_retention_hours: float
     max_queue_size: int
     log_level: str
 
@@ -73,6 +75,9 @@ class RelayConfig:
             queue_db_path=os.environ.get("PETLIBRO_QUEUE_DB_PATH", DEFAULT_QUEUE_DB_PATH),
             device_registry_db_path=os.environ.get(
                 "PETLIBRO_DEVICE_REGISTRY_DB_PATH", DEFAULT_DEVICE_REGISTRY_DB_PATH
+            ),
+            device_retention_hours=float(
+                os.environ.get("PETLIBRO_DEVICE_RETENTION_HOURS", DEFAULT_DEVICE_RETENTION_HOURS)
             ),
             max_queue_size=int(os.environ.get("PETLIBRO_MAX_QUEUE_SIZE", DEFAULT_MAX_QUEUE_SIZE)),
             log_level=os.environ.get("PETLIBRO_LOG_LEVEL", DEFAULT_LOG_LEVEL),
