@@ -275,3 +275,29 @@ def test_device_reported_state_is_recorded(responder: LocalResponder, shadow: St
     reported = shadow.get_reported(DEVICE_ID)
     assert reported["rssi"] == -43
     assert reported["last_heartbeat_ts"] == 1786542361000
+
+
+def test_device_ack_of_a_locally_generated_ntp_sync_is_swallowed(responder: LocalResponder) -> None:
+    """The device acks NTP_SYNC with the same msgId; a locally minted one must not reach the cloud.
+
+    Observed on real traffic: the cloud pushes NTP_SYNC and the device replies
+    on ntp/post with `{"cmd":"NTP_SYNC","msgId":<same>,"code":0}`. Forwarding
+    that ack upstream would acknowledge a message the cloud never sent.
+    """
+    action = responder.decide(DEVICE_ID, NTP_POST, NTP_REQUEST, UpstreamState.DISCONNECTED)
+    assert action.decision is Decision.RESPOND_LOCAL
+    minted_msg_id = decode(action.response_payload)["msgId"]
+
+    ack = json.dumps({"cmd": "NTP_SYNC", "msgId": minted_msg_id, "code": 0, "ts": 1}).encode()
+    ack_action = responder.decide(DEVICE_ID, NTP_POST, ack, UpstreamState.DISCONNECTED)
+
+    assert ack_action.decision is Decision.IGNORE
+
+
+def test_device_ack_of_a_cloud_ntp_sync_is_still_forwarded(responder: LocalResponder) -> None:
+    """An ack for a msgId the cloud minted must go upstream as usual."""
+    ack = json.dumps({"cmd": "NTP_SYNC", "msgId": "cloud-minted-id", "code": 0, "ts": 1}).encode()
+
+    action = responder.decide(DEVICE_ID, NTP_POST, ack, UpstreamState.DISCONNECTED)
+
+    assert action.decision is Decision.CACHE_AND_FORWARD

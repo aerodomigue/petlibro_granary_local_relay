@@ -193,6 +193,14 @@ class LocalResponder:
         if not self._settings.enabled or body is None or command is None:
             return ResponderAction(Decision.CACHE_AND_FORWARD)
 
+        # The device acknowledges an NTP_SYNC by posting back the same msgId.
+        # When the sync came from us rather than the cloud, that ack must not
+        # be forwarded: the cloud never issued that msgId and would be acked
+        # for a message it did not send.
+        if self._is_ack_for_local_message(command, body):
+            _LOGGER.debug("Swallowing device ack for locally generated %s", command)
+            return ResponderAction(Decision.IGNORE)
+
         answer_ntp_now = command == protocol.Command.NTP and self._settings.ntp and (
             self._settings.always_answer_ntp_locally or not upstream.is_online
         )
@@ -214,6 +222,16 @@ class LocalResponder:
             self.counters.unknown_requests += 1
             _LOGGER.info("NO LOCAL RESPONSE unknown cmd=%s", command)
         return ResponderAction(Decision.CACHE_AND_FORWARD)
+
+    def _is_ack_for_local_message(self, command: str, body: dict[str, Any]) -> bool:
+        """True if this device message acknowledges something we generated ourselves."""
+        if command != protocol.Command.NTP_SYNC:
+            return False
+        msg_id = body.get("msgId")
+        if not isinstance(msg_id, str):
+            return False
+        self._expire_handled_msg_ids()
+        return msg_id in self._handled_msg_ids
 
     def _record_reported(self, device_id: str, command: str, body: dict[str, Any]) -> None:
         """Store physical facts the device reported. Never synthesised."""
@@ -262,9 +280,11 @@ class LocalResponder:
 
         self.counters.local_responses += 1
         _LOGGER.info("LOCAL RESPONSE NTP msgId=%s offset=%ds", msg_id, schedule.offset_seconds)
-        # The device's NTP request carries no msgId, so there is no correlation
-        # id to remember - a late cloud NTP_SYNC is harmless (it just re-syncs).
-        return self._reply(device_id, "ntp", payload, handled_msg_id=None)
+        # Remember the msgId we minted: the device acks an NTP_SYNC by posting
+        # the same msgId back, and that ack must be swallowed rather than sent
+        # to a cloud that never issued it. (Observed on real traffic: cloud
+        # pushes NTP_SYNC, device replies NTP_SYNC/code=0 with the same msgId.)
+        return self._reply(device_id, "ntp", payload, handled_msg_id=msg_id)
 
     def _respond_feeding_plan(self, device_id: str, body: dict[str, Any]) -> ResponderAction:
         """Reply with the last complete plan set the cloud sent, if we have one."""

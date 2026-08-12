@@ -299,11 +299,16 @@ those fields, and `dst_schedule.py` computes them from the IANA zone. Against
 the real cloud payload captured on 2026-08-12 for `Europe/Paris`, all five
 values match exactly.
 
-Caveat, stated plainly: we have observed `NTP_SYNC` from the cloud, but never
-managed to capture a `NTP` request and its reply *in the same exchange*, so
-whether the cloud always answers an `NTP` post with `NTP_SYNC` (rather than a
-`cmd: NTP` reply, which icex2 also documents) is not fully confirmed for this
-firmware. That is why `PETLIBRO_LOCAL_NTP` ships off.
+A full exchange has since been captured, confirming the shape and correcting
+one assumption: the cloud **pushes** `NTP_SYNC` (with a msgId it mints), and
+the device **acknowledges** it on `ntp/post` with the same msgId and
+`code: 0`. The locally generated sync therefore remembers its own msgId so
+that ack is swallowed rather than forwarded to a cloud that never issued it.
+
+`PETLIBRO_LOCAL_NTP` still ships off: the payload is confirmed, but what the
+cloud replies to the device's own `cmd: NTP` *request* (as opposed to these
+unsolicited pushes) has not been observed, so enabling it remains a
+deliberate choice.
 
 ## References
 
