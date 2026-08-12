@@ -21,6 +21,7 @@ DEFAULT_DEVICE_RETENTION_HOURS = 72
 DEFAULT_STATE_SHADOW_DB_PATH = "/data/state_shadow.sqlite3"
 DEFAULT_DEVICE_TIMEZONE = "UTC"
 DEFAULT_HANDLED_MSG_ID_TTL_SECONDS = 120.0
+DEFAULT_CLOCK_DRIFT_TOLERANCE_SECONDS = 10.0
 DEFAULT_MAX_QUEUE_SIZE = 5000
 DEFAULT_LOG_LEVEL = "INFO"
 
@@ -131,4 +132,9 @@ def _local_responder_from_env() -> LocalResponderSettings:
         feeding_plan=enabled and _env_flag("PETLIBRO_LOCAL_FEEDING_PLAN"),
         always_answer_ntp_locally=_env_flag("PETLIBRO_LOCAL_NTP_ALWAYS"),
         device_timezone=os.environ.get("PETLIBRO_DEVICE_TIMEZONE", DEFAULT_DEVICE_TIMEZONE),
+        clock_drift_tolerance_seconds=float(
+            os.environ.get(
+                "PETLIBRO_CLOCK_DRIFT_TOLERANCE_SECONDS", DEFAULT_CLOCK_DRIFT_TOLERANCE_SECONDS
+            )
+        ),
     )

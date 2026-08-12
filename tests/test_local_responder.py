@@ -7,6 +7,7 @@ firmware V3.0.30, not invented shapes.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -301,3 +302,36 @@ def test_device_ack_of_a_cloud_ntp_sync_is_still_forwarded(responder: LocalRespo
     action = responder.decide(DEVICE_ID, NTP_POST, ack, UpstreamState.DISCONNECTED)
 
     assert action.decision is Decision.CACHE_AND_FORWARD
+
+
+def test_ntp_request_with_a_correct_clock_gets_no_answer(responder: LocalResponder) -> None:
+    """Mirror the cloud: a device whose clock is already right is left alone.
+
+    Observed on real traffic - the cloud pushes NTP_SYNC on session start and
+    when it sees drift, but left a healthy device's NTP post unanswered.
+    """
+    in_sync = json.dumps({"cmd": "NTP", "ts": int(time.time() * 1000)}).encode()
+
+    action = responder.decide(DEVICE_ID, NTP_POST, in_sync, UpstreamState.DISCONNECTED)
+
+    assert action.decision is Decision.CACHE_AND_FORWARD
+    assert action.response_payload is None
+
+
+def test_ntp_request_with_a_drifted_clock_is_resynced(responder: LocalResponder) -> None:
+    """A clock off by more than the tolerance does get an NTP_SYNC."""
+    drifted = json.dumps({"cmd": "NTP", "ts": int((time.time() - 3600) * 1000)}).encode()
+
+    action = responder.decide(DEVICE_ID, NTP_POST, drifted, UpstreamState.DISCONNECTED)
+
+    assert action.decision is Decision.RESPOND_LOCAL
+    assert decode(action.response_payload)["cmd"] == "NTP_SYNC"
+
+
+def test_ntp_request_without_a_usable_clock_is_resynced(responder: LocalResponder) -> None:
+    """An unreadable timestamp is corrected rather than silently ignored."""
+    action = responder.decide(
+        DEVICE_ID, NTP_POST, json.dumps({"cmd": "NTP"}).encode(), UpstreamState.DISCONNECTED
+    )
+
+    assert action.decision is Decision.RESPOND_LOCAL

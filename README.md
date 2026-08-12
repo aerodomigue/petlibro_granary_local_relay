@@ -251,7 +251,7 @@ interpreted.
 
 | Command | Answer | Source of truth |
 |---|---|---|
-| `NTP` | `NTP_SYNC` with the current UTC offset and the next two DST transitions | generated locally - clocks are a safe local service |
+| `NTP` | `NTP_SYNC` with the current UTC offset and the next two DST transitions, **only if the device's clock has drifted** past `PETLIBRO_CLOCK_DRIFT_TOLERANCE_SECONDS` (10s) | generated locally - clocks are a safe local service |
 | `FEEDING_PLAN_SERVICE` | the cached complete plan set, echoing the request's `msgId` | cloud's last-known-good |
 | `ATTR_GET_SERVICE` | the cached settings, echoing the request's `msgId` | cloud's last-known-good |
 

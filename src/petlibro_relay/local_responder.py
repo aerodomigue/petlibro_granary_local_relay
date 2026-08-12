@@ -102,6 +102,10 @@ class LocalResponderSettings:
     feeding_plan: bool = False
     always_answer_ntp_locally: bool = False
     device_timezone: str = "UTC"
+    # Below this drift the device's clock is considered correct and no
+    # NTP_SYNC is sent, matching the cloud's observed behaviour. 10s is the
+    # threshold icex2 measured on a neighbouring firmware.
+    clock_drift_tolerance_seconds: float = 10.0
 
 
 class LocalResponder:
@@ -201,10 +205,17 @@ class LocalResponder:
             _LOGGER.debug("Swallowing device ack for locally generated %s", command)
             return ResponderAction(Decision.IGNORE)
 
-        answer_ntp_now = command == protocol.Command.NTP and self._settings.ntp and (
+        may_answer_ntp = command == protocol.Command.NTP and self._settings.ntp and (
             self._settings.always_answer_ntp_locally or not upstream.is_online
         )
-        if answer_ntp_now:
+        if may_answer_ntp:
+            if not self._device_clock_has_drifted(body):
+                # Mirror the cloud: an NTP post whose clock is already correct
+                # gets no answer. Observed on real traffic - the cloud pushes
+                # NTP_SYNC on session start and when it sees drift, but left a
+                # healthy device's NTP request unanswered.
+                _LOGGER.debug("Device clock within tolerance, no NTP_SYNC needed")
+                return ResponderAction(Decision.CACHE_AND_FORWARD)
             return self._respond_ntp(device_id)
 
         if upstream.is_online:
@@ -222,6 +233,19 @@ class LocalResponder:
             self.counters.unknown_requests += 1
             _LOGGER.info("NO LOCAL RESPONSE unknown cmd=%s", command)
         return ResponderAction(Decision.CACHE_AND_FORWARD)
+
+    def _device_clock_has_drifted(self, body: dict[str, Any]) -> bool:
+        """True if the device's reported time is far enough off to warrant a resync.
+
+        The device puts its current clock in the `ts` of its NTP post. A
+        request with no usable timestamp is treated as drifted, so an
+        unparseable clock still gets corrected rather than silently ignored.
+        """
+        device_ts = body.get("ts")
+        if not isinstance(device_ts, (int, float)):
+            return True
+        drift_seconds = abs(time.time() - device_ts / MILLISECONDS_PER_SECOND)
+        return drift_seconds > self._settings.clock_drift_tolerance_seconds
 
     def _is_ack_for_local_message(self, command: str, body: dict[str, Any]) -> bool:
         """True if this device message acknowledges something we generated ourselves."""
