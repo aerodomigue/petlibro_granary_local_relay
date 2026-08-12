@@ -9,6 +9,7 @@ import time
 import paho.mqtt.client as mqtt
 
 from .message_queue import MessageQueue
+from .observability.telemetry import RelayTelemetry
 from .replay_policy import extract_command, policy_for
 
 _LOGGER = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ class DeliveryPump:
         queue: MessageQueue,
         destination_client: mqtt.Client,
         is_cloud_to_device: bool,
+        telemetry: RelayTelemetry | None = None,
     ) -> None:
         """Initialize the pump.
 
@@ -50,11 +52,13 @@ class DeliveryPump:
             is_cloud_to_device: Whether this direction carries commands that
                 act on the physical world when delivered, and therefore need
                 replay policies applied.
+            telemetry: Optional runtime-only counters for the dashboard.
         """
         self._direction = direction
         self._queue = queue
         self._destination_client = destination_client
         self._is_cloud_to_device = is_cloud_to_device
+        self._telemetry = telemetry
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, name=f"pump-{direction}", daemon=True)
         self._had_backlog_during_outage = False
@@ -85,10 +89,14 @@ class DeliveryPump:
 
             if self._is_expired(message.payload, message.created_at, message.topic):
                 self._queue.remove(message.id)
+                if self._telemetry is not None:
+                    self._telemetry.increment("queue_expired")
                 continue
 
             if self._publish_confirmed(message.topic, message.payload, message.qos):
                 self._queue.remove(message.id)
+                if self._telemetry is not None:
+                    self._telemetry.increment(f"queue_delivered_{self._direction}")
             else:
                 self._stop_event.wait(PUBLISH_RETRY_INTERVAL_SECONDS)
 
@@ -152,4 +160,6 @@ class DeliveryPump:
                 self._direction,
                 pending,
             )
+            if self._telemetry is not None:
+                self._telemetry.increment(f"queue_replayed_{self._direction}", pending)
         self._had_backlog_during_outage = False

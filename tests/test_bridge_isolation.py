@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -20,6 +21,7 @@ from petlibro_relay.local_responder import LocalResponderSettings
 from petlibro_relay.message_queue import MessageQueue
 from petlibro_relay.mqtt_bridge import LOCAL_TO_UPSTREAM, MqttBridge
 from petlibro_relay.state_cache import StateCache
+from paho.mqtt.client import Client, MQTTMessage
 
 ACTIVE_DEVICE = DeviceIdentity(client_id="DEVICE-A", username="user-a", password="pass-a")
 ACTIVE_TOPIC = "dl/PLAF203/DEVICE-A/device/event/post"
@@ -58,6 +60,9 @@ def bridge(tmp_path: Path) -> Iterator[tuple[MqttBridge, MessageQueue]]:
         state_shadow_db_path=str(tmp_path / "shadow.sqlite3"),
         handled_msg_id_ttl_seconds=120.0,
         local_responder=LocalResponderSettings(),
+        web_enabled=False,
+        web_host="127.0.0.1",
+        web_port=8080,
         max_queue_size=100,
         log_level="INFO",
     )
@@ -71,7 +76,7 @@ def test_active_device_traffic_is_queued(bridge: tuple[MqttBridge, MessageQueue]
     """The active device's own /post traffic is forwarded upstream."""
     instance, queue = bridge
 
-    instance._on_local_message(None, None, FakeMessage(ACTIVE_TOPIC, PAYLOAD))
+    instance._on_local_message(cast(Client, None), None, cast(MQTTMessage, FakeMessage(ACTIVE_TOPIC, PAYLOAD)))
 
     assert queue.count(LOCAL_TO_UPSTREAM) == 1
 
@@ -80,7 +85,7 @@ def test_foreign_device_traffic_is_never_queued(bridge: tuple[MqttBridge, Messag
     """Test 6: another device's traffic must not ride the active device's session."""
     instance, queue = bridge
 
-    instance._on_local_message(None, None, FakeMessage(FOREIGN_TOPIC, PAYLOAD))
+    instance._on_local_message(cast(Client, None), None, cast(MQTTMessage, FakeMessage(FOREIGN_TOPIC, PAYLOAD)))
 
     assert queue.count(LOCAL_TO_UPSTREAM) == 0, (
         "a foreign device's message must never enter the active device's upstream queue"
@@ -94,7 +99,9 @@ def test_prefix_lookalike_is_not_treated_as_the_active_device(
     instance, queue = bridge
 
     instance._on_local_message(
-        None, None, FakeMessage("dl/PLAF203/DEVICE-A-EVIL/device/event/post", PAYLOAD)
+        cast(Client, None),
+        None,
+        cast(MQTTMessage, FakeMessage("dl/PLAF203/DEVICE-A-EVIL/device/event/post", PAYLOAD)),
     )
 
     assert queue.count(LOCAL_TO_UPSTREAM) == 0

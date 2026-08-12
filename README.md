@@ -310,6 +310,30 @@ cloud replies to the device's own `cmd: NTP` *request* (as opposed to these
 unsolicited pushes) has not been observed, so enabling it remains a
 deliberate choice.
 
+## Read-only observability dashboard
+
+Set `PETLIBRO_WEB_ENABLED=true` to start the integrated FastAPI dashboard on
+`PETLIBRO_WEB_HOST:PETLIBRO_WEB_PORT` (default `0.0.0.0:8080`). It is
+strictly read-only: no HTTP endpoint publishes MQTT or changes the feeder.
+The UI has Overview, Cloud, Devices, Queues, State, NTP, Logs and System
+tabs, backed by versionable JSON endpoints:
+
+```
+GET /healthz
+GET /api/status     GET /api/cloud      GET /api/devices
+GET /api/queues     GET /api/state      GET /api/ntp
+GET /api/logs       GET /api/logs/stream (SSE)
+GET /api/system
+```
+
+`/healthz` reports the local relay only: PETLIBRO being down remains HTTP
+200, while its exact `DISCONNECTED` / `MQTT_CONNECTING` / `ONLINE` state and
+the last 15m/1h/24h observed availability remain visible in the Cloud tab.
+Logs are retained in a process-local ring buffer (5,000 entries), sanitized
+before API/SSE exposure; passwords, secrets, tokens and full MQTT usernames
+are never rendered. Keep the port LAN-only: diagnostics still contain device
+IDs, topics, local IP/state and operational history.
+
 ## References
 
 - [`icex2/plaf203`](https://github.com/icex2/plaf203) - independently reverse-engineered

@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -211,6 +212,53 @@ class MessageQueue:
                 _LOGGER.exception("Failed to count queue %s", direction)
                 raise
         return int(pending_count)
+
+    def snapshot(self, direction: str, limit: int = 100) -> dict[str, object]:
+        """Return a bounded, metadata-only view of a queue direction.
+
+        Raw payloads stay in the State Shadow endpoint. This avoids exposing
+        the same potentially sensitive traffic through two unrelated views.
+        """
+        safe_limit = max(1, min(limit, 500))
+        now = time.time()
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT id, topic, payload, qos, created_at FROM pending_messages "
+                "WHERE direction = ? ORDER BY id ASC LIMIT ?",
+                (direction, safe_limit),
+            ).fetchall()
+            aggregate = self._connection.execute(
+                "SELECT COUNT(*), MIN(created_at), MAX(created_at) FROM pending_messages WHERE direction = ?",
+                (direction,),
+            ).fetchone()
+        total, oldest, newest = aggregate
+        from .replay_policy import extract_command, policy_for
+
+        messages = []
+        for message_id, topic, payload, qos, created_at in rows:
+            command = extract_command(payload)
+            policy = policy_for(direction == "upstream-to-local", command)
+            policy_name = "LATEST_WINS" if policy.coalesce else (
+                "FIFO" if policy.max_age_seconds is None else f"TTL_{int(policy.max_age_seconds)}S"
+            )
+            messages.append(
+                {
+                    "id": int(message_id),
+                    "topic": topic,
+                    "cmd": command,
+                    "qos": int(qos),
+                    "created_at": float(created_at),
+                    "age_seconds": now - float(created_at),
+                    "replay_policy": policy_name,
+                }
+            )
+        return {
+            "direction": direction,
+            "pending": int(total),
+            "oldest_age_seconds": now - float(oldest) if oldest is not None else None,
+            "newest_age_seconds": now - float(newest) if newest is not None else None,
+            "messages": messages,
+        }
 
     def close(self) -> None:
         """Close the underlying database connection."""

@@ -28,7 +28,7 @@ import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum, auto
 from typing import Any
 
@@ -127,6 +127,18 @@ class LocalResponder:
         self._handled_msg_id_ttl_seconds = handled_msg_id_ttl_seconds
         self._handled_msg_ids: dict[str, float] = {}
         self.counters = ResponderCounters()
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return feature flags and counters for read-only observability."""
+        return {
+            "enabled": self._settings.enabled,
+            "ntp_enabled": self._settings.ntp,
+            "config_enabled": self._settings.config,
+            "feeding_plan_enabled": self._settings.feeding_plan,
+            "always_answer_ntp_locally": self._settings.always_answer_ntp_locally,
+            "device_timezone": self._settings.device_timezone,
+            "counters": asdict(self.counters),
+        }
 
     # -- cloud -> device: learn ---------------------------------------------------
 

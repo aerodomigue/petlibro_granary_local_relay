@@ -24,6 +24,9 @@ DEFAULT_HANDLED_MSG_ID_TTL_SECONDS = 120.0
 DEFAULT_CLOCK_DRIFT_TOLERANCE_SECONDS = 10.0
 DEFAULT_MAX_QUEUE_SIZE = 5000
 DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_WEB_ENABLED = False
+DEFAULT_WEB_HOST = "0.0.0.0"
+DEFAULT_WEB_PORT = 8080
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +59,9 @@ class RelayConfig:
     state_shadow_db_path: str
     handled_msg_id_ttl_seconds: float
     local_responder: LocalResponderSettings
+    web_enabled: bool
+    web_host: str
+    web_port: int
     max_queue_size: int
     log_level: str
 
@@ -97,6 +103,9 @@ class RelayConfig:
                 )
             ),
             local_responder=_local_responder_from_env(),
+            web_enabled=_env_flag("PETLIBRO_WEB_ENABLED", DEFAULT_WEB_ENABLED),
+            web_host=os.environ.get("PETLIBRO_WEB_HOST", DEFAULT_WEB_HOST),
+            web_port=int(os.environ.get("PETLIBRO_WEB_PORT", DEFAULT_WEB_PORT)),
             max_queue_size=int(os.environ.get("PETLIBRO_MAX_QUEUE_SIZE", DEFAULT_MAX_QUEUE_SIZE)),
             log_level=os.environ.get("PETLIBRO_LOG_LEVEL", DEFAULT_LOG_LEVEL),
         )

@@ -46,6 +46,7 @@ from .delivery_pump import DeliveryPump
 from .device_registry import DeviceIdentity
 from .local_responder import Decision, LocalResponder, UpstreamState
 from .message_queue import MessageQueue
+from .observability.telemetry import RelayTelemetry
 from .replay_policy import coalesce_key_for, extract_command, policy_for
 from .state_cache import StateCache
 
@@ -142,6 +143,7 @@ class MqttBridge:
         state_cache: StateCache,
         queue: MessageQueue,
         responder: LocalResponder | None = None,
+        telemetry: RelayTelemetry | None = None,
     ) -> None:
         """Initialize the bridge, its two MQTT clients, and their delivery pumps.
 
@@ -154,12 +156,14 @@ class MqttBridge:
             queue: Durable queue backing both delivery directions.
             responder: Optional local responder. When absent the bridge is a
                 pure pipe, exactly as before this feature existed.
+            telemetry: Optional runtime-only telemetry for observability.
         """
         self._config = config
         self._identity = identity
         self._state_cache = state_cache
         self._queue = queue
         self._responder = responder
+        self._telemetry = telemetry
         self._upstream_state = UpstreamState.DISCONNECTED
         self._topic_prefix = config.topic_prefix_override or f"dl/PLAF203/{identity.client_id}"
         # Device -> cloud only. Never a wildcard covering the "/sub" topics we
@@ -188,10 +192,18 @@ class MqttBridge:
         self._upstream_client.on_disconnect = self._on_upstream_disconnect
 
         self._local_to_upstream_pump = DeliveryPump(
-            LOCAL_TO_UPSTREAM, queue, self._upstream_client, is_cloud_to_device=False
+            LOCAL_TO_UPSTREAM,
+            queue,
+            self._upstream_client,
+            is_cloud_to_device=False,
+            telemetry=telemetry,
         )
         self._upstream_to_local_pump = DeliveryPump(
-            UPSTREAM_TO_LOCAL, queue, self._local_client, is_cloud_to_device=True
+            UPSTREAM_TO_LOCAL,
+            queue,
+            self._local_client,
+            is_cloud_to_device=True,
+            telemetry=telemetry,
         )
 
     def _build_client(
@@ -210,6 +222,8 @@ class MqttBridge:
 
     def run_forever(self) -> None:
         """Connect both clients, start the delivery pumps, and block until `stop()`."""
+        if self._telemetry is not None:
+            self._telemetry.upstream_connect_attempt()
         self._local_client.connect_async(
             self._config.local_host, self._config.local_port, keepalive=self._config.keepalive_seconds
         )
@@ -244,6 +258,8 @@ class MqttBridge:
         properties: Properties | None,
     ) -> None:
         _LOGGER.info("Connected to local broker (reason=%s)", reason_code)
+        if self._telemetry is not None:
+            self._telemetry.local_connected()
         # We connect with clean_session=False so the broker holds messages the
         # feeder published while the relay was down. The flip side is that the
         # broker also restores our *old* subscriptions: an earlier version of
@@ -264,6 +280,8 @@ class MqttBridge:
         properties: Properties | None,
     ) -> None:
         _LOGGER.warning("Disconnected from local broker (reason=%s)", reason_code)
+        if self._telemetry is not None:
+            self._telemetry.local_disconnected()
 
     def _on_local_message(self, client: Client, userdata: object, message: MQTTMessage) -> None:
         # The subscription is device-agnostic so it can be registered before any
@@ -283,6 +301,7 @@ class MqttBridge:
             return
         _LOGGER.debug("local -> queue(%s): %s (%d bytes)", LOCAL_TO_UPSTREAM, message.topic, len(message.payload))
         self._state_cache.update(message.topic, message.payload)
+        self._observe_ntp(message.payload, source="device")
 
         if self._responder is not None:
             action = self._responder.decide(
@@ -294,6 +313,8 @@ class MqttBridge:
                 # second time (see README, "Local responder").
                 if action.response_topic is not None and action.response_payload is not None:
                     client.publish(action.response_topic, action.response_payload, qos=QOS_AT_MOST_ONCE)
+                    if self._telemetry is not None:
+                        self._telemetry.increment("local_responses")
                 return
             if action.decision is Decision.IGNORE:
                 return
@@ -316,9 +337,13 @@ class MqttBridge:
         if reason_code.is_failure:
             _LOGGER.warning("Upstream refused the connection (reason=%s)", reason_code)
             self._upstream_state = UpstreamState.DISCONNECTED
+            if self._telemetry is not None:
+                self._telemetry.upstream_refused()
             return
         was_offline = not self._upstream_state.is_online
         self._upstream_state = UpstreamState.ONLINE
+        if self._telemetry is not None:
+            self._telemetry.upstream_online()
         if was_offline:
             _LOGGER.info("UPSTREAM restored")
         _LOGGER.info("Connected to upstream PETLIBRO broker (reason=%s)", reason_code)
@@ -338,6 +363,8 @@ class MqttBridge:
         # some of mqtt.us.petlibro.com's DNS-round-robin IPs) surfaces instead as
         # an on_disconnect warning once the keepalive timeout gives up on it.
         _LOGGER.warning("Failed to establish TCP connection to upstream PETLIBRO broker, retrying")
+        if self._telemetry is not None:
+            self._telemetry.upstream_connect_failed()
 
     def _on_upstream_subscribe(
         self,
@@ -366,12 +393,16 @@ class MqttBridge:
     ) -> None:
         self._upstream_state = UpstreamState.DISCONNECTED
         _LOGGER.warning("Disconnected from upstream PETLIBRO broker (reason=%s)", reason_code)
+        if self._telemetry is not None:
+            self._telemetry.upstream_disconnected(str(reason_code))
+            self._telemetry.upstream_connect_attempt()
 
     def _on_upstream_message(self, client: Client, userdata: object, message: MQTTMessage) -> None:
         _LOGGER.debug(
             "upstream -> queue(%s): %s (%d bytes)", UPSTREAM_TO_LOCAL, message.topic, len(message.payload)
         )
         self._state_cache.update(message.topic, message.payload)
+        self._observe_ntp(message.payload, source="cloud")
 
         if self._responder is not None:
             # Learn from the cloud first: this is where last-known-good config
@@ -380,6 +411,8 @@ class MqttBridge:
                 self._identity.client_id, message.topic, message.payload
             )
             if self._responder.is_suppressed_cloud_response(message.payload):
+                if self._telemetry is not None:
+                    self._telemetry.increment("suppressed_late_cloud_responses")
                 return
 
         self._enqueue(UPSTREAM_TO_LOCAL, message, is_cloud_to_device=True)
@@ -392,3 +425,13 @@ class MqttBridge:
         policy = policy_for(is_cloud_to_device, command)
         coalesce_key = coalesce_key_for(message.topic, command, policy)
         self._queue.enqueue(direction, message.topic, message.payload, message.qos, coalesce_key)
+
+    def _observe_ntp(self, payload: bytes, source: str) -> None:
+        """Record NTP session-establishment traffic without changing its flow."""
+        if self._telemetry is None:
+            return
+        command = extract_command(payload)
+        if command == "NTP" and source == "device":
+            self._telemetry.increment("ntp_requests")
+        elif command == "NTP_SYNC":
+            self._telemetry.increment(f"ntp_sync_from_{source}")

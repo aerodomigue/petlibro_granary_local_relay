@@ -14,8 +14,11 @@ from .local_responder import LocalResponder
 from .logging_config import configure_logging
 from .message_queue import MessageQueue
 from .mqtt_bridge import MqttBridge, prime_local_subscription
+from .observability.telemetry import RelayTelemetry
 from .state_cache import StateCache
 from .state_shadow import StateShadow
+from .web.context import DashboardContext
+from .web.server import DashboardServer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,7 +74,7 @@ def _resolve_identity(
 def main() -> None:
     """Load configuration and run the MQTT bridge until a shutdown signal is received."""
     config = RelayConfig.from_env()
-    configure_logging(config.log_level)
+    log_buffer = configure_logging(config.log_level)
     _LOGGER.info(
         "Starting petlibro-relay (upstream=%s:%d, local=%s:%d, capture-proxy=%s:%d)",
         config.upstream_host,
@@ -88,11 +91,18 @@ def main() -> None:
     state_cache = StateCache(config.state_cache_path)
     shadow = StateShadow(config.state_shadow_db_path)
     queue = MessageQueue(config.queue_db_path, config.max_queue_size)
+    telemetry = RelayTelemetry()
     registry = DeviceRegistry(
         config.device_registry_db_path,
         retention_seconds=config.device_retention_hours * SECONDS_PER_HOUR,
     )
     registry.purge_expired()
+
+    dashboard_context = DashboardContext(config, registry, queue, shadow, telemetry, log_buffer)
+    dashboard_server: DashboardServer | None = None
+    if config.web_enabled:
+        dashboard_server = DashboardServer(dashboard_context, config.web_host, config.web_port)
+        dashboard_server.start()
 
     capture_proxy = CredentialCaptureProxy(
         listen_host=config.capture_proxy_listen_host,
@@ -117,6 +127,7 @@ def main() -> None:
         responder = LocalResponder(
             config.local_responder, shadow, config.handled_msg_id_ttl_seconds
         )
+        dashboard_context.set_active_device(identity, responder)
         if config.local_responder.enabled:
             _LOGGER.info(
                 "Local responder enabled (ntp=%s, config=%s, feeding_plan=%s, tz=%s)",
@@ -128,13 +139,15 @@ def main() -> None:
         else:
             _LOGGER.info("Local responder disabled - relay is a pure pipe")
 
-        bridge = MqttBridge(config, identity, state_cache, queue, responder)
+        bridge = MqttBridge(config, identity, state_cache, queue, responder, telemetry)
         bridge.run_forever()
         try:
             stop_event.wait()
         finally:
             bridge.stop()
     finally:
+        if dashboard_server is not None:
+            dashboard_server.stop()
         capture_proxy.stop()
         queue.close()
         registry.close()

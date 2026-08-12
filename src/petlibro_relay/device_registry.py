@@ -84,6 +84,17 @@ class DeviceIdentity:
     password: str
 
 
+@dataclass(frozen=True, slots=True)
+class DeviceRegistryEntry:
+    """Non-secret device identity metadata for observability."""
+
+    client_id: str
+    username: str
+    first_seen_at: float
+    last_seen_at: float
+    active: bool
+
+
 class DeviceRegistry:
     """SQLite-backed store of device identities, with a sticky active device."""
 
@@ -255,6 +266,32 @@ class DeviceRegistry:
                 _LOGGER.exception("Failed to list candidate device identities")
                 raise
         return [DeviceIdentity(client_id=r[0], username=r[1], password=r[2]) for r in rows]
+
+    def snapshot(self) -> dict[str, object]:
+        """Return active/candidate metadata without exposing passwords."""
+        now = time.time()
+        with self._lock:
+            active_client_id = self._read_state_locked(ACTIVE_CLIENT_ID_KEY)
+            rows = self._connection.execute(
+                "SELECT client_id, username, first_seen_at, last_seen_at FROM device_identities "
+                "ORDER BY last_seen_at DESC"
+            ).fetchall()
+        entries = [
+            DeviceRegistryEntry(
+                client_id=str(client_id),
+                username=str(username),
+                first_seen_at=float(first_seen_at),
+                last_seen_at=float(last_seen_at),
+                active=client_id == active_client_id,
+            )
+            for client_id, username, first_seen_at, last_seen_at in rows
+        ]
+        active = next((entry for entry in entries if entry.active and now - entry.last_seen_at <= self._retention_seconds), None)
+        return {
+            "active": active,
+            "candidates": [entry for entry in entries if not entry.active and now - entry.last_seen_at <= self._retention_seconds],
+            "retention_seconds": self._retention_seconds,
+        }
 
     def purge_expired(self) -> int:
         """Forget identities whose device has not connected within the retention window.

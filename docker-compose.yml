@@ -44,6 +44,9 @@ services:
       - ${PETLIBRO_UPSTREAM_DNS_SECONDARY:-9.9.9.9}
     ports:
       - "${PETLIBRO_HOST_PORT:-1883}:${PETLIBRO_CAPTURE_PROXY_PORT:-1883}"
+      # Read-only LAN dashboard. It is disabled by default inside the relay;
+      # set PETLIBRO_WEB_ENABLED=true before this listener serves HTTP.
+      - "${PETLIBRO_WEB_HOST_PORT:-8080}:${PETLIBRO_WEB_PORT:-8080}"
     volumes:
       - relay-data:/data
 

@@ -225,7 +225,69 @@ class StateShadow:
             },
         }
 
+    def dashboard_snapshot(self, device_id: str, raw_limit: int = 100) -> dict[str, Any]:
+        """Return bounded state with timestamps and safe raw JSON previews."""
+        safe_limit = max(1, min(raw_limit, 500))
+        with self._lock:
+            reported_rows = self._connection.execute(
+                "SELECT key, value, updated_at FROM device_reported WHERE device_id = ? ORDER BY key",
+                (device_id,),
+            ).fetchall()
+            desired_rows = self._connection.execute(
+                "SELECT key, value, updated_at FROM cloud_desired WHERE device_id = ? ORDER BY key",
+                (device_id,),
+            ).fetchall()
+            raw_rows = self._connection.execute(
+                "SELECT topic, payload, cmd, updated_at FROM raw_messages WHERE device_id = ? "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (device_id, safe_limit),
+            ).fetchall()
+            raw_count = self._connection.execute(
+                "SELECT COUNT(*) FROM raw_messages WHERE device_id = ?", (device_id,)
+            ).fetchone()[0]
+        plans = self.get_feeding_plans(device_id)
+        return {
+            "device_id": device_id,
+            "reported": [
+                {"key": key, "value": json.loads(value), "updated_at": float(updated_at)}
+                for key, value, updated_at in reported_rows
+            ],
+            "desired": [
+                {"key": key, "value": json.loads(value), "updated_at": float(updated_at)}
+                for key, value, updated_at in desired_rows
+            ],
+            "feeding_plans": {
+                "plans": plans.plans if plans else [],
+                "source_msg_id": plans.source_msg_id if plans else None,
+                "updated_at": plans.updated_at if plans else None,
+                "complete": plans is not None,
+            },
+            "raw_messages": [
+                {
+                    "topic": topic,
+                    "cmd": command,
+                    "payload": _decode_raw_payload(payload),
+                    "updated_at": float(updated_at),
+                }
+                for topic, payload, command, updated_at in raw_rows
+            ],
+            "counts": {
+                "reported": len(reported_rows),
+                "desired": len(desired_rows),
+                "raw_messages": int(raw_count),
+                "feeding_plan_cached": plans is not None,
+            },
+        }
+
     def close(self) -> None:
         """Close the underlying database connection."""
         with self._lock:
             self._connection.close()
+
+
+def _decode_raw_payload(payload: bytes) -> Any:
+    """Decode JSON raw traffic when possible; otherwise expose a safe text form."""
+    try:
+        return json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return payload.decode("utf-8", errors="replace")

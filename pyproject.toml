@@ -8,7 +8,9 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.141.1",
     "paho-mqtt>=2.1.0",
+    "uvicorn[standard]>=0.52.1",
 ]
 
 [build-system]
@@ -17,6 +19,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.10.0",
     "mypy>=2.3.0",
     "pytest>=9.1.1",
 ]
