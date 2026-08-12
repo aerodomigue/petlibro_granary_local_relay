@@ -13,7 +13,20 @@ handed off to a `MessageQueue` (durable, survives restarts) and a
 `DeliveryPump` drains each direction independently. This means a stalled or
 offline broker on one side never blocks traffic on the other, and whatever
 arrived during an outage is replayed, in order, once the destination is
-reachable again.
+reachable again (subject to `replay_policy`, which drops commands that are
+unsafe to act on late).
+
+The two directions must never overlap in the topics they listen to, or the
+bridge feeds itself: MQTT 3.1 has no "no local" subscription option, so a
+client subscribed to a filter covering what it publishes receives its own
+messages back from the broker. Subscribing locally to `<prefix>/#` while
+republishing cloud commands onto `<prefix>/device/<cat>/sub` did exactly
+that, and each lap also re-published upstream (where we subscribe to the
+same `/sub` topics), amplifying without bound. The split is therefore
+strict and directional:
+
+    device -> cloud :  local subscribes to  <prefix>/device/+/post
+    cloud -> device :  upstream subscribes to <prefix>/device/<cat>/sub
 """
 
 from __future__ import annotations
@@ -31,6 +44,7 @@ from .config import RelayConfig
 from .delivery_pump import DeliveryPump
 from .device_registry import DeviceIdentity
 from .message_queue import MessageQueue
+from .replay_policy import coalesce_key_for, extract_command, policy_for
 from .state_cache import StateCache
 
 _LOGGER = logging.getLogger(__name__)
@@ -78,7 +92,10 @@ class MqttBridge:
         self._state_cache = state_cache
         self._queue = queue
         self._topic_prefix = config.topic_prefix_override or f"dl/PLAF203/{identity.client_id}"
-        self._topic_filter = f"{self._topic_prefix}/#"
+        # Device -> cloud only. Never a wildcard covering the "/sub" topics we
+        # republish onto locally, or the bridge would consume its own output.
+        self._local_topic_filter = f"{self._topic_prefix}/device/+/post"
+        self._legacy_wildcard_filter = f"{self._topic_prefix}/#"
         self._pending_upstream_subscriptions: dict[int, str] = {}
 
         self._local_client = self._build_client("relay-local")
@@ -97,8 +114,12 @@ class MqttBridge:
         self._upstream_client.on_message = self._on_upstream_message
         self._upstream_client.on_disconnect = self._on_upstream_disconnect
 
-        self._local_to_upstream_pump = DeliveryPump(LOCAL_TO_UPSTREAM, queue, self._upstream_client)
-        self._upstream_to_local_pump = DeliveryPump(UPSTREAM_TO_LOCAL, queue, self._local_client)
+        self._local_to_upstream_pump = DeliveryPump(
+            LOCAL_TO_UPSTREAM, queue, self._upstream_client, is_cloud_to_device=False
+        )
+        self._upstream_to_local_pump = DeliveryPump(
+            UPSTREAM_TO_LOCAL, queue, self._local_client, is_cloud_to_device=True
+        )
 
     def _build_client(
         self, client_id: str, username: str | None = None, password: str | None = None
@@ -150,8 +171,16 @@ class MqttBridge:
         properties: Properties | None,
     ) -> None:
         _LOGGER.info("Connected to local broker (reason=%s)", reason_code)
-        client.subscribe(self._topic_filter, qos=QOS_AT_MOST_ONCE)
-        _LOGGER.info("Subscribed to local topic filter: %s", self._topic_filter)
+        # We connect with clean_session=False so the broker holds messages the
+        # feeder published while the relay was down. The flip side is that the
+        # broker also restores our *old* subscriptions: an earlier version of
+        # this relay subscribed to "<prefix>/#", which matches the "/sub"
+        # topics we republish locally and fed the bridge its own output. That
+        # subscription survives in the persisted session even after this code
+        # stopped asking for it, so retire it explicitly on every connect.
+        client.unsubscribe(self._legacy_wildcard_filter)
+        client.subscribe(self._local_topic_filter, qos=QOS_AT_MOST_ONCE)
+        _LOGGER.info("Subscribed to local topic filter: %s", self._local_topic_filter)
 
     def _on_local_disconnect(
         self,
@@ -166,7 +195,7 @@ class MqttBridge:
     def _on_local_message(self, client: Client, userdata: object, message: MQTTMessage) -> None:
         _LOGGER.debug("local -> queue(%s): %s (%d bytes)", LOCAL_TO_UPSTREAM, message.topic, len(message.payload))
         self._state_cache.update(message.topic, message.payload)
-        self._queue.enqueue(LOCAL_TO_UPSTREAM, message.topic, message.payload, message.qos)
+        self._enqueue(LOCAL_TO_UPSTREAM, message, is_cloud_to_device=False)
 
     # -- upstream (cloud) callbacks ----------------------------------------------
 
@@ -179,15 +208,15 @@ class MqttBridge:
         properties: Properties | None,
     ) -> None:
         _LOGGER.info("Connected to upstream PETLIBRO broker (reason=%s)", reason_code)
+        # Only the explicit "/sub" (cloud -> device) topics. Never a wildcard:
+        # besides being denied by the cloud ACL, "<prefix>/#" would also match
+        # the "/post" topics this same client publishes upstream, so the
+        # broker would echo them straight back into the relay.
         for category in UPSTREAM_SUBSCRIBE_CATEGORIES:
             topic = f"{self._topic_prefix}/device/{category}/sub"
             result, mid = client.subscribe(topic, qos=QOS_AT_MOST_ONCE)
             if result == mqtt.MQTT_ERR_SUCCESS and mid is not None:
                 self._pending_upstream_subscriptions[mid] = topic
-
-        result, mid = client.subscribe(self._topic_filter, qos=QOS_AT_MOST_ONCE)
-        if result == mqtt.MQTT_ERR_SUCCESS and mid is not None:
-            self._pending_upstream_subscriptions[mid] = self._topic_filter
 
     def _on_upstream_connect_fail(self, client: Client, userdata: object) -> None:
         # Fires on TCP/DNS-level failures (refused, unreachable, name resolution).
@@ -228,4 +257,13 @@ class MqttBridge:
             "upstream -> queue(%s): %s (%d bytes)", UPSTREAM_TO_LOCAL, message.topic, len(message.payload)
         )
         self._state_cache.update(message.topic, message.payload)
-        self._queue.enqueue(UPSTREAM_TO_LOCAL, message.topic, message.payload, message.qos)
+        self._enqueue(UPSTREAM_TO_LOCAL, message, is_cloud_to_device=True)
+
+    # -- shared ------------------------------------------------------------------
+
+    def _enqueue(self, direction: str, message: MQTTMessage, is_cloud_to_device: bool) -> None:
+        """Queue a message for delivery, letting state-carrying commands supersede older ones."""
+        command = extract_command(message.payload)
+        policy = policy_for(is_cloud_to_device, command)
+        coalesce_key = coalesce_key_for(message.topic, command, policy)
+        self._queue.enqueue(direction, message.topic, message.payload, message.qos, coalesce_key)

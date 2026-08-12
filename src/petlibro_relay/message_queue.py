@@ -25,12 +25,14 @@ CREATE TABLE IF NOT EXISTS pending_messages (
     topic TEXT NOT NULL,
     payload BLOB NOT NULL,
     qos INTEGER NOT NULL,
+    coalesce_key TEXT,
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
 )
 """
 _CREATE_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_pending_messages_direction ON pending_messages (direction, id)"
 )
+_ADD_COALESCE_KEY_COLUMN_SQL = "ALTER TABLE pending_messages ADD COLUMN coalesce_key TEXT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +43,7 @@ class QueuedMessage:
     topic: str
     payload: bytes
     qos: int
+    created_at: float
 
 
 class MessageQueue:
@@ -69,8 +72,19 @@ class MessageQueue:
         with self._connection:
             self._connection.execute(_CREATE_TABLE_SQL)
             self._connection.execute(_CREATE_INDEX_SQL)
+            self._migrate_add_coalesce_key_locked()
 
-    def enqueue(self, direction: str, topic: str, payload: bytes, qos: int) -> None:
+    def _migrate_add_coalesce_key_locked(self) -> None:
+        """Add the `coalesce_key` column to a database created before it existed."""
+        cursor = self._connection.execute("PRAGMA table_info(pending_messages)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        if "coalesce_key" not in existing_columns:
+            self._connection.execute(_ADD_COALESCE_KEY_COLUMN_SQL)
+            _LOGGER.info("Migrated queue schema: added coalesce_key column")
+
+    def enqueue(
+        self, direction: str, topic: str, payload: bytes, qos: int, coalesce_key: str | None = None
+    ) -> None:
         """Append a message to the tail of a direction's queue.
 
         Args:
@@ -78,13 +92,30 @@ class MessageQueue:
             topic: MQTT topic the message belongs to.
             payload: Raw message payload.
             qos: MQTT QoS the message was received/should be sent with.
+            coalesce_key: If set, any older pending message in this direction
+                carrying the same key is discarded first - the new message
+                supersedes it. Used for state-carrying commands where only
+                the latest value is meaningful (see `replay_policy`).
         """
         with self._lock:
             try:
                 with self._connection:
+                    if coalesce_key is not None:
+                        cursor = self._connection.execute(
+                            "DELETE FROM pending_messages WHERE direction = ? AND coalesce_key = ?",
+                            (direction, coalesce_key),
+                        )
+                        if cursor.rowcount:
+                            _LOGGER.debug(
+                                "Superseded %d pending message(s) for %s (key=%s)",
+                                cursor.rowcount,
+                                direction,
+                                coalesce_key,
+                            )
                     self._connection.execute(
-                        "INSERT INTO pending_messages (direction, topic, payload, qos) VALUES (?, ?, ?, ?)",
-                        (direction, topic, payload, qos),
+                        "INSERT INTO pending_messages (direction, topic, payload, qos, coalesce_key) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (direction, topic, payload, qos, coalesce_key),
                     )
             except sqlite3.Error:
                 _LOGGER.exception("Failed to enqueue message for %s on topic %s", direction, topic)
@@ -137,7 +168,7 @@ class MessageQueue:
         with self._lock:
             try:
                 cursor = self._connection.execute(
-                    "SELECT id, topic, payload, qos FROM pending_messages "
+                    "SELECT id, topic, payload, qos, created_at FROM pending_messages "
                     "WHERE direction = ? ORDER BY id ASC LIMIT 1",
                     (direction,),
                 )
@@ -147,8 +178,10 @@ class MessageQueue:
                 raise
         if row is None:
             return None
-        message_id, topic, payload, qos = row
-        return QueuedMessage(id=message_id, topic=topic, payload=payload, qos=qos)
+        message_id, topic, payload, qos, created_at = row
+        return QueuedMessage(
+            id=message_id, topic=topic, payload=payload, qos=qos, created_at=float(created_at)
+        )
 
     def remove(self, message_id: int) -> None:
         """Remove a message once it has been successfully delivered.

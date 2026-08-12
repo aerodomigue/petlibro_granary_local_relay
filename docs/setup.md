@@ -79,6 +79,24 @@ Redirecting only the primary leaves an escape hatch: if the firmware ever
 falls back to one of the other two on a failed connection, that attempt
 would resolve straight to the real cloud, bypassing the proxy entirely.
 
+> **The relay must not be caught by its own override.** It has to resolve
+> `mqtt.us.petlibro.com` to the *real* cloud to do its job. If it resolved
+> that name through the same LAN resolver, it would connect to its own local
+> broker and bridge mosquitto to itself - the feeder would look connected
+> while nothing ever reached PETLIBRO. `docker-compose.yml` therefore pins
+> public resolvers on the `relay` service
+> (`PETLIBRO_UPSTREAM_DNS_PRIMARY` / `_SECONDARY`, default `1.1.1.1` /
+> `9.9.9.9`). Verify before switching the feeder over:
+>
+> ```sh
+> docker exec petlibro-relay python -c \
+>   "import socket; print(socket.gethostbyname('mqtt.us.petlibro.com'))"
+> ```
+>
+> This must print a public AWS address, never your relay host's LAN IP. If
+> your DNS override is scoped to the feeder's IP/VLAN only, this is moot -
+> but check it anyway, it's the failure mode that looks like success.
+
 Do **not** override any other `*.petlibro.com` / `*.dl-aiot.com` hostname
 (REST API, camera/Kalay, or the `sit-svc.` / `demo-svc.` / `test.svc.`
 staging hosts icex2 found in the firmware binary but that aren't expected in

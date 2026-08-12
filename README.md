@@ -99,6 +99,31 @@ casing matters - the cloud uses `PLAF203` uppercase, not `plaf203`).
   delivery - the wildcard is kept only as a diagnostic to catch any future
   ACL relaxation.
 
+## Loop safety
+
+MQTT 3.1 has no "no local" subscription option (that arrived in MQTT 5), so a
+client subscribed to a filter covering what it publishes gets its own
+messages back from the broker. The two directions therefore never overlap:
+
+```
+device -> cloud :  local subscribes to    <prefix>/device/+/post
+cloud -> device :  upstream subscribes to <prefix>/device/<category>/sub
+```
+
+No wildcard is used on either side. An earlier version subscribed locally to
+`<prefix>/#`, which matched the `/sub` topics the cloud->device pump
+republishes locally; each cloud command came straight back in, was forwarded
+upstream onto a `/sub` topic we were also subscribed to, and came back again
+- unbounded amplification. Verified fixed by test, in both directions.
+
+Because the local client uses `clean_session=False` (so the broker holds
+what the feeder published while the relay was down), the broker also
+*restores previously registered subscriptions*. Dropping the wildcard from
+the code is therefore not enough on an existing deployment - the old
+`<prefix>/#` subscription lives on in the persisted session. The bridge
+explicitly unsubscribes it on every local connect, which self-heals a broker
+that already has it stored.
+
 ## Local <-> cloud sync logic
 
 No network callback ever publishes directly. `on_message` on either client
@@ -120,6 +145,30 @@ disconnected destination on one side never blocks reception on the other.
 The queue is capped (`PETLIBRO_MAX_QUEUE_SIZE`, default 5000 per direction);
 beyond that, oldest messages are dropped with a warning log rather than
 growing unbounded during a very long outage.
+
+A message is only removed from the durable queue once the client confirms
+the packet actually went out (`wait_for_publish`), not merely once paho
+accepted it into its buffer - otherwise a crash between the two loses it.
+
+### Replay is not unconditional
+
+Replaying everything oldest-first is right for telemetry going device ->
+cloud: an event from 14:00 is still true at 17:00, it just arrives late. It
+is wrong for commands going cloud -> device, which act on the physical world
+*when delivered*. Replaying a manual feed the user pressed before a
+three-hour outage would feed the cat at 17:00 for a 14:00 button press.
+
+`replay_policy.py` assigns each cloud -> device command one of:
+
+| Policy | Commands | Behaviour |
+|---|---|---|
+| never replay | `NTP`, `NTP_SYNC`, `DEVICE_REBOOT`, `RESET`, `RESTORE`, `OTA_*`, `BINDING`, `UNBIND`, `WIFI_*`, `INITIALIZE_SD_CARD_SERVICE` | dropped beyond a 5s grace window covering normal latency |
+| TTL | `MANUAL_FEEDING_SERVICE` | dropped after 60s |
+| latest-wins | `ATTR_SET_SERVICE`, `FEEDING_PLAN_SERVICE`, `DEVICE_CONFIG_SYNC`, `SERVER_CONFIG_PUSH`, … | a new message supersedes any older pending one with the same topic+`cmd`, so only the current intended state is delivered |
+| durable FIFO (default) | everything else, and all device -> cloud traffic | replayed in order, no expiry |
+
+Unrecognised commands fall through to durable FIFO: delivering something we
+don't understand late beats silently dropping it.
 
 ## Disconnect / reconnect handling
 

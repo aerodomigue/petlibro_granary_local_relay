@@ -33,6 +33,15 @@ services:
       - mosquitto
     env_file:
       - .env
+    # The DNS override that points the feeder at this relay rewrites
+    # mqtt.us.petlibro.com to this host - and this container has to resolve
+    # that same name to reach the REAL cloud. Resolving it through the LAN
+    # resolver would point the relay at its own local broker, so it would
+    # bridge mosquitto to itself and never reach PETLIBRO at all. Pin public
+    # resolvers here so the upstream lookup bypasses the rewrite.
+    dns:
+      - ${PETLIBRO_UPSTREAM_DNS_PRIMARY:-1.1.1.1}
+      - ${PETLIBRO_UPSTREAM_DNS_SECONDARY:-9.9.9.9}
     ports:
       - "${PETLIBRO_HOST_PORT:-1883}:${PETLIBRO_CAPTURE_PROXY_PORT:-1883}"
     volumes:
