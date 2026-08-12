@@ -6,11 +6,17 @@ Transparent MQTT proxy sitting between the PLAF203 feeder and
 - `mosquitto-config`: one-shot, runs `petlibro_relay.mosquitto_config` to
   render `mosquitto.conf` from the same env vars as everything else, onto a
   shared volume, then exits. The stock mosquitto image is never modified.
-- `mosquitto`: local broker the feeder connects to instead of the cloud,
-  started only once `mosquitto-config` has finished successfully.
-- `relay`: bridges `mosquitto` and the real PETLIBRO cloud broker in both
+- `mosquitto`: local broker, internal only (no host port) - not reachable
+  directly, started only once `mosquitto-config` has finished successfully.
+- `relay`: publishes the port the feeder actually connects to. Runs
+  `CredentialCaptureProxy` (learns the feeder's identity from its own
+  CONNECT packet, then forwards raw bytes to `mosquitto`) and `MqttBridge`
+  (bridges `mosquitto` and the real PETLIBRO cloud broker in both
   directions, with a durable on-disk queue so neither side blocks the other
-  and any outage gets replayed once the destination is back.
+  and any outage gets replayed once the destination is back).
+
+You do **not** need to extract the feeder's MQTT credentials by hand - see
+"Credentials" below.
 
 ## 1. Run it
 
@@ -19,10 +25,20 @@ docker compose up -d --build
 docker compose logs -f relay
 ```
 
-Expect, in order:
+With no device identity configured in `.env` (the default), expect:
 
 ```
+Credential capture proxy listening on 0.0.0.0:1883, forwarding to mosquitto:1883
+No device identity configured - waiting for the feeder's first local connection to learn it
 Connected to local broker (reason=Success)
+```
+
+...then, once the feeder has connected through the proxy at least once (see
+steps 2-3 below):
+
+```
+Feeder connection from ('<feeder LAN IP>', <port>)
+Learned device identity: client_id=<CLIENT_ID>
 Connected to upstream PETLIBRO broker (reason=Success)
 Upstream subscription dl/PLAF203/<CLIENT_ID>/device/service/sub -> granted (code=...)
 ```
@@ -50,7 +66,8 @@ us-mqtt-0.dl-aiot.com     <- documented fallback (icex2), not observed here
 
 On your Pi-hole / dnsmasq / router, add a local DNS (`A`) record for **all
 three** hostnames, pointing to the same LAN IP - the machine running the
-`mosquitto` container:
+`relay` container (that's the one publishing the port now; `mosquitto`
+itself is internal-only):
 
 ```
 mqtt.us.petlibro.com      -> <LAN IP of the mosquitto host>
@@ -95,7 +112,15 @@ proxy.
 
 ## Credentials
 
-`.env` holds the device's real MQTT identity (`PETLIBRO_DEVICE_CLIENT_ID` /
-`_USERNAME` / `_PASSWORD` = client ID / `DL_PRODUCT_KEY` / `DL_PRODUCT_SECRET`
-extracted from the device's own CONNECT packet). It is git-ignored - never
-commit it.
+No manual extraction needed. `CredentialCaptureProxy` reads the feeder's MQTT
+client ID / `DL_PRODUCT_KEY` / `DL_PRODUCT_SECRET` straight off its own
+CONNECT packet the first time it connects through the proxy (MQTT 3.1 here
+has no TLS, so it's plaintext on the wire either way) and stores it in
+`device_registry.sqlite3` on the `relay-data` volume - survives container
+restarts.
+
+`PETLIBRO_DEVICE_CLIENT_ID` / `_USERNAME` / `_PASSWORD` in `.env` are only a
+manual override, for running the relay before the feeder has ever connected
+locally (e.g. during development, or if you already have the identity from
+an earlier packet capture). If set, they take priority over whatever the
+registry has learned. `.env` is git-ignored - never commit it.

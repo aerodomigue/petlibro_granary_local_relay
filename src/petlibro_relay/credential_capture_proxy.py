@@ -1,0 +1,142 @@
+"""Transparent TCP proxy that learns a device's MQTT identity from its CONNECT packet.
+
+Sits in front of the local mosquitto broker on the port the feeder actually
+connects to. For each new connection: reads the CONNECT packet, records the
+client ID / username / password into the `DeviceRegistry`, forwards those
+exact bytes to mosquitto, then becomes a plain bidirectional byte pipe for
+the rest of the session. Mosquitto never sees anything different - this
+proxy only *observes* the handshake, it never terminates or re-originates
+the MQTT session itself.
+"""
+
+from __future__ import annotations
+
+import logging
+import socket
+import threading
+
+from .device_registry import DeviceIdentity, DeviceRegistry
+from .mqtt_connect_packet import MalformedConnectPacketError, read_connect_packet
+
+_LOGGER = logging.getLogger(__name__)
+
+RELAY_BUFFER_SIZE = 4096
+LISTEN_BACKLOG = 8
+
+
+class CredentialCaptureProxy:
+    """Listens for the feeder's connection, captures its identity, then pipes it through."""
+
+    def __init__(self, listen_host: str, listen_port: int, broker_host: str, broker_port: int, registry: DeviceRegistry) -> None:
+        """Initialize the proxy.
+
+        Args:
+            listen_host: Host to bind the public-facing listener on.
+            listen_port: Port to bind the public-facing listener on (what the
+                feeder connects to after the DNS override).
+            broker_host: Hostname of the real local mosquitto broker.
+            broker_port: Port of the real local mosquitto broker.
+            registry: Store to persist learned device identities into.
+        """
+        self._listen_host = listen_host
+        self._listen_port = listen_port
+        self._broker_host = broker_host
+        self._broker_port = broker_port
+        self._registry = registry
+        self._server_socket: socket.socket | None = None
+        self._stop_event = threading.Event()
+        self._accept_thread = threading.Thread(target=self._accept_loop, name="capture-proxy-accept", daemon=True)
+
+    def start(self) -> None:
+        """Start listening and accepting connections in a background thread."""
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind((self._listen_host, self._listen_port))
+        server_socket.listen(LISTEN_BACKLOG)
+        server_socket.settimeout(1.0)
+        self._server_socket = server_socket
+        _LOGGER.info(
+            "Credential capture proxy listening on %s:%d, forwarding to %s:%d",
+            self._listen_host,
+            self._listen_port,
+            self._broker_host,
+            self._broker_port,
+        )
+        self._accept_thread.start()
+
+    def stop(self) -> None:
+        """Stop accepting new connections and close the listener."""
+        self._stop_event.set()
+        if self._server_socket is not None:
+            self._server_socket.close()
+        self._accept_thread.join(timeout=5.0)
+
+    def _accept_loop(self) -> None:
+        assert self._server_socket is not None
+        while not self._stop_event.is_set():
+            try:
+                client_socket, client_address = self._server_socket.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                if self._stop_event.is_set():
+                    return
+                _LOGGER.exception("Error accepting a connection")
+                continue
+            _LOGGER.info("Feeder connection from %s", client_address)
+            threading.Thread(
+                target=self._handle_connection, args=(client_socket,), daemon=True
+            ).start()
+
+    def _handle_connection(self, client_socket: socket.socket) -> None:
+        try:
+            broker_socket = socket.create_connection((self._broker_host, self._broker_port))
+        except OSError:
+            _LOGGER.exception("Could not reach local broker %s:%d", self._broker_host, self._broker_port)
+            client_socket.close()
+            return
+
+        try:
+            self._capture_and_forward_connect(client_socket, broker_socket)
+            self._pipe_bidirectionally(client_socket, broker_socket)
+        finally:
+            client_socket.close()
+            broker_socket.close()
+
+    def _capture_and_forward_connect(self, client_socket: socket.socket, broker_socket: socket.socket) -> None:
+        try:
+            raw_packet, fields = read_connect_packet(client_socket)
+        except MalformedConnectPacketError as error:
+            _LOGGER.warning("Could not parse CONNECT packet (%s), forwarding raw bytes as-is", error)
+            if error.raw_so_far:
+                broker_socket.sendall(error.raw_so_far)
+            return
+
+        broker_socket.sendall(raw_packet)
+
+        if fields.username is not None and fields.password is not None:
+            self._registry.record(
+                DeviceIdentity(client_id=fields.client_id, username=fields.username, password=fields.password)
+            )
+        else:
+            _LOGGER.warning(
+                "CONNECT from client_id=%s has no username/password, nothing to learn", fields.client_id
+            )
+
+    def _pipe_bidirectionally(self, socket_a: socket.socket, socket_b: socket.socket) -> None:
+        thread_a_to_b = threading.Thread(target=self._pipe_one_direction, args=(socket_a, socket_b), daemon=True)
+        thread_b_to_a = threading.Thread(target=self._pipe_one_direction, args=(socket_b, socket_a), daemon=True)
+        thread_a_to_b.start()
+        thread_b_to_a.start()
+        thread_a_to_b.join()
+        thread_b_to_a.join()
+
+    def _pipe_one_direction(self, source: socket.socket, destination: socket.socket) -> None:
+        try:
+            while True:
+                chunk = source.recv(RELAY_BUFFER_SIZE)
+                if not chunk:
+                    return
+                destination.sendall(chunk)
+        except OSError:
+            return

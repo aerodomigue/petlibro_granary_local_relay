@@ -14,15 +14,14 @@ Run instructions and the DNS redirection steps are in
 petlibro_relay.mosquitto_config (one-shot "mosquitto-config" service)
    │  renders mosquitto.conf from env vars onto a shared volume, then exits
    ▼
-mosquitto (stock, unmodified image, container "mosquitto")
+mosquitto (stock, unmodified image, internal only - not published)
+   ▲
+   │  raw bytes, forwarded unmodified
+CredentialCaptureProxy (inside the "relay" container, publishes the port)
    ▲
    │  MQTT 3.1, plain TCP, port 1883
-PLAF203 feeder
-   │
-   ▼
-mosquitto (local broker, container "mosquitto")
-   │  paho-mqtt client "relay-local"
-   ▼
+PLAF203 feeder  (after the DNS override, see docs/setup.md)
+
 MqttBridge (container "relay")
    │  paho-mqtt client, device's own identity
    ▼
@@ -38,15 +37,32 @@ service_completed_successfully` in `docker-compose.yml`). Every setting in
 this project - relay and broker alike - lives in `.env`; nothing is
 hardcoded in a Dockerfile or config file baked into an image.
 
+### No manual credential extraction
+
+The feeder's MQTT identity (client ID = device serial, username =
+`DL_PRODUCT_KEY`, password = `DL_PRODUCT_SECRET`) doesn't need to be
+extracted by hand (e.g. via a packet capture) and configured up front.
+`CredentialCaptureProxy` (`credential_capture_proxy.py`) sits in front of
+`mosquitto` on the port the feeder actually connects to: it parses the
+feeder's own CONNECT packet (`mqtt_connect_packet.py`, a small hand-rolled
+reader - MQTT 3.1 has no TLS here, so the identity is in cleartext), records
+it into `DeviceRegistry` (SQLite, `device_registry.py`), forwards those exact
+bytes to `mosquitto` unmodified, then becomes a plain bidirectional byte pipe
+for the rest of the session. `mosquitto` never sees anything different.
+
+On startup, `__main__` uses `PETLIBRO_DEVICE_CLIENT_ID` / `_USERNAME` /
+`_PASSWORD` from `.env` if all three are set (manual override - useful to
+run the relay before the feeder has ever connected locally, e.g. during
+development). Otherwise it blocks, polling the registry, until the feeder's
+first local connection has taught it who it is.
+
 Two independent MQTT connections, never one client relaying through the
 other's socket directly:
 
-- **local**: `relay-local` client connects to the `mosquitto` container the
-  feeder itself will be pointed at (via DNS override, see `docs/setup.md`).
+- **local**: `relay-local` client connects to the `mosquitto` container.
 - **upstream**: a second client connects to the real cloud broker,
-  authenticated as the device itself (`PETLIBRO_DEVICE_CLIENT_ID` /
-  `_USERNAME` / `_PASSWORD` = MQTT client ID / `DL_PRODUCT_KEY` /
-  `DL_PRODUCT_SECRET`, extracted from the device's own CONNECT packet).
+  authenticated as the device itself, using whichever identity was resolved
+  above.
 
 Both use MQTT 3.1 (`MQTTv31`), `clean_session=False`, 90s keepalive - matching
 exactly what the physical feeder sends, since the cloud broker's ACL is keyed

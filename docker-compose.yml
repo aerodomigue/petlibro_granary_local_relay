@@ -10,6 +10,9 @@ services:
     volumes:
       - mosquitto-config:/mosquitto-config
 
+  # Internal only - not published to the host. The feeder never talks to
+  # this directly; it connects to the "relay" container's credential
+  # capture proxy below, which forwards to this broker byte-for-byte.
   mosquitto:
     image: eclipse-mosquitto:2
     container_name: petlibro-relay-mosquitto
@@ -17,8 +20,6 @@ services:
     depends_on:
       mosquitto-config:
         condition: service_completed_successfully
-    ports:
-      - "${MOSQUITTO_HOST_PORT:-1883}:${MOSQUITTO_LISTENER_PORT:-1883}"
     volumes:
       - mosquitto-config:/mosquitto/config:ro
       - mosquitto-data:/mosquitto/data
@@ -32,6 +33,8 @@ services:
       - mosquitto
     env_file:
       - .env
+    ports:
+      - "${PETLIBRO_HOST_PORT:-1883}:${PETLIBRO_CAPTURE_PROXY_PORT:-1883}"
     volumes:
       - relay-data:/data
 

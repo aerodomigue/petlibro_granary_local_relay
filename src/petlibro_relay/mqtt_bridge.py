@@ -29,6 +29,7 @@ from paho.mqtt.reasoncodes import ReasonCode
 
 from .config import RelayConfig
 from .delivery_pump import DeliveryPump
+from .device_registry import DeviceIdentity
 from .message_queue import MessageQueue
 from .state_cache import StateCache
 
@@ -59,18 +60,25 @@ UPSTREAM_SUBSCRIBE_CATEGORIES: Sequence[str] = (
 class MqttBridge:
     """Relays MQTT traffic between the feeder's local broker and the PETLIBRO cloud."""
 
-    def __init__(self, config: RelayConfig, state_cache: StateCache, queue: MessageQueue) -> None:
+    def __init__(
+        self, config: RelayConfig, identity: DeviceIdentity, state_cache: StateCache, queue: MessageQueue
+    ) -> None:
         """Initialize the bridge, its two MQTT clients, and their delivery pumps.
 
         Args:
             config: Relay runtime configuration.
+            identity: The device's MQTT client ID, username and password -
+                either manually configured or learned by
+                `CredentialCaptureProxy` from the feeder's own CONNECT packet.
             state_cache: Cache used to persist the last payload per topic.
             queue: Durable queue backing both delivery directions.
         """
         self._config = config
+        self._identity = identity
         self._state_cache = state_cache
         self._queue = queue
-        self._topic_filter = f"{config.topic_prefix}/#"
+        self._topic_prefix = config.topic_prefix_override or f"dl/PLAF203/{identity.client_id}"
+        self._topic_filter = f"{self._topic_prefix}/#"
         self._pending_upstream_subscriptions: dict[int, str] = {}
 
         self._local_client = self._build_client("relay-local")
@@ -79,9 +87,9 @@ class MqttBridge:
         self._local_client.on_disconnect = self._on_local_disconnect
 
         self._upstream_client = self._build_client(
-            config.device_client_id,
-            username=config.device_username,
-            password=config.device_password,
+            identity.client_id,
+            username=identity.username,
+            password=identity.password,
         )
         self._upstream_client.on_connect = self._on_upstream_connect
         self._upstream_client.on_connect_fail = self._on_upstream_connect_fail
@@ -172,7 +180,7 @@ class MqttBridge:
     ) -> None:
         _LOGGER.info("Connected to upstream PETLIBRO broker (reason=%s)", reason_code)
         for category in UPSTREAM_SUBSCRIBE_CATEGORIES:
-            topic = f"{self._config.topic_prefix}/device/{category}/sub"
+            topic = f"{self._topic_prefix}/device/{category}/sub"
             result, mid = client.subscribe(topic, qos=QOS_AT_MOST_ONCE)
             if result == mqtt.MQTT_ERR_SUCCESS and mid is not None:
                 self._pending_upstream_subscriptions[mid] = topic
