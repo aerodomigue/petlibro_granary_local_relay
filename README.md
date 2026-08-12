@@ -111,9 +111,10 @@ off that exact identity/session.
 Topic prefix: `dl/PLAF203/<PETLIBRO_DEVICE_CLIENT_ID>` (device serial number;
 casing matters - the cloud uses `PLAF203` uppercase, not `plaf203`).
 
-- **Local side**: subscribes to the full wildcard `<prefix>/#` - the local
-  broker's ACL is unrestricted, so everything the feeder publishes is
-  captured regardless of exact topic.
+- **Local side**: subscribes to `dl/+/+/device/+/post` - device -> cloud
+  traffic only, and device-agnostic so the subscription can be registered
+  before the identity is known. Never a filter covering the `/sub` topics the
+  relay itself publishes locally (see "Loop safety").
 - **Upstream side**: the cloud ACL rejects wildcard `SUBSCRIBE` for a device
   identity, so the bridge subscribes to each known server->device category
   individually:
@@ -129,13 +130,12 @@ casing matters - the cloud uses `PLAF203` uppercase, not `plaf203`).
   <prefix>/device/system/sub
   ```
 
-  plus a wildcard attempt as a fallback/diagnostic. Every `SUBACK` is logged
-  individually (`granted`/`denied`) - see `_on_upstream_subscribe` in
-  `mqtt_bridge.py`. In testing against the real account, all eight literal
-  category topics were granted (QoS 0); only the trailing wildcard `#`
-  attempt was denied. The explicit per-category list is what actually drives
-  delivery - the wildcard is kept only as a diagnostic to catch any future
-  ACL relaxation.
+  Every `SUBACK` is logged individually (`granted`/`denied`) - see
+  `_on_upstream_subscribe` in `mqtt_bridge.py`. Probed against the real
+  account, all eight literal category topics are granted (QoS 0) and a
+  trailing `#` is denied. No wildcard is attempted any more: besides being
+  refused, `<prefix>/#` would also match the `/post` topics this same client
+  publishes upstream, so the broker would echo them straight back.
 
 ## Loop safety
 
