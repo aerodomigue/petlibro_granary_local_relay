@@ -1,8 +1,9 @@
-"""The one confirmed interactive control: PLAF203 device sound.
+"""Explicit, feeder-confirmed interactive PLAF203 controls.
 
-This module deliberately has no generic command, topic, or field API. The
-device and cloud behavior of ``soundSwitch`` were verified on a real PLAF203;
-other settings have not earned the same privilege and remain read-only.
+This module deliberately exposes no generic MQTT command, topic, or field
+API. Only controls whose device behaviour has been confirmed are represented
+here. Each request is published only to the local feeder and succeeds only
+after its correlated ``/post`` acknowledgement.
 """
 
 from __future__ import annotations
@@ -23,14 +24,15 @@ from .state_shadow import StateShadow
 
 _LOGGER = logging.getLogger(__name__)
 
-CONTROL_NAME: Final = "soundSwitch"
+SOUND_CONTROL_NAME: Final = "soundSwitch"
+MOTION_CONTROL_NAME: Final = "motionDetectionSwitch"
 SUPPORTED_PRODUCT_ID: Final = "PLAF203"
 ACK_TIMEOUT_SECONDS: Final = 4.0
 
 
 @dataclass(frozen=True, slots=True)
 class ControlCapability:
-    """A deliberately explicit record of a control's proven behavior."""
+    """A deliberately explicit record of a control's proven behaviour."""
 
     writable: bool
     device_ack_confirmed: bool
@@ -38,8 +40,8 @@ class ControlCapability:
 
 
 CONTROL_CAPABILITIES: Final[dict[str, ControlCapability]] = {
-    "soundSwitch": ControlCapability(True, True, True),
-    "motionDetectionSwitch": ControlCapability(False, True, False),
+    SOUND_CONTROL_NAME: ControlCapability(True, True, True),
+    MOTION_CONTROL_NAME: ControlCapability(True, True, False),
 }
 
 
@@ -56,7 +58,7 @@ class ControlStateUnavailableError(ControlError):
 
 
 class ControlBusyError(ControlError):
-    """Raised when the same device already has a sound write pending."""
+    """Raised when the same device already has an interactive write pending."""
 
 
 class ControlPublishError(ControlError):
@@ -70,9 +72,9 @@ class ControlAckTimeoutError(ControlError):
 class ControlAckRejectedError(ControlError):
     """Raised when the feeder explicitly rejects a matching command."""
 
-    def __init__(self, code: object) -> None:
+    def __init__(self, control_name: str, code: object) -> None:
         """Keep the device result code available for the API response."""
-        super().__init__(f"Device rejected {CONTROL_NAME} (code={code})")
+        super().__init__(f"Device rejected {control_name} (code={code})")
         self.code = code
 
 
@@ -80,24 +82,30 @@ class ControlAckRejectedError(ControlError):
 class _PendingControl:
     """One in-flight request keyed by device and MQTT message id."""
 
+    control_name: str
     value: bool
     sent_at: float
     completed: threading.Event
     code: object | None = None
 
 
-LocalSoundPublisher = Callable[[str, str, bytes], bool]
+LocalControlPublisher = Callable[[str, str, bytes], bool]
 
 
 class SoundSwitchController:
-    """Publish and confirm the only currently supported UI control."""
+    """Publish and confirm the two explicitly allowlisted UI controls.
+
+    The historical class name remains for compatibility with the running
+    relay. Its public methods are deliberately separate, so HTTP callers can
+    never select an arbitrary MQTT field.
+    """
 
     def __init__(
         self,
         devices: DeviceManager,
         presence: DevicePresenceTracker,
         shadow: StateShadow,
-        publish_local_sound: LocalSoundPublisher,
+        publish_local_control: LocalControlPublisher,
         ack_timeout_seconds: float = ACK_TIMEOUT_SECONDS,
         clock: Callable[[], float] | None = None,
     ) -> None:
@@ -107,14 +115,14 @@ class SoundSwitchController:
             devices: Source of bridged device contexts and product identities.
             presence: Source of truth for whether the feeder is here now.
             shadow: State needed to reproduce the confirmed command shape.
-            publish_local_sound: Publishes this control only, never arbitrary MQTT.
+            publish_local_control: Publishes an allowlisted service control only.
             ack_timeout_seconds: Maximum time to wait for the feeder's `/post` ACK.
-            clock: Injectable monotonic wall-clock source for tests.
+            clock: Injectable monotonic clock source for tests.
         """
         self._devices = devices
         self._presence = presence
         self._shadow = shadow
-        self._publish_local_sound = publish_local_sound
+        self._publish_local_control = publish_local_control
         self._ack_timeout_seconds = ack_timeout_seconds
         self._clock = clock or time.monotonic
         self._lock = threading.Lock()
@@ -122,121 +130,35 @@ class SoundSwitchController:
         self._active_devices: set[str] = set()
         self._counters: dict[str, int] = {}
 
-    def capability(self, device_id: str) -> dict[str, Any]:
-        """Return safe UI capability state without revealing control internals."""
+    def capability(self, device_id: str, control_name: str) -> dict[str, Any]:
+        """Return safe UI capability state for one explicit control."""
         context = self._devices.get_by_device_id(device_id)
         desired = self._shadow.get_desired(device_id)
-        capability = CONTROL_CAPABILITIES[CONTROL_NAME]
+        definition = CONTROL_CAPABILITIES[control_name]
         online = self._presence.is_online(device_id)
         supported = context is not None and context.product_id == SUPPORTED_PRODUCT_ID
         with self._lock:
             pending = device_id in self._active_devices
-        required_state_available = isinstance(desired.get("soundAgingType"), int) and isinstance(
-            desired.get(CONTROL_NAME), bool
-        )
         return {
-            "control": CONTROL_NAME,
-            "writable": capability.writable and supported,
-            "device_ack_confirmed": capability.device_ack_confirmed,
-            "cloud_sync_confirmed": capability.cloud_sync_confirmed,
+            "control": control_name,
+            "writable": definition.writable and supported,
+            "device_ack_confirmed": definition.device_ack_confirmed,
+            "cloud_sync_confirmed": definition.cloud_sync_confirmed,
             "device_online": online,
-            "required_state_available": required_state_available,
+            "required_state_available": _required_state_available(control_name, desired),
             "pending": pending,
         }
 
     def set_sound_switch(self, device_id: str, enabled: bool) -> dict[str, Any]:
-        """Set device sound locally and wait for its correlated `/post` ACK.
+        """Set device sound locally and wait for its correlated `/post` ACK."""
+        return self._set_control(device_id, enabled, SOUND_CONTROL_NAME)
 
-        Args:
-            device_id: Device context that must own the pending transaction.
-            enabled: Desired boolean state for the one supported setting.
-
-        Returns:
-            A safe success projection only after a matching device acknowledgement.
-
-        Raises:
-            ControlOfflineError: The feeder is not locally present.
-            ControlStateUnavailableError: Required protocol state is missing.
-            ControlBusyError: A sound request for this device is already pending.
-            ControlPublishError: The local broker could not accept the command.
-            ControlAckTimeoutError: No matching feeder acknowledgement arrived.
-            ControlAckRejectedError: The feeder returned a non-zero result code.
-        """
-        context = self._devices.get_by_device_id(device_id)
-        if context is None:
-            raise ControlStateUnavailableError("Device is not bridged")
-        if context.product_id != SUPPORTED_PRODUCT_ID:
-            raise ControlStateUnavailableError("Device does not support soundSwitch control")
-        if not self._presence.is_online(device_id):
-            self._increment("control_rejected")
-            raise ControlOfflineError("Device is offline")
-
-        desired = self._shadow.get_desired(device_id)
-        sound_aging_type = desired.get("soundAgingType")
-        if not isinstance(sound_aging_type, int) or not isinstance(desired.get(CONTROL_NAME), bool):
-            self._increment("control_rejected")
-            raise ControlStateUnavailableError("Required sound control state is unavailable")
-
-        message_id = uuid.uuid4().hex
-        pending = _PendingControl(value=enabled, sent_at=self._clock(), completed=threading.Event())
-        key = (device_id, message_id)
-        with self._lock:
-            if device_id in self._active_devices:
-                self._increment_locked("control_rejected")
-                raise ControlBusyError("A soundSwitch request is already pending for this device")
-            self._active_devices.add(device_id)
-            self._pending[key] = pending
-            self._increment_locked("control_requests")
-
-        payload = _build_payload(enabled, message_id, sound_aging_type)
-        _LOGGER.info(
-            "CONTROL soundSwitch requested device_id=%s value=%s msgId=%s cmd=%s",
-            device_id,
-            enabled,
-            message_id,
-            protocol.Command.ATTR_SET_SERVICE,
-        )
-        try:
-            if not self._publish_local_sound(device_id, context.product_id, payload):
-                self._increment("control_rejected")
-                raise ControlPublishError("Local MQTT publication failed")
-            if not pending.completed.wait(self._ack_timeout_seconds):
-                self._increment("control_timeout")
-                _LOGGER.warning("CONTROL soundSwitch timeout device_id=%s msgId=%s", device_id, message_id)
-                raise ControlAckTimeoutError("Device acknowledgement timeout")
-            if type(pending.code) is not int or pending.code != 0:
-                self._increment("control_rejected")
-                raise ControlAckRejectedError(pending.code)
-            latency_ms = int((self._clock() - pending.sent_at) * 1000)
-            self._shadow.update_local_confirmed(device_id, {CONTROL_NAME: enabled})
-            self._increment("control_success")
-            _LOGGER.info(
-                "CONTROL soundSwitch confirmed device_id=%s msgId=%s latency_ms=%d",
-                device_id,
-                message_id,
-                latency_ms,
-            )
-            return {
-                "success": True,
-                "device_id": device_id,
-                "control": CONTROL_NAME,
-                "value": enabled,
-                "device_ack": True,
-                "cloud_sync_behavior": "confirmed",
-            }
-        finally:
-            with self._lock:
-                self._pending.pop(key, None)
-                self._active_devices.discard(device_id)
+    def set_motion_detection_switch(self, device_id: str, enabled: bool) -> dict[str, Any]:
+        """Set motion detection locally and wait for its correlated `/post` ACK."""
+        return self._set_control(device_id, enabled, MOTION_CONTROL_NAME)
 
     def observe_device_message(self, device_id: str, topic: str, payload: bytes) -> None:
-        """Complete only a matching feeder ACK; routing continues unchanged.
-
-        Args:
-            device_id: Device that posted the candidate acknowledgement.
-            topic: Local topic, which must be this device's service `/post` topic.
-            payload: Raw feeder JSON payload.
-        """
+        """Complete only a matching feeder ACK; normal bridge routing continues."""
         if topic != f"{protocol.topic_prefix(device_id)}/device/service/post":
             return
         try:
@@ -257,20 +179,89 @@ class SoundSwitchController:
 
     def snapshot(self, device_id: str) -> dict[str, Any]:
         """Return safe per-device control telemetry for the dashboard/API."""
-        capability = self.capability(device_id)
         with self._lock:
             counters = dict(self._counters)
-        motion = CONTROL_CAPABILITIES["motionDetectionSwitch"]
         return {
-            "soundSwitch": capability,
-            "motionDetectionSwitch": {
-                "control": "motionDetectionSwitch",
-                "writable": motion.writable,
-                "device_ack_confirmed": motion.device_ack_confirmed,
-                "cloud_sync_confirmed": motion.cloud_sync_confirmed,
-            },
-            "counters": counters,
-        }
+            control_name: self.capability(device_id, control_name)
+            for control_name in CONTROL_CAPABILITIES
+        } | {"counters": counters}
+
+    def _set_control(self, device_id: str, enabled: bool, control_name: str) -> dict[str, Any]:
+        """Publish one allowlisted setting and await a device-scoped ACK."""
+        context = self._devices.get_by_device_id(device_id)
+        if context is None:
+            raise ControlStateUnavailableError("Device is not bridged")
+        if context.product_id != SUPPORTED_PRODUCT_ID:
+            raise ControlStateUnavailableError(f"Device does not support {control_name} control")
+        if not self._presence.is_online(device_id):
+            self._increment("control_rejected")
+            raise ControlOfflineError("Device is offline")
+
+        desired = self._shadow.get_desired(device_id)
+        if not _required_state_available(control_name, desired):
+            self._increment("control_rejected")
+            raise ControlStateUnavailableError(f"Required {control_name} control state is unavailable")
+
+        message_id = uuid.uuid4().hex
+        pending = _PendingControl(
+            control_name=control_name,
+            value=enabled,
+            sent_at=self._clock(),
+            completed=threading.Event(),
+        )
+        key = (device_id, message_id)
+        with self._lock:
+            if device_id in self._active_devices:
+                self._increment_locked("control_rejected")
+                raise ControlBusyError(f"A control request is already pending for device {device_id}")
+            self._active_devices.add(device_id)
+            self._pending[key] = pending
+            self._increment_locked("control_requests")
+
+        payload = _build_payload(control_name, enabled, message_id, desired)
+        _LOGGER.info(
+            "CONTROL %s requested device_id=%s value=%s msgId=%s cmd=%s",
+            control_name,
+            device_id,
+            enabled,
+            message_id,
+            protocol.Command.ATTR_SET_SERVICE,
+        )
+        try:
+            if not self._publish_local_control(device_id, context.product_id, payload):
+                self._increment("control_rejected")
+                raise ControlPublishError("Local MQTT publication failed")
+            if not pending.completed.wait(self._ack_timeout_seconds):
+                self._increment("control_timeout")
+                _LOGGER.warning("CONTROL %s timeout device_id=%s msgId=%s", control_name, device_id, message_id)
+                raise ControlAckTimeoutError("Device acknowledgement timeout")
+            if type(pending.code) is not int or pending.code != 0:
+                self._increment("control_rejected")
+                raise ControlAckRejectedError(control_name, pending.code)
+            latency_ms = int((self._clock() - pending.sent_at) * 1000)
+            self._shadow.update_local_confirmed(device_id, {control_name: enabled})
+            self._increment("control_success")
+            _LOGGER.info(
+                "CONTROL %s confirmed device_id=%s msgId=%s latency_ms=%d",
+                control_name,
+                device_id,
+                message_id,
+                latency_ms,
+            )
+            return {
+                "success": True,
+                "device_id": device_id,
+                "control": control_name,
+                "value": enabled,
+                "device_ack": True,
+                "cloud_sync_behavior": (
+                    "confirmed" if CONTROL_CAPABILITIES[control_name].cloud_sync_confirmed else "unknown"
+                ),
+            }
+        finally:
+            with self._lock:
+                self._pending.pop(key, None)
+                self._active_devices.discard(device_id)
 
     def _increment(self, counter: str) -> None:
         with self._lock:
@@ -280,15 +271,30 @@ class SoundSwitchController:
         self._counters[counter] = self._counters.get(counter, 0) + 1
 
 
-def _build_payload(enabled: bool, message_id: str, sound_aging_type: int) -> bytes:
-    """Construct the one confirmed PLAF203 sound-switch command format."""
-    return json.dumps(
-        {
-            "cmd": protocol.Command.ATTR_SET_SERVICE,
-            "ts": int(time.time() * 1000),
-            "msgId": message_id,
-            "soundSwitch": enabled,
-            "soundAgingType": sound_aging_type,
-        },
-        separators=(",", ":"),
-    ).encode("utf-8")
+def _required_state_available(control_name: str, desired: dict[str, Any]) -> bool:
+    """Return whether the shadow contains fields needed to build a control."""
+    if control_name == SOUND_CONTROL_NAME:
+        return isinstance(desired.get("soundAgingType"), int) and isinstance(
+            desired.get(SOUND_CONTROL_NAME), bool
+        )
+    if control_name == MOTION_CONTROL_NAME:
+        return isinstance(desired.get(MOTION_CONTROL_NAME), bool)
+    return False
+
+
+def _build_payload(
+    control_name: str, enabled: bool, message_id: str, desired: dict[str, Any]
+) -> bytes:
+    """Construct the exact proven MQTT payload for one explicit setting."""
+    payload: dict[str, object] = {
+        "cmd": protocol.Command.ATTR_SET_SERVICE,
+        "ts": int(time.time() * 1000),
+        "msgId": message_id,
+        control_name: enabled,
+    }
+    if control_name == SOUND_CONTROL_NAME:
+        sound_aging_type = desired["soundAgingType"]
+        if not isinstance(sound_aging_type, int):
+            raise ControlStateUnavailableError("Required soundSwitch control state is unavailable")
+        payload["soundAgingType"] = sound_aging_type
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")

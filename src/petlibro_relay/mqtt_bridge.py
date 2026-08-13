@@ -220,7 +220,7 @@ class MqttBridge:
         self._upstream_to_local_pump.start()
 
     def set_sound_switch_controller(self, controller: SoundSwitchController) -> None:
-        """Attach the one narrow UI control acknowledgement observer.
+        """Attach the narrow UI control acknowledgement observer.
 
         This does not alter normal device-to-cloud handling: it only lets the
         controller correlate a matching service `/post` ACK before the same
@@ -229,7 +229,7 @@ class MqttBridge:
         self._sound_switch_controller = controller
 
     def publish_sound_switch(self, device_id: str, product_id: str, payload: bytes) -> bool:
-        """Publish the one supported interactive setting without durable replay.
+        """Publish an explicit interactive setting without durable replay.
 
         The caller owns the validated payload. This method constructs the
         fixed local `/service/sub` topic itself and immediately fails when the

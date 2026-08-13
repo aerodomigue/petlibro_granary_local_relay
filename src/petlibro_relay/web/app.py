@@ -1,6 +1,6 @@
-"""FastAPI diagnostics plus the one confirmed feeder control.
+"""FastAPI diagnostics plus explicitly confirmed feeder controls.
 
-All routes are read-only except the narrow, typed sound-switch endpoint. It
+All routes are read-only except narrow, typed control endpoints. They
 cannot choose MQTT topics, commands, fields, or payloads; those are built and
 validated exclusively by the control service after device-local ACK.
 """
@@ -32,8 +32,8 @@ SSE_WAIT_SECONDS = 15.0
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
-class SoundControlRequest(BaseModel):
-    """The only accepted write body: an explicit boolean sound state."""
+class ControlRequest(BaseModel):
+    """The only accepted write body: one explicit boolean control state."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -117,8 +117,8 @@ def create_app(context: DashboardContext) -> FastAPI:
         return detail
 
     @app.patch("/api/devices/{device_id}/controls/sound")
-    def set_device_sound(device_id: str, request: SoundControlRequest) -> dict[str, object]:
-        """Set the sole control validated for device and PETLIBRO cloud sync."""
+    def set_device_sound(device_id: str, request: ControlRequest) -> dict[str, object]:
+        """Set the device sound control validated for PETLIBRO cloud sync."""
         if not DEVICE_ID_PATTERN.fullmatch(device_id) or context.device_detail(device_id, 1) is None:
             raise HTTPException(status_code=404, detail="Unknown device")
         control = context.sound_switch_control
@@ -126,6 +126,32 @@ def create_app(context: DashboardContext) -> FastAPI:
             raise HTTPException(status_code=409, detail="Sound control is unavailable")
         try:
             return control.set_sound_switch(device_id, request.enabled)
+        except ControlOfflineError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ControlStateUnavailableError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ControlBusyError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ControlPublishError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except ControlAckTimeoutError as error:
+            raise HTTPException(status_code=504, detail=str(error)) from error
+        except ControlAckRejectedError as error:
+            raise HTTPException(
+                status_code=502,
+                detail={"message": str(error), "device_ack": True, "code": error.code},
+            ) from error
+
+    @app.patch("/api/devices/{device_id}/controls/motion")
+    def set_device_motion_detection(device_id: str, request: ControlRequest) -> dict[str, object]:
+        """Set the independently confirmed local motion-detection control."""
+        if not DEVICE_ID_PATTERN.fullmatch(device_id) or context.device_detail(device_id, 1) is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        control = context.sound_switch_control
+        if control is None:
+            raise HTTPException(status_code=409, detail="Motion detection control is unavailable")
+        try:
+            return control.set_motion_detection_switch(device_id, request.enabled)
         except ControlOfflineError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         except ControlStateUnavailableError as error:

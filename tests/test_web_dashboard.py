@@ -366,7 +366,7 @@ def test_ntp_request_without_cloud_reply_is_shown_as_session_establishment(
     assert payload["last_ntp_sync"] is None
 
 
-def test_dashboard_exposes_only_the_narrow_sound_write_route(
+def test_dashboard_exposes_only_narrow_confirmed_control_write_routes(
     dashboard: tuple[DashboardContext, RingBufferLogHandler],
 ) -> None:
     """No generic MQTT or arbitrary-control write endpoint can reach HTTP."""
@@ -379,8 +379,12 @@ def test_dashboard_exposes_only_the_narrow_sound_write_route(
         if route.methods is not None and not route.methods <= {"GET", "HEAD"}
     }
 
-    assert write_routes == {("/api/devices/{device_id}/controls/sound", ("PATCH",))}
+    assert write_routes == {
+        ("/api/devices/{device_id}/controls/motion", ("PATCH",)),
+        ("/api/devices/{device_id}/controls/sound", ("PATCH",)),
+    }
     assert all("mqtt/publish" not in route.path for route in app.routes)
+    assert all(route.path != "/api/devices/{device_id}/controls" for route in app.routes)
 
 
 def test_ui_keeps_raw_data_behind_explicit_debug_controls() -> None:
@@ -407,6 +411,8 @@ def test_ui_renders_a_fleet_table_and_dedicated_device_pages() -> None:
     assert "renderDevicePage" in DASHBOARD_HTML
     assert "/api/devices/${encodeURIComponent(deviceId)}" in DASHBOARD_HTML
     assert "devicePicker" in DASHBOARD_HTML
+    assert "requestMotionDetectionSwitch" in DASHBOARD_HTML
+    assert "motion-detection-switch-toggle" in DASHBOARD_HTML
 
 
 def test_ui_initial_route_activates_the_matching_section_and_supports_history() -> None:

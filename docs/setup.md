@@ -166,8 +166,8 @@ PETLIBRO_REPLAY_JITTER=0.15
 ```
 
 Only durable device-to-cloud backlog is affected. Local interactive control
-publishes, including the confirmed `soundSwitch` flow, are never queued or
-rate-limited by this scheduler.
+publishes, including the confirmed `soundSwitch` and `motionDetectionSwitch`
+flows, are never queued or rate-limited by this scheduler.
 
 To roll back at any time: remove the three DNS overrides. No changes are
 needed on the feeder itself - it will simply resolve the real cloud IPs

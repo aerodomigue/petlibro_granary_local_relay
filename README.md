@@ -396,8 +396,8 @@ deliberate choice.
 
 Set `PETLIBRO_WEB_ENABLED=true` to start the integrated FastAPI dashboard on
 `PETLIBRO_WEB_HOST:PETLIBRO_WEB_PORT` (default `0.0.0.0:8080`). It is
-read-only except for one deliberately narrow, device-confirmed control:
-`soundSwitch` on a locally present PLAF203. The HTTP API never accepts an
+read-only except for two deliberately narrow, device-confirmed controls:
+`soundSwitch` and `motionDetectionSwitch` on a locally present PLAF203. The HTTP API never accepts an
 arbitrary MQTT topic, command, field, or JSON payload.
 The UI has Overview, Cloud, Devices, Queues, State, NTP, Logs and System
 tabs, backed by versionable JSON endpoints:
@@ -411,13 +411,18 @@ GET /api/ntp?device_id=…
 GET /api/logs       GET /api/logs/stream (SSE)
 GET /api/system
 PATCH /api/devices/{device_id}/controls/sound   {"enabled": true|false}
+PATCH /api/devices/{device_id}/controls/motion  {"enabled": true|false}
 ```
 
 The sound endpoint requires local presence plus valid `soundSwitch` and
 `soundAgingType` shadow values. It publishes one local `ATTR_SET_SERVICE` and
 returns success only after the feeder posts `code: 0` with the same `msgId`.
-It is never inserted into the durable queue or replayed. All other controls,
-including motion detection, remain read-only.
+The motion endpoint requires local presence plus a known
+`motionDetectionSwitch` shadow value and emits only `cmd`, `ts`, `msgId`, and
+`motionDetectionSwitch`; it does not invent an aging field. Both interactive
+requests are never inserted into the durable queue or replayed. Sound cloud
+sync is confirmed; motion cloud sync remains unknown. All other controls
+remain read-only.
 
 Overview and the header aggregate across devices (known / local online /
 cloud online / cloud degraded / queues pending). Devices is a table with a

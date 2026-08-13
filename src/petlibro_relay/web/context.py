@@ -1,8 +1,7 @@
-"""State projections and the narrow control dependency for the relay dashboard.
+"""State projections and narrow control dependencies for the relay dashboard.
 
-Dashboard methods project state only. The sole write path is kept outside this
-class in ``SoundSwitchController`` and is explicitly injected for the one
-validated device setting.
+Dashboard methods project state only. Explicit device-control paths are kept
+outside this class in ``SoundSwitchController`` and injected as an allowlist.
 """
 
 from __future__ import annotations
@@ -228,6 +227,9 @@ class DashboardContext:
                     "writable": False,
                     "device_ack_confirmed": True,
                     "cloud_sync_confirmed": False,
+                    "device_online": False,
+                    "required_state_available": False,
+                    "pending": False,
                 },
                 "counters": {},
             }
@@ -235,7 +237,7 @@ class DashboardContext:
 
     @property
     def sound_switch_control(self) -> SoundSwitchController | None:
-        """Return the narrow service used by the sole write endpoint."""
+        """Return the narrow service used by explicit write endpoints."""
         return self._sound_switch_control
 
     def system(self) -> dict[str, Any]:
