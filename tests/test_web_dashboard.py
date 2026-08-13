@@ -18,6 +18,7 @@ from conftest import RelayConfigFactory
 
 from petlibro_relay.device_context import LOCAL_TO_UPSTREAM
 from petlibro_relay.device_manager import DeviceManager
+from petlibro_relay.device_presence import DevicePresenceTracker
 from petlibro_relay.device_registry import DeviceIdentity, DeviceRegistry
 from petlibro_relay.message_queue import MessageQueue
 from petlibro_relay.observability.log_buffer import RingBufferLogHandler
@@ -81,12 +82,15 @@ def dashboard(
 
     logs = RingBufferLogHandler()
     logs.setFormatter(logging.Formatter("%(message)s"))
+    presence = DevicePresenceTracker()
+    presence.session_opened(DEVICE_A, "10.3.100.90")
+    presence.session_opened(DEVICE_B, "10.3.100.91")
     devices = DeviceManager(
-        config, registry, queue, shadow, StateCache(config.state_cache_path), telemetry
+        config, registry, queue, shadow, StateCache(config.state_cache_path), telemetry, presence
     )
-    context = DashboardContext(config, registry, queue, shadow, telemetry, logs, devices)
-    context.set_device_online(DEVICE_A, "10.3.100.90")
-    context.set_device_online(DEVICE_B, "10.3.100.91")
+    context = DashboardContext(
+        config, registry, queue, shadow, telemetry, logs, devices, presence
+    )
 
     yield context, logs
 
@@ -172,7 +176,9 @@ def test_summary_aggregates_across_devices(client: TestClient) -> None:
     assert summary["bridged"] == 3
     assert summary["local_online"] == 2
     assert summary["cloud_online"] == 1
-    assert summary["cloud_degraded"] == 2
+    assert summary["cloud_degraded"] == 1, (
+        "only B is degraded: C is absent, so having no cloud session is expected, not a fault"
+    )
     assert summary["queue_pending"] == 1
 
 

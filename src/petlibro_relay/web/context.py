@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 import platform
 import shutil
-import threading
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -18,16 +17,13 @@ from typing import Any, cast
 from ..config import RelayConfig
 from ..device_context import LOCAL_TO_UPSTREAM, UPSTREAM_TO_LOCAL
 from ..device_manager import DeviceManager
+from ..device_presence import DevicePresenceTracker, LocalPresence
 from ..device_registry import DeviceRegistry, DeviceRegistryEntry
 from ..message_queue import MessageQueue
 from ..observability.log_buffer import RingBufferLogHandler
 from ..observability.sanitizer import mask_username, sanitize_value
 from ..observability.telemetry import RelayTelemetry
 from ..state_shadow import StateShadow
-
-# A device that has not been heard from within this window is shown as stale
-# rather than online, independently of the 72h identity retention.
-LOCAL_PRESENCE_GRACE_SECONDS = 90.0
 
 
 class DashboardContext:
@@ -42,6 +38,7 @@ class DashboardContext:
         telemetry: RelayTelemetry,
         logs: RingBufferLogHandler,
         devices: DeviceManager,
+        presence: DevicePresenceTracker,
     ) -> None:
         self._config = config
         self._registry = registry
@@ -50,29 +47,12 @@ class DashboardContext:
         self._telemetry = telemetry
         self._logs = logs
         self._devices = devices
-        self._lock = threading.Lock()
-        self._device_addresses: dict[str, str] = {}
-        self._locally_online: set[str] = set()
-        self._last_session_ended_at: dict[str, float] = {}
+        self._presence = presence
 
     @property
     def logs(self) -> RingBufferLogHandler:
         """Return the sanitized ring buffer used by the SSE endpoint."""
         return self._logs
-
-    # -- presence ----------------------------------------------------------------
-
-    def set_device_online(self, device_id: str, peer_address: str) -> None:
-        """Record that a device currently holds a local session."""
-        with self._lock:
-            self._device_addresses[device_id] = peer_address
-            self._locally_online.add(device_id)
-
-    def set_device_offline(self, device_id: str) -> None:
-        """Record that a device's last local session has ended."""
-        with self._lock:
-            self._locally_online.discard(device_id)
-            self._last_session_ended_at[device_id] = time.time()
 
     # -- aggregate views ---------------------------------------------------------
 
@@ -252,7 +232,6 @@ class DashboardContext:
                 return snapshot
         return {
             "device_id": device_id,
-            "local": {"online": False, "last_seen_at": None},
             "upstream": {
                 "state": "DISCONNECTED",
                 "last_connack_0": None,
@@ -278,10 +257,8 @@ class DashboardContext:
         """Build one dashboard row, never exposing the device's password."""
         metrics = self._device_metrics(entry.client_id)
         reported = self._shadow.get_reported(entry.client_id)
-        with self._lock:
-            address = self._device_addresses.get(entry.client_id)
-            locally_online = entry.client_id in self._locally_online
-            session_ended_at = self._last_session_ended_at.get(entry.client_id)
+        presence = self._presence.record(entry.client_id)
+        context = self._devices.get_by_device_id(entry.client_id)
         now = time.time()
         last_heartbeat = reported.get("last_heartbeat_ts")
         return {
@@ -291,9 +268,11 @@ class DashboardContext:
             "username": mask_username(entry.username),
             "status": entry.status.value,
             "bridged": entry.bridged,
-            "local_state": _local_state(locally_online, session_ended_at, now),
+            "local_state": self._presence.state(entry.client_id).value,
             "cloud_state": metrics["upstream"]["state"],
-            "ip": address,
+            "upstream_running": context.upstream_running if context is not None else False,
+            "last_local_session_at": presence.last_opened_at if presence is not None else None,
+            "ip": presence.peer_address if presence is not None else None,
             "firmware": reported.get("firmware"),
             "hardware_version": reported.get("hardware_version"),
             "mac": reported.get("mac"),
@@ -313,35 +292,20 @@ class DashboardContext:
         }
 
 
-def _local_state(locally_online: bool, session_ended_at: float | None, now: float) -> str:
-    """Report presence from real sessions only, never from identity retention.
-
-    A known identity is not a connected device: the registry keeps entries for
-    72h, and even a freshly recorded one only means the relay learned it - a
-    manually seeded device has never connected at all. Presence therefore
-    comes exclusively from local sessions the capture proxy actually observed.
-
-    A session that ended moments ago still counts as online, to ride out the
-    gap between a feeder dropping its link and reconnecting; a device that has
-    never held one is offline.
-    """
-    if locally_online:
-        return "LOCAL_ONLINE"
-    if session_ended_at is not None and now - session_ended_at <= LOCAL_PRESENCE_GRACE_SECONDS:
-        return "LOCAL_ONLINE"
-    return "LOCAL_OFFLINE"
-
-
 def _summarize(rows: list[dict[str, Any]], auto_enroll: bool) -> dict[str, Any]:
     """Reduce the device rows to the counts the header and overview show."""
     bridged = [row for row in rows if row["bridged"]]
+    connected = [row for row in bridged if row["local_state"] == LocalPresence.ONLINE.value]
     return {
         "known": len(rows),
         "bridged": len(bridged),
         "awaiting_enrollment": sum(1 for row in rows if not row["bridged"]),
-        "local_online": sum(1 for row in rows if row["local_state"] == "LOCAL_ONLINE"),
+        "local_online": sum(1 for row in rows if row["local_state"] == LocalPresence.ONLINE.value),
         "cloud_online": sum(1 for row in bridged if row["cloud_state"] == "ONLINE"),
-        "cloud_degraded": sum(1 for row in bridged if row["cloud_state"] != "ONLINE"),
+        # Only devices that are actually here can be "degraded": a suspended
+        # session for an absent feeder is the intended state, not a fault.
+        "cloud_degraded": sum(1 for row in connected if row["cloud_state"] != "ONLINE"),
+        "cloud_suspended": sum(1 for row in bridged if row["cloud_state"] == "SUSPENDED"),
         "queue_pending": sum(int(row["queue_pending"]) for row in rows),
         "auto_enroll": auto_enroll,
     }

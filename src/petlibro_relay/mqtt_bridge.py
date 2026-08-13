@@ -173,10 +173,16 @@ class MqttBridge:
     # -- pump targets -------------------------------------------------------------
 
     def _upstream_targets(self) -> list[PumpTarget]:
-        """Device -> cloud: each device publishes on its own cloud session."""
+        """Device -> cloud: each device publishes on its own cloud session.
+
+        A device whose session is intentionally closed (because it is not
+        locally present) has no target, so its backlog simply stays queued
+        until it comes back rather than being dropped.
+        """
         return [
-            PumpTarget(context.device_id, context.upstream_client, context.telemetry)
+            PumpTarget(context.device_id, client, context.telemetry)
             for context in self._devices.list_devices()
+            if (client := context.upstream_client) is not None
         ]
 
     def _local_targets(self) -> list[PumpTarget]:

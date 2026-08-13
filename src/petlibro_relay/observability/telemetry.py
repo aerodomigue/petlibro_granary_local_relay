@@ -117,8 +117,6 @@ class DeviceTelemetry:
         self._last_offline_summary_at: float | None = None
         self._last_failure_reason: str | None = None
         self._session_number = 0
-        self._local_online = False
-        self._local_last_seen_at: float | None = None
         self._state_history: collections.deque[tuple[float, bool]] = collections.deque(
             maxlen=EVENT_HISTORY_LIMIT
         )
@@ -138,24 +136,35 @@ class DeviceTelemetry:
         with self._lock:
             return self._upstream_state
 
-    @property
-    def local_online(self) -> bool:
-        """Return whether the feeder currently holds a local session."""
-        with self._lock:
-            return self._local_online
+    def upstream_suspended(self, reason: str) -> None:
+        """Record the relay deliberately closing this device's cloud session.
 
-    def local_session_opened(self) -> None:
-        """Record the feeder opening a connection through the capture proxy."""
+        Not a failure and not an outage: there is nothing to reconnect to and
+        nothing degraded, so any outage bookkeeping is cleared rather than
+        left running and inflating downtime.
+        """
         with self._lock:
-            self._local_online = True
-            self._local_last_seen_at = self._clock()
-            self._counters["local_sessions"] += 1
+            now = self._clock()
+            if self._upstream_state is UpstreamState.ONLINE:
+                if self._last_online_started_at is not None:
+                    self._session_durations.append(now - self._last_online_started_at)
+                self._state_history.append((now, False))
+            self._last_online_started_at = None
+            self._upstream_state = UpstreamState.SUSPENDED
+            self._counters["upstream_suspensions"] += 1
+            self._clear_outage_locked()
+        self.record_event_on_sink(
+            "upstream_suspended", "UPSTREAM suspended", now, {"reason": reason}
+        )
 
-    def local_session_closed(self) -> None:
-        """Record the feeder's last local connection going away."""
-        with self._lock:
-            self._local_online = False
-            self._local_last_seen_at = self._clock()
+    def record_event_on_sink(
+        self, kind: str, message: str, timestamp: float, details: dict[str, Any]
+    ) -> None:
+        """Mirror a device-scoped event into the relay-wide timeline."""
+        if self._sink is not None:
+            self._sink.record_event(
+                kind, message, device_id=self._device_id, timestamp=timestamp, details=details
+            )
 
     def upstream_connect_attempt(self) -> UpstreamTransition:
         """Record an expected MQTT CONNECT attempt, not an ONLINE session."""
@@ -314,7 +323,6 @@ class DeviceTelemetry:
             durations = list(self._session_durations)
             return {
                 "device_id": self._device_id,
-                "local": {"online": self._local_online, "last_seen_at": self._local_last_seen_at},
                 "upstream": {
                     "state": self._upstream_state.name,
                     "last_connack_0": self._last_connack_at,
@@ -350,14 +358,8 @@ class DeviceTelemetry:
 
     def _publish(self, now: float, transition: UpstreamTransition, message: str) -> None:
         """Mirror a transition into the relay-wide timeline, outside our lock."""
-        if self._sink is None:
-            return
-        self._sink.record_event(
-            f"upstream_{transition.kind.value}",
-            message,
-            device_id=self._device_id,
-            timestamp=now,
-            details=transition.details(),
+        self.record_event_on_sink(
+            f"upstream_{transition.kind.value}", message, now, transition.details()
         )
 
     def _transition_locked(
@@ -534,7 +536,6 @@ class RelayTelemetry:
     def snapshot(self) -> dict[str, Any]:
         """Return relay-wide facts plus an aggregate over all devices."""
         now = self._clock()
-        device_snapshots = self.device_snapshots()
         with self._lock:
             local_connected = self._local_connected
             counters = dict(self._counters)
@@ -543,7 +544,6 @@ class RelayTelemetry:
             "uptime_seconds": now - self._started_at,
             "local_mqtt": {"connected": local_connected},
             "counters": counters,
-            "devices": _aggregate_devices(device_snapshots),
         }
 
     def events(self, limit: int = 100, device_id: str | None = None) -> list[dict[str, Any]]:
@@ -556,14 +556,3 @@ class RelayTelemetry:
                 if device_id is None or event.device_id == device_id
             ]
         return events[-safe_limit:]
-
-
-def _aggregate_devices(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize per-device states into the counts the header shows."""
-    upstream_states = [str(item["upstream"]["state"]) for item in snapshots]
-    return {
-        "known": len(snapshots),
-        "local_online": sum(1 for item in snapshots if item["local"]["online"]),
-        "upstream_online": sum(1 for state in upstream_states if state == "ONLINE"),
-        "upstream_degraded": sum(1 for state in upstream_states if state != "ONLINE"),
-    }

@@ -139,6 +139,41 @@ Both use MQTT 3.1 (`MQTTv31`), `clean_session=False`, 90s keepalive - matching
 exactly what the physical feeder sends, since the cloud broker's ACL is keyed
 off that exact identity/session.
 
+### Upstream sessions follow the device
+
+The relay authenticates upstream **as the device**, so holding that session
+open for a feeder that is powered off would tell PETLIBRO the device is
+online when it cannot answer anything. The session therefore tracks local
+presence:
+
+| Local state | Upstream session |
+|---|---|
+| present | connects and reconnects normally |
+| gone, inside the 90s grace | left running - a reconnecting feeder must not churn its session |
+| absent past the grace | closed with a clean MQTT DISCONNECT, state `SUSPENDED` |
+| feeder returns | a fresh session starts and **only that device's** backlog replays |
+
+`SUSPENDED` is deliberately distinct from `DISCONNECTED`: nothing is wrong
+with the cloud, no reconnect is pending, and no downtime accrues - so an
+absent feeder is never counted as "cloud degraded".
+
+The context itself survives throughout. Identity, queues, shadow, responder
+and metrics all stay loaded, so a return resumes rather than rebuilds. A
+device's backlog simply waits while its session is closed, instead of being
+dropped or drained through some other device.
+
+A single supervisor thread reconciles every device against presence every 5s.
+Because `start_upstream` and `stop_upstream` are both idempotent, the ordering
+of enrollment, presence and startup does not matter - the next tick converges,
+which is what makes the boot path race-free. On a relay restart, an enrolled
+but absent device is restored as a context **without** a cloud session, and
+connects once its feeder is actually seen.
+
+The trade-off: while a device is away, cloud pushes for it are not received.
+That is intended - the real device would miss them too - and the feeder asks
+the cloud to resync (`FEEDING_PLAN_SERVICE`, config) on session establishment
+when it comes back.
+
 ### Isolation
 
 A device's message never leaves under another's credentials, enters another's

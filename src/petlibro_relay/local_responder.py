@@ -50,12 +50,17 @@ class UpstreamState(Enum):
     accepting the connection, never answering the CONNECT, and resetting ~30s
     later. Only `ONLINE` - CONNACK 0 received and the session live - counts as
     the cloud being available.
+
+    `SUSPENDED` is distinct from `DISCONNECTED`: the relay closed the session
+    on purpose because the device is not locally present. Nothing is wrong
+    with the cloud, and no reconnect is pending.
     """
 
     DISCONNECTED = auto()
     TCP_CONNECTING = auto()
     MQTT_CONNECTING = auto()
     ONLINE = auto()
+    SUSPENDED = auto()
 
     @property
     def is_online(self) -> bool:

@@ -12,11 +12,25 @@ one going dark must be invisible to the other.
 The upstream session deliberately stays one-per-device rather than multiplexed:
 the cloud authenticates the MQTT connection *as the device*, so a shared
 session could only ever speak for one of them.
+
+## Upstream session lifetime
+
+That session is tied to the device actually being here. Holding it open for a
+feeder that is powered off would tell PETLIBRO the device is online when it is
+not - the relay would be impersonating hardware that cannot answer. So
+`DeviceManager` starts and stops it in step with local presence, and both
+operations are idempotent and confined to this device.
+
+Stopping it is a clean MQTT DISCONNECT, which is what a device doing an
+orderly shutdown looks like. The context itself survives: identity, queues,
+shadow and metrics all stay loaded, so a reconnect resumes rather than
+rebuilds.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from typing import List, Sequence
 
 import paho.mqtt.client as mqtt
@@ -98,9 +112,10 @@ class DeviceContext:
         self._responder = responder
         self._topic_prefix = protocol.topic_prefix(identity.client_id, identity.product_id)
         self._pending_upstream_subscriptions: dict[int, str] = {}
-        self._stopping = False
-
-        self._upstream_client = self._build_upstream_client()
+        self._lifecycle_lock = threading.Lock()
+        # Built on start rather than here: a device that is not locally present
+        # must not have a cloud session opened in its name.
+        self._upstream_client: Client | None = None
 
     # -- identity ----------------------------------------------------------------
 
@@ -120,9 +135,15 @@ class DeviceContext:
         return self._topic_prefix
 
     @property
-    def upstream_client(self) -> Client:
-        """Return the Paho client bound to this device's cloud session."""
-        return self._upstream_client
+    def upstream_client(self) -> Client | None:
+        """Return this device's cloud client, or `None` while it is stopped."""
+        with self._lifecycle_lock:
+            return self._upstream_client
+
+    @property
+    def upstream_running(self) -> bool:
+        """Return whether a cloud session is currently being maintained."""
+        return self.upstream_client is not None
 
     @property
     def upstream_state(self) -> UpstreamState:
@@ -142,6 +163,8 @@ class DeviceContext:
     # -- lifecycle ---------------------------------------------------------------
 
     def _build_upstream_client(self) -> Client:
+        # A fresh client per start, rather than reconnecting a stopped one, so
+        # no Paho state survives from the previous session.
         client = mqtt.Client(
             callback_api_version=CallbackAPIVersion.VERSION2,
             client_id=self._identity.client_id,
@@ -159,25 +182,55 @@ class DeviceContext:
         client.on_disconnect = self._on_upstream_disconnect
         return client
 
-    def start(self) -> None:
-        """Open this device's cloud session in its own network thread."""
+    def start_upstream(self) -> bool:
+        """Open this device's cloud session, if it is not already open.
+
+        Idempotent, so the presence supervisor can call it on every tick.
+
+        Returns:
+            True if a session was started by this call.
+        """
+        with self._lifecycle_lock:
+            if self._upstream_client is not None:
+                return False
+            client = self._build_upstream_client()
+            self._upstream_client = client
         self._log_upstream_transition(self._telemetry.upstream_connect_attempt())
-        self._upstream_client.connect_async(
+        client.connect_async(
             self._config.upstream_host,
             self._config.upstream_port,
             keepalive=self._config.keepalive_seconds,
         )
-        self._upstream_client.loop_start()
+        client.loop_start()
         _LOGGER.info(
             "Started upstream session for %s (product=%s)", self.device_id, self.product_id
         )
+        return True
 
-    def stop(self) -> None:
-        """Close this device's cloud session without disturbing any other."""
-        self._stopping = True
-        self._upstream_client.loop_stop()
-        self._upstream_client.disconnect()
-        _LOGGER.info("Stopped upstream session for %s", self.device_id)
+    def stop_upstream(self, reason: str = "shutdown") -> bool:
+        """Close this device's cloud session without disturbing any other.
+
+        Idempotent. Everything else the context owns - queues, shadow,
+        metrics, responder - is left untouched and reloaded on restart.
+
+        Args:
+            reason: Why the session is being closed, for logs and telemetry.
+
+        Returns:
+            True if a session was closed by this call.
+        """
+        with self._lifecycle_lock:
+            client = self._upstream_client
+            if client is None:
+                return False
+            self._upstream_client = None
+        # A clean DISCONNECT, not a dropped socket: this is the relay saying
+        # the device has gone, which is what an orderly shutdown looks like.
+        client.loop_stop()
+        client.disconnect()
+        self._telemetry.upstream_suspended(reason)
+        _LOGGER.info("Stopped upstream session for %s (%s)", self.device_id, reason)
+        return True
 
     # -- device -> cloud ---------------------------------------------------------
 
@@ -211,6 +264,9 @@ class DeviceContext:
     # -- cloud -> device ---------------------------------------------------------
 
     def _on_upstream_message(self, client: Client, userdata: object, message: MQTTMessage) -> None:
+        if self._is_stale_client(client):
+            _LOGGER.debug("Discarding message from a replaced session for %s", self.device_id)
+            return
         _LOGGER.debug(
             "upstream -> queue(%s) for %s: %s (%d bytes)",
             UPSTREAM_TO_LOCAL,
@@ -247,6 +303,8 @@ class DeviceContext:
         reason_code: ReasonCode,
         properties: Properties | None,
     ) -> None:
+        if self._is_stale_client(client):
+            return
         # Only a CONNACK makes the cloud "online". A completed TCP handshake
         # does not: PETLIBRO has been observed accepting the socket, ignoring
         # the CONNECT for ~30s, then resetting.
@@ -259,6 +317,16 @@ class DeviceContext:
             result, mid = client.subscribe(topic, qos=QOS_AT_MOST_ONCE)
             if result == mqtt.MQTT_ERR_SUCCESS and mid is not None:
                 self._pending_upstream_subscriptions[mid] = topic
+
+    def _is_stale_client(self, client: Client) -> bool:
+        """True if a callback came from a session we have already replaced.
+
+        Paho can deliver a callback after `stop_upstream`, and a restart
+        installs a new client, so callbacks are matched against the current
+        one rather than a single "stopping" flag.
+        """
+        with self._lifecycle_lock:
+            return client is not self._upstream_client
 
     def _on_upstream_connect_fail(self, client: Client, userdata: object) -> None:
         # Fires on TCP/DNS-level failures (refused, unreachable, name resolution).
@@ -292,7 +360,10 @@ class DeviceContext:
         reason_code: ReasonCode,
         properties: Properties | None,
     ) -> None:
-        if self._stopping:
+        if self._is_stale_client(client):
+            # Either we closed this session deliberately, or it belongs to a
+            # previous one that has since been replaced. Neither is a fault,
+            # and neither may touch the current session's state.
             _LOGGER.debug(
                 "Upstream MQTT stopped intentionally for %s (reason=%s)", self.device_id, reason_code
             )

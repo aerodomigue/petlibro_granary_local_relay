@@ -10,6 +10,7 @@ from types import FrameType
 from .config import RelayConfig
 from .credential_capture_proxy import CredentialCaptureProxy, DeviceSessionListener
 from .device_manager import DeviceManager
+from .device_presence import DevicePresenceTracker
 from .device_registry import SECONDS_PER_HOUR, DeviceIdentity, DeviceRegistry
 from .logging_config import configure_logging
 from .message_queue import MessageQueue
@@ -35,41 +36,45 @@ class DeviceEnroller(DeviceSessionListener):
         self,
         registry: DeviceRegistry,
         devices: DeviceManager,
+        presence: DevicePresenceTracker,
         bridge_holder: "BridgeHolder",
-        dashboard: DashboardContext,
     ) -> None:
         """Wire the enroller to the components a new device has to reach.
 
         Args:
             registry: Source of truth for which devices may be bridged.
             devices: Owner of each bridged device's context.
+            presence: Tracker recording which devices are locally connected.
             bridge_holder: Indirection to the bridge, which is built after
                 this listener so the proxy can start accepting first.
-            dashboard: Read-only view updated with local presence.
         """
         self._registry = registry
         self._devices = devices
+        self._presence = presence
         self._bridge_holder = bridge_holder
-        self._dashboard = dashboard
 
     def device_session_opened(self, identity: DeviceIdentity, peer_address: str) -> None:
-        """Bridge this device if it is enrolled, and mark it locally online."""
-        self._dashboard.set_device_online(identity.client_id, peer_address)
+        """Mark the device present, bridge it if enrolled, and resume its session."""
+        self._presence.session_opened(identity.client_id, peer_address)
         if not self._is_bridgeable(identity.client_id):
             return
         self._devices.ensure_device(identity)
+        # Reconcile immediately rather than waiting for the next supervisor
+        # tick, so a returning feeder is back on the cloud without delay.
+        self._devices.sync_upstream_sessions()
         bridge = self._bridge_holder.bridge
         if bridge is not None:
             bridge.forget_unknown_device(identity.client_id)
 
     def device_session_closed(self, client_id: str) -> None:
-        """Mark the device locally offline; its cloud session stays as it is.
+        """Mark the device absent and let the grace period run.
 
-        The upstream connection is deliberately left running: a feeder that
-        drops its local link for a few seconds should not lose its place in
-        the cloud, and the queue keeps anything that arrives meanwhile.
+        The cloud session is deliberately *not* closed here. A feeder
+        reconnects constantly, and dropping the upstream on every blip would
+        churn sessions for no reason. The supervisor closes it only once the
+        device has stayed away past the presence grace.
         """
-        self._dashboard.set_device_offline(client_id)
+        self._presence.session_closed(client_id)
 
     def _is_bridgeable(self, client_id: str) -> bool:
         return any(entry.client_id == client_id for entry in self._registry.get_bridgeable())
@@ -135,8 +140,11 @@ def main() -> None:
     registry.purge_expired()
     _seed_manual_identity(config, registry)
 
-    devices = DeviceManager(config, registry, queue, shadow, state_cache, telemetry)
-    dashboard_context = DashboardContext(config, registry, queue, shadow, telemetry, log_buffer, devices)
+    presence = DevicePresenceTracker()
+    devices = DeviceManager(config, registry, queue, shadow, state_cache, telemetry, presence)
+    dashboard_context = DashboardContext(
+        config, registry, queue, shadow, telemetry, log_buffer, devices, presence
+    )
 
     dashboard_server: DashboardServer | None = None
     if config.web_enabled:
@@ -150,7 +158,7 @@ def main() -> None:
         broker_host=config.local_host,
         broker_port=config.local_port,
         registry=registry,
-        listener=DeviceEnroller(registry, devices, bridge_holder, dashboard_context),
+        listener=DeviceEnroller(registry, devices, presence, bridge_holder),
     )
     capture_proxy.start()
 

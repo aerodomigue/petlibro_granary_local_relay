@@ -24,6 +24,7 @@ from petlibro_relay.config import RelayConfig
 from petlibro_relay.delivery_pump import DeliveryPump, PumpTarget
 from petlibro_relay.device_context import LOCAL_TO_UPSTREAM, UPSTREAM_TO_LOCAL, DeviceContext
 from petlibro_relay.device_manager import DeviceManager
+from petlibro_relay.device_presence import DevicePresenceTracker
 from petlibro_relay.device_registry import DeviceIdentity, DeviceRegistry
 from petlibro_relay.local_responder import LocalResponderSettings
 from petlibro_relay.message_queue import MessageQueue
@@ -101,6 +102,7 @@ class Harness:
     bridge: MqttBridge
     local_client: FakeClient
     upstream: dict[str, FakeClient]
+    presence: DevicePresenceTracker
 
     def deliver_local(self, topic: str, payload: bytes = PAYLOAD) -> None:
         """Feed a message in as if the local broker had delivered it."""
@@ -133,10 +135,12 @@ def build_harness(
     state_cache = StateCache(config.state_cache_path)
     telemetry = RelayTelemetry()
     registry = DeviceRegistry(config.device_registry_db_path)
-    devices = DeviceManager(config, registry, queue, shadow, state_cache, telemetry)
+    presence = DevicePresenceTracker()
+    devices = DeviceManager(config, registry, queue, shadow, state_cache, telemetry, presence)
 
     upstream: dict[str, FakeClient] = {}
     for identity in identities:
+        presence.session_opened(identity.client_id, "10.3.100.1")
         context = devices.ensure_device(identity)
         client = FakeClient()
         upstream[identity.client_id] = client
@@ -147,8 +151,11 @@ def build_harness(
     local_client = FakeClient()
     bridge._local_client = cast(Client, local_client)
 
-    yield Harness(config, queue, shadow, telemetry, devices, bridge, local_client, upstream)
+    yield Harness(
+        config, queue, shadow, telemetry, devices, bridge, local_client, upstream, presence
+    )
 
+    devices.stop()
     registry.close()
     queue.close()
     shadow.close()
@@ -431,7 +438,13 @@ def test_restart_rebuilds_every_device_context(make_config: RelayConfigFactory) 
     shadow = StateShadow(config.state_shadow_db_path)
     telemetry = RelayTelemetry()
     devices = DeviceManager(
-        config, registry, queue, shadow, StateCache(config.state_cache_path), telemetry
+        config,
+        registry,
+        queue,
+        shadow,
+        StateCache(config.state_cache_path),
+        telemetry,
+        DevicePresenceTracker(),
     )
     # start() would dial the cloud, so rebuild exactly what it enrolls.
     for identity in registry.get_bridgeable():
@@ -439,6 +452,7 @@ def test_restart_rebuilds_every_device_context(make_config: RelayConfigFactory) 
 
     assert devices.device_ids() == ["DEVICE-A", "DEVICE-B", "DEVICE-C"]
 
+    devices.stop()
     registry.close()
     queue.close()
     shadow.close()
@@ -490,19 +504,6 @@ def test_removing_one_device_leaves_the_others_bridged(harness: Harness) -> None
     assert harness.devices.device_ids() == ["DEVICE-A"]
     harness.deliver_local(TOPIC_A)
     assert harness.pending("DEVICE-A") == 1
-
-
-def test_device_learned_before_startup_still_gets_started(harness: Harness) -> None:
-    """A feeder connecting during boot must not end up without a cloud session."""
-    started: list[str] = []
-    for context in harness.devices.list_devices():
-        context.start = lambda ctx=context: started.append(ctx.device_id)  # type: ignore[method-assign,misc]
-
-    harness.devices.start()
-
-    assert sorted(started) == ["DEVICE-A", "DEVICE-B"], (
-        "contexts created before start() must be started by it"
-    )
 
 
 def test_context_lookup_is_exact(harness: Harness) -> None:
