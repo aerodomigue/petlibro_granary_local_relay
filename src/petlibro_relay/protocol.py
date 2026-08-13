@@ -13,14 +13,21 @@ older firmware does not).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Final
 
-# Product identifier as it appears in topics. Uppercase: confirmed both in our
-# own capture and in icex2's DEVICE_PRODUCT_ID.
+# Default product identifier as it appears in topics. Uppercase: confirmed both
+# in our own capture and in icex2's DEVICE_PRODUCT_ID. Topics carry the product
+# themselves, so this is only the fallback used when building a topic for a
+# device whose product has not been observed yet.
 PRODUCT_ID: Final = "PLAF203"
 
 POST_SUFFIX: Final = "post"  # device -> cloud
 SUB_SUFFIX: Final = "sub"  # cloud -> device
+
+TOPIC_ROOT: Final = "dl"
+DEVICE_SEGMENT: Final = "device"
+_TOPIC_SEGMENT_COUNT: Final = 6
 
 
 class Command:
@@ -62,14 +69,72 @@ class Command:
     RESTORE: Final = "RESTORE"
 
 
-def topic_prefix(device_id: str) -> str:
+@dataclass(frozen=True, slots=True)
+class TopicAddress:
+    """The four addressing fields every device topic carries.
+
+    Routing is driven entirely by this: a topic names the device it belongs
+    to, so the relay never has to guess which of its devices a message is
+    for.
+    """
+
+    product_id: str
+    device_id: str
+    category: str
+    direction: str
+
+    @property
+    def is_post(self) -> bool:
+        """True for device -> cloud traffic."""
+        return self.direction == POST_SUFFIX
+
+    @property
+    def is_sub(self) -> bool:
+        """True for cloud -> device traffic."""
+        return self.direction == SUB_SUFFIX
+
+    @property
+    def prefix(self) -> str:
+        """Return the `dl/<product>/<device>` prefix this address belongs to."""
+        return topic_prefix(self.device_id, self.product_id)
+
+
+def parse_topic(topic: str) -> TopicAddress | None:
+    """Parse `dl/<product>/<device>/device/<category>/<direction>`.
+
+    Strict on purpose: anything that is not exactly this shape returns `None`
+    rather than a partially-populated address, so a malformed or unexpected
+    topic can never be routed to a device by accident.
+
+    Args:
+        topic: A full MQTT topic.
+
+    Returns:
+        The parsed address, or `None` if the topic is not a device topic.
+    """
+    parts = topic.split("/")
+    if len(parts) != _TOPIC_SEGMENT_COUNT:
+        return None
+    root, product_id, device_id, device_segment, category, direction = parts
+    if root != TOPIC_ROOT or device_segment != DEVICE_SEGMENT:
+        return None
+    if direction not in (POST_SUFFIX, SUB_SUFFIX):
+        return None
+    if not product_id or not device_id or not category:
+        return None
+    return TopicAddress(
+        product_id=product_id, device_id=device_id, category=category, direction=direction
+    )
+
+
+def topic_prefix(device_id: str, product_id: str = PRODUCT_ID) -> str:
     """Return the topic prefix for a device."""
-    return f"dl/{PRODUCT_ID}/{device_id}"
+    return f"{TOPIC_ROOT}/{product_id}/{device_id}"
 
 
-def sub_topic(device_id: str, category: str) -> str:
+def sub_topic(device_id: str, category: str, product_id: str = PRODUCT_ID) -> str:
     """Return the cloud -> device topic for a category (e.g. "ntp")."""
-    return f"{topic_prefix(device_id)}/device/{category}/{SUB_SUFFIX}"
+    return f"{topic_prefix(device_id, product_id)}/{DEVICE_SEGMENT}/{category}/{SUB_SUFFIX}"
 
 
 def category_of(topic: str) -> str | None:
@@ -78,10 +143,8 @@ def category_of(topic: str) -> str | None:
     Args:
         topic: A full MQTT topic, e.g. `dl/PLAF203/<id>/device/ntp/post`.
     """
-    parts = topic.split("/")
-    if len(parts) != 6 or parts[0] != "dl" or parts[3] != "device":
-        return None
-    return parts[4]
+    address = parse_topic(topic)
+    return address.category if address is not None else None
 
 
 def is_post(topic: str) -> bool:

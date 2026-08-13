@@ -30,32 +30,48 @@ docker compose logs -f relay
 Set `PETLIBRO_WEB_ENABLED=true` in `.env`, then open
 `http://<relay-LAN-IP>:8080/`. The dashboard is deliberately **read-only**:
 it does not create MQTT commands or expose any feeder control. It shows local
-MQTT, the real PETLIBRO MQTT state (only `CONNACK 0` means online), queues,
-the ACTIVE/CANDIDATE registry, state shadow, NTP observations and sanitized
-live logs.
+MQTT, every device's real PETLIBRO MQTT state (only `CONNACK 0` means
+online), per-device queues, the device registry and its enrollment statuses,
+state shadow, NTP observations and sanitized live logs. The Devices tab lists
+all bridged feeders with a per-device drill-down.
 
 The compose file publishes port 8080 by default, but no HTTP process listens
 until the flag is enabled. Keep this listener on the LAN only; it includes
 device IDs, topics and internal diagnostics and must never be exposed to the
 Internet.
 
-With no device identity configured in `.env` (the default), expect:
+On a fresh install, with no device identity configured in `.env` (the
+default), expect:
 
 ```
 Credential capture proxy listening on 0.0.0.0:1883, forwarding to mosquitto:1883
-No device identity configured - waiting for the feeder's first local connection to learn it
+No enrolled devices yet - waiting for a feeder to connect locally so its identity can be learned from its own CONNECT packet
 Connected to local broker (reason=Success)
 ```
 
-...then, once the feeder has connected through the proxy at least once (see
+...then, once a feeder has connected through the proxy at least once (see
 steps 2-3 below):
 
 ```
 Feeder connection from ('<feeder LAN IP>', <port>)
-Learned device identity: client_id=<CLIENT_ID>
-Connected to upstream PETLIBRO broker (reason=Success)
+Learned device identity: client_id=<CLIENT_ID> product=PLAF203 is now enrolled
+Device <CLIENT_ID> (product=PLAF203) is now bridged by this relay
+Started upstream session for <CLIENT_ID> (product=PLAF203)
+UPSTREAM online device=<CLIENT_ID> downtime=0.0s state_before=MQTT_CONNECTING
 Upstream subscription dl/PLAF203/<CLIENT_ID>/device/service/sub -> granted (code=...)
 ```
+
+Plugging in a second feeder needs no configuration change and no restart: it
+is learned, enrolled and given its own upstream session as soon as it
+connects. On a subsequent start, every enrolled device is restored up front:
+
+```
+Restored 2 enrolled device(s) from the registry
+```
+
+If you would rather approve new devices yourself, set
+`PETLIBRO_AUTO_ENROLL=false`; a newly seen feeder is then recorded as a
+candidate, shown on the dashboard, and not bridged.
 
 If a subscription line says `denied`, that category isn't allowed for this
 device identity - harmless, some server->device pushes still arrive over the

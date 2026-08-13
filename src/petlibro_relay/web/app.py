@@ -1,11 +1,17 @@
-"""FastAPI application exposing read-only relay diagnostics."""
+"""FastAPI application exposing read-only relay diagnostics.
+
+Every route is a GET that projects existing state. There is deliberately no
+endpoint that publishes MQTT, feeds, reboots, resets, changes configuration or
+alters enrollment - not hidden, not undocumented, not behind a flag. The
+dashboard is an observation surface only.
+"""
 
 from __future__ import annotations
 
 import json
 from collections.abc import Iterator
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .context import DashboardContext
@@ -27,46 +33,67 @@ def create_app(context: DashboardContext) -> FastAPI:
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:
-        """Report relay health; PETLIBRO cloud availability is informational only."""
+        """Report relay health; PETLIBRO cloud availability is informational only.
+
+        A cloud outage - which is the situation this relay exists for - must
+        never make the relay itself look unhealthy, so `healthy` reflects only
+        what this process controls.
+        """
         status = context.status()
+        summary = status["devices"]
         payload = {
             "healthy": True,
             "relay": True,
             "local_mqtt": status["local_mqtt"]["connected"],
-            "device_connected": status["device"] is not None,
-            "upstream_petlibro": status["upstream"]["state"] == "ONLINE",
+            "devices_known": summary["known"],
+            "devices_local_online": summary["local_online"],
+            "upstream_petlibro_online": summary["cloud_online"],
         }
         return JSONResponse(payload, status_code=200)
 
     @app.get("/api/status")
     def status() -> dict[str, object]:
-        """Return compact relay status."""
+        """Return compact relay status aggregated over every device."""
         return context.status()
 
     @app.get("/api/cloud")
     def cloud() -> dict[str, object]:
-        """Return PETLIBRO MQTT state and recent upstream events."""
+        """Return each device's PETLIBRO MQTT state and recent upstream events."""
         return context.cloud()
 
     @app.get("/api/devices")
     def devices() -> dict[str, object]:
-        """Return active and candidate device metadata."""
+        """Return one row per known device plus aggregate counts."""
         return context.devices()
 
+    @app.get("/api/devices/{device_id}")
+    def device_detail(
+        device_id: str, raw_limit: int = Query(100, ge=1, le=MAX_PAGE_SIZE)
+    ) -> dict[str, object]:
+        """Return the full per-device view: cloud, queues, state, NTP."""
+        detail = context.device_detail(device_id, raw_limit)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        return detail
+
     @app.get("/api/queues")
-    def queues(limit: int = Query(DEFAULT_LOG_LIMIT, ge=1, le=MAX_PAGE_SIZE)) -> dict[str, object]:
-        """Return bounded durable queue details."""
-        return context.queues(limit)
+    def queues(
+        device_id: str, limit: int = Query(DEFAULT_LOG_LIMIT, ge=1, le=MAX_PAGE_SIZE)
+    ) -> dict[str, object]:
+        """Return bounded durable queue details for one device."""
+        return context.queues(device_id, limit)
 
     @app.get("/api/state")
-    def state(raw_limit: int = Query(100, ge=1, le=MAX_PAGE_SIZE)) -> dict[str, object]:
-        """Return current active-device shadow state."""
-        return context.state(raw_limit)
+    def state(
+        device_id: str, raw_limit: int = Query(100, ge=1, le=MAX_PAGE_SIZE)
+    ) -> dict[str, object]:
+        """Return one device's shadow state."""
+        return context.state(device_id, raw_limit)
 
     @app.get("/api/ntp")
-    def ntp() -> dict[str, object]:
-        """Return NTP session-establishment observations."""
-        return context.ntp()
+    def ntp(device_id: str) -> dict[str, object]:
+        """Return one device's NTP session-establishment observations."""
+        return context.ntp(device_id)
 
     @app.get("/api/logs")
     def logs(limit: int = Query(DEFAULT_LOG_LIMIT, ge=1, le=MAX_PAGE_SIZE)) -> dict[str, object]:
@@ -77,7 +104,9 @@ def create_app(context: DashboardContext) -> FastAPI:
     def logs_stream(after: int = Query(0, ge=0)) -> StreamingResponse:
         """Stream sanitized log records with Server-Sent Events."""
         return StreamingResponse(
-            _stream_logs(context, after), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
+            _stream_logs(context, after),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
         )
 
     @app.get("/api/system")

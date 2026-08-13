@@ -8,9 +8,9 @@ import threading
 from types import FrameType
 
 from .config import RelayConfig
-from .credential_capture_proxy import CredentialCaptureProxy
+from .credential_capture_proxy import CredentialCaptureProxy, DeviceSessionListener
+from .device_manager import DeviceManager
 from .device_registry import SECONDS_PER_HOUR, DeviceIdentity, DeviceRegistry
-from .local_responder import LocalResponder
 from .logging_config import configure_logging
 from .message_queue import MessageQueue
 from .mqtt_bridge import MqttBridge, prime_local_subscription
@@ -22,8 +22,64 @@ from .web.server import DashboardServer
 
 _LOGGER = logging.getLogger(__name__)
 
-IDENTITY_POLL_INTERVAL_SECONDS = 3.0
-IDENTITY_WAIT_LOG_EVERY_N_POLLS = 20  # ~1 minute at the interval above
+
+class DeviceEnroller(DeviceSessionListener):
+    """Turns a learned local session into a bridged device, and back.
+
+    This is the runtime half of enrollment: the registry decides *whether* a
+    device may be bridged, and this listener acts on that decision the moment
+    the device connects, so no restart is needed to pick up a new feeder.
+    """
+
+    def __init__(
+        self,
+        registry: DeviceRegistry,
+        devices: DeviceManager,
+        bridge_holder: "BridgeHolder",
+        dashboard: DashboardContext,
+    ) -> None:
+        """Wire the enroller to the components a new device has to reach.
+
+        Args:
+            registry: Source of truth for which devices may be bridged.
+            devices: Owner of each bridged device's context.
+            bridge_holder: Indirection to the bridge, which is built after
+                this listener so the proxy can start accepting first.
+            dashboard: Read-only view updated with local presence.
+        """
+        self._registry = registry
+        self._devices = devices
+        self._bridge_holder = bridge_holder
+        self._dashboard = dashboard
+
+    def device_session_opened(self, identity: DeviceIdentity, peer_address: str) -> None:
+        """Bridge this device if it is enrolled, and mark it locally online."""
+        self._dashboard.set_device_online(identity.client_id, peer_address)
+        if not self._is_bridgeable(identity.client_id):
+            return
+        self._devices.ensure_device(identity)
+        bridge = self._bridge_holder.bridge
+        if bridge is not None:
+            bridge.forget_unknown_device(identity.client_id)
+
+    def device_session_closed(self, client_id: str) -> None:
+        """Mark the device locally offline; its cloud session stays as it is.
+
+        The upstream connection is deliberately left running: a feeder that
+        drops its local link for a few seconds should not lose its place in
+        the cloud, and the queue keeps anything that arrives meanwhile.
+        """
+        self._dashboard.set_device_offline(client_id)
+
+    def _is_bridgeable(self, client_id: str) -> bool:
+        return any(entry.client_id == client_id for entry in self._registry.get_bridgeable())
+
+
+class BridgeHolder:
+    """Lets the session listener reach a bridge that is created after it."""
+
+    def __init__(self) -> None:
+        self.bridge: MqttBridge | None = None
 
 
 def _install_shutdown_handler(stop_event: threading.Event) -> None:
@@ -35,54 +91,33 @@ def _install_shutdown_handler(stop_event: threading.Event) -> None:
     signal.signal(signal.SIGINT, _handle_shutdown_signal)
 
 
-def _resolve_identity(
-    config: RelayConfig, registry: DeviceRegistry, stop_event: threading.Event
-) -> DeviceIdentity | None:
-    """Return the device identity to use, blocking until one is available.
+def _seed_manual_identity(config: RelayConfig, registry: DeviceRegistry) -> None:
+    """Record a hand-configured device so it is bridged before it connects.
 
-    Uses the manually-configured identity from `.env` if all three fields are
-    set. Otherwise waits for `CredentialCaptureProxy` to learn one from the
-    feeder's own CONNECT packet, polling the registry until it does.
-
-    Returns:
-        The resolved `DeviceIdentity`, or `None` if `stop_event` was set
-        before one became available (shutdown requested while waiting).
+    Optional, and additive: it enrolls that one device without limiting the
+    relay to it.
     """
     manual = config.manually_configured_identity()
-    if manual is not None:
-        client_id, username, password = manual
-        _LOGGER.info("Using manually configured device identity: client_id=%s", client_id)
-        return DeviceIdentity(client_id=client_id, username=username, password=password)
-
-    _LOGGER.info(
-        "No device identity configured - waiting for the feeder's first local connection to learn it "
-        "(client_id, username, password captured automatically from its CONNECT packet)"
-    )
-    polls = 0
-    while not stop_event.is_set():
-        identity = registry.get_active()
-        if identity is not None:
-            _LOGGER.info("Using active device identity from registry: client_id=%s", identity.client_id)
-            return identity
-        polls += 1
-        if polls % IDENTITY_WAIT_LOG_EVERY_N_POLLS == 0:
-            _LOGGER.info("Still waiting for the feeder to connect locally...")
-        stop_event.wait(IDENTITY_POLL_INTERVAL_SECONDS)
-    return None
+    if manual is None:
+        return
+    client_id, username, password = manual
+    _LOGGER.info("Seeding manually configured device identity: client_id=%s", client_id)
+    registry.record(DeviceIdentity(client_id=client_id, username=username, password=password))
 
 
 def main() -> None:
-    """Load configuration and run the MQTT bridge until a shutdown signal is received."""
+    """Load configuration and run the relay until a shutdown signal is received."""
     config = RelayConfig.from_env()
     log_buffer = configure_logging(config.log_level)
     _LOGGER.info(
-        "Starting petlibro-relay (upstream=%s:%d, local=%s:%d, capture-proxy=%s:%d)",
+        "Starting petlibro-relay (upstream=%s:%d, local=%s:%d, capture-proxy=%s:%d, auto_enroll=%s)",
         config.upstream_host,
         config.upstream_port,
         config.local_host,
         config.local_port,
         config.capture_proxy_listen_host,
         config.capture_proxy_listen_port,
+        config.auto_enroll,
     )
 
     stop_event = threading.Event()
@@ -95,61 +130,52 @@ def main() -> None:
     registry = DeviceRegistry(
         config.device_registry_db_path,
         retention_seconds=config.device_retention_hours * SECONDS_PER_HOUR,
+        auto_enroll=config.auto_enroll,
     )
     registry.purge_expired()
+    _seed_manual_identity(config, registry)
 
-    dashboard_context = DashboardContext(config, registry, queue, shadow, telemetry, log_buffer)
+    devices = DeviceManager(config, registry, queue, shadow, state_cache, telemetry)
+    dashboard_context = DashboardContext(config, registry, queue, shadow, telemetry, log_buffer, devices)
+
     dashboard_server: DashboardServer | None = None
     if config.web_enabled:
         dashboard_server = DashboardServer(dashboard_context, config.web_host, config.web_port)
         dashboard_server.start()
 
+    bridge_holder = BridgeHolder()
     capture_proxy = CredentialCaptureProxy(
         listen_host=config.capture_proxy_listen_host,
         listen_port=config.capture_proxy_listen_port,
         broker_host=config.local_host,
         broker_port=config.local_port,
         registry=registry,
-        device_connected_callback=dashboard_context.set_device_ip,
+        listener=DeviceEnroller(registry, devices, bridge_holder, dashboard_context),
     )
     capture_proxy.start()
 
-    # Register the local subscription before the feeder can connect, so the
+    # Register the local subscription before any feeder can connect, so the
     # broker holds its opening burst for us instead of dropping it while we
-    # are still waiting to learn the device's identity from that same burst.
+    # are still learning that device's identity from that same burst.
     prime_local_subscription(config)
 
+    bridge = MqttBridge(config, devices, queue, telemetry)
+    bridge_holder.bridge = bridge
     try:
-        identity = _resolve_identity(config, registry, stop_event)
-        if identity is None:
-            _LOGGER.info("Shutdown requested before a device identity was available")
-            return
-
-        responder = LocalResponder(
-            config.local_responder, shadow, config.handled_msg_id_ttl_seconds
-        )
-        dashboard_context.set_active_device(identity, responder)
-        if config.local_responder.enabled:
-            _LOGGER.info(
-                "Local responder enabled (ntp=%s, config=%s, feeding_plan=%s, tz=%s)",
-                config.local_responder.ntp,
-                config.local_responder.config,
-                config.local_responder.feeding_plan,
-                config.local_responder.device_timezone,
-            )
-        else:
-            _LOGGER.info("Local responder disabled - relay is a pure pipe")
-
-        bridge = MqttBridge(config, identity, state_cache, queue, responder, telemetry)
+        # Every already-enrolled device comes up here; anything learned later
+        # is started by DeviceEnroller as soon as it connects.
+        devices.start()
         bridge.run_forever()
-        try:
-            stop_event.wait()
-        finally:
-            bridge.stop()
+        stop_event.wait()
     finally:
+        # Ordered teardown: stop taking new feeder connections, stop routing,
+        # then close each device's cloud session, then the web server, and
+        # only then the databases everything else was reading.
+        capture_proxy.stop()
+        bridge.stop()
+        devices.stop()
         if dashboard_server is not None:
             dashboard_server.stop()
-        capture_proxy.stop()
         queue.close()
         registry.close()
         shadow.close()

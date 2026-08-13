@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -125,7 +126,12 @@ class LocalResponder:
         self._settings = settings
         self._shadow = shadow
         self._handled_msg_id_ttl_seconds = handled_msg_id_ttl_seconds
-        self._handled_msg_ids: dict[str, float] = {}
+        # Keyed by (device_id, msgId), never by msgId alone: two feeders can
+        # legitimately mint the same identifier, and suppressing one device's
+        # cloud response because another answered that id locally would drop
+        # a real answer.
+        self._handled_msg_ids: dict[tuple[str, str], float] = {}
+        self._lock = threading.Lock()
         self.counters = ResponderCounters()
 
     def snapshot(self) -> dict[str, Any]:
@@ -165,11 +171,12 @@ class LocalResponder:
             if settings:
                 self._shadow.update_desired(device_id, settings)
 
-    def is_suppressed_cloud_response(self, payload: bytes) -> bool:
+    def is_suppressed_cloud_response(self, device_id: str, payload: bytes) -> bool:
         """True if this cloud message answers a request already served locally.
 
         Prevents the device receiving two answers to one request when the cloud
-        comes back mid-flight.
+        comes back mid-flight. Scoped to `device_id`, so an identifier this
+        relay answered for one feeder never suppresses another feeder's reply.
         """
         _, body = _parse(payload)
         if body is None:
@@ -177,12 +184,15 @@ class LocalResponder:
         msg_id = body.get("msgId")
         if not isinstance(msg_id, str):
             return False
-        self._expire_handled_msg_ids()
-        if msg_id in self._handled_msg_ids:
-            self.counters.suppressed_late_cloud_responses += 1
-            _LOGGER.info("SUPPRESSED late cloud response msgId=%s (already answered locally)", msg_id)
-            return True
-        return False
+        if not self._was_handled_locally(device_id, msg_id):
+            return False
+        self.counters.suppressed_late_cloud_responses += 1
+        _LOGGER.info(
+            "SUPPRESSED late cloud response msgId=%s for %s (already answered locally)",
+            msg_id,
+            device_id,
+        )
+        return True
 
     # -- device -> cloud: decide --------------------------------------------------
 
@@ -209,11 +219,16 @@ class LocalResponder:
         if not self._settings.enabled or body is None or command is None:
             return ResponderAction(Decision.CACHE_AND_FORWARD)
 
+        # Any reply goes back on the same product's topic tree as the request,
+        # rather than on a hardcoded product the device may not use.
+        address = protocol.parse_topic(topic)
+        product_id = address.product_id if address is not None else protocol.PRODUCT_ID
+
         # The device acknowledges an NTP_SYNC by posting back the same msgId.
         # When the sync came from us rather than the cloud, that ack must not
         # be forwarded: the cloud never issued that msgId and would be acked
         # for a message it did not send.
-        if self._is_ack_for_local_message(command, body):
+        if self._is_ack_for_local_message(device_id, command, body):
             _LOGGER.debug("Swallowing device ack for locally generated %s", command)
             return ResponderAction(Decision.IGNORE)
 
@@ -228,16 +243,16 @@ class LocalResponder:
                 # healthy device's NTP request unanswered.
                 _LOGGER.debug("Device clock within tolerance, no NTP_SYNC needed")
                 return ResponderAction(Decision.CACHE_AND_FORWARD)
-            return self._respond_ntp(device_id)
+            return self._respond_ntp(device_id, product_id)
 
         if upstream.is_online:
             # Cloud is reachable: stay transparent, just keep learning.
             return ResponderAction(Decision.CACHE_AND_FORWARD)
 
         if command == protocol.Command.FEEDING_PLAN_SERVICE and self._settings.feeding_plan:
-            return self._respond_feeding_plan(device_id, body)
+            return self._respond_feeding_plan(device_id, body, product_id)
         if command == protocol.Command.ATTR_GET_SERVICE and self._settings.config:
-            return self._respond_config(device_id, body)
+            return self._respond_config(device_id, body, product_id)
 
         if command in _NEVER_LOCAL:
             _LOGGER.info("NO LOCAL RESPONSE for %s (never answered locally by design)", command)
@@ -259,15 +274,16 @@ class LocalResponder:
         drift_seconds = abs(time.time() - device_ts / MILLISECONDS_PER_SECOND)
         return drift_seconds > self._settings.clock_drift_tolerance_seconds
 
-    def _is_ack_for_local_message(self, command: str, body: dict[str, Any]) -> bool:
+    def _is_ack_for_local_message(
+        self, device_id: str, command: str, body: dict[str, Any]
+    ) -> bool:
         """True if this device message acknowledges something we generated ourselves."""
         if command != protocol.Command.NTP_SYNC:
             return False
         msg_id = body.get("msgId")
         if not isinstance(msg_id, str):
             return False
-        self._expire_handled_msg_ids()
-        return msg_id in self._handled_msg_ids
+        return self._was_handled_locally(device_id, msg_id)
 
     def _record_reported(self, device_id: str, command: str, body: dict[str, Any]) -> None:
         """Store physical facts the device reported. Never synthesised."""
@@ -292,7 +308,7 @@ class LocalResponder:
 
     # -- response builders --------------------------------------------------------
 
-    def _respond_ntp(self, device_id: str) -> ResponderAction:
+    def _respond_ntp(self, device_id: str, product_id: str) -> ResponderAction:
         """Build an NTP_SYNC reply from the local clock and DST rules.
 
         Shape follows this firmware's own cloud traffic (V3.0.30), which
@@ -315,14 +331,21 @@ class LocalResponder:
             payload["secondNextDSTTransitionTs"] = schedule.second_next_transition_ts_ms
 
         self.counters.local_responses += 1
-        _LOGGER.info("LOCAL RESPONSE NTP msgId=%s offset=%ds", msg_id, schedule.offset_seconds)
+        _LOGGER.info(
+            "LOCAL RESPONSE NTP device=%s msgId=%s offset=%ds",
+            device_id,
+            msg_id,
+            schedule.offset_seconds,
+        )
         # Remember the msgId we minted: the device acks an NTP_SYNC by posting
         # the same msgId back, and that ack must be swallowed rather than sent
         # to a cloud that never issued it. (Observed on real traffic: cloud
         # pushes NTP_SYNC, device replies NTP_SYNC/code=0 with the same msgId.)
-        return self._reply(device_id, "ntp", payload, handled_msg_id=msg_id)
+        return self._reply(device_id, "ntp", payload, handled_msg_id=msg_id, product_id=product_id)
 
-    def _respond_feeding_plan(self, device_id: str, body: dict[str, Any]) -> ResponderAction:
+    def _respond_feeding_plan(
+        self, device_id: str, body: dict[str, Any], product_id: str
+    ) -> ResponderAction:
         """Reply with the last complete plan set the cloud sent, if we have one."""
         stored = self._shadow.get_feeding_plans(device_id)
         msg_id = body.get("msgId")
@@ -345,9 +368,13 @@ class LocalResponder:
             "msgId": msg_id,
             "plans": stored.plans,
         }
-        return self._reply(device_id, "service", payload, handled_msg_id=msg_id)
+        return self._reply(
+            device_id, "service", payload, handled_msg_id=msg_id, product_id=product_id
+        )
 
-    def _respond_config(self, device_id: str, body: dict[str, Any]) -> ResponderAction:
+    def _respond_config(
+        self, device_id: str, body: dict[str, Any], product_id: str
+    ) -> ResponderAction:
         """Reply with the last settings the cloud pushed, if any are cached."""
         desired = self._shadow.get_desired(device_id)
         msg_id = body.get("msgId")
@@ -368,24 +395,35 @@ class LocalResponder:
             "msgId": msg_id,
             **desired,
         }
-        return self._reply(device_id, "service", payload, handled_msg_id=msg_id)
+        return self._reply(
+            device_id, "service", payload, handled_msg_id=msg_id, product_id=product_id
+        )
 
     def _reply(
-        self, device_id: str, category: str, payload: dict[str, Any], handled_msg_id: str | None
+        self,
+        device_id: str,
+        category: str,
+        payload: dict[str, Any],
+        handled_msg_id: str | None,
+        product_id: str = protocol.PRODUCT_ID,
     ) -> ResponderAction:
         if handled_msg_id is not None:
-            self._handled_msg_ids[handled_msg_id] = time.time()
+            with self._lock:
+                self._handled_msg_ids[(device_id, handled_msg_id)] = time.time()
         return ResponderAction(
             decision=Decision.RESPOND_LOCAL,
-            response_topic=protocol.sub_topic(device_id, category),
+            response_topic=protocol.sub_topic(device_id, category, product_id),
             response_payload=json.dumps(payload).encode("utf-8"),
             handled_msg_id=handled_msg_id,
         )
 
-    def _expire_handled_msg_ids(self) -> None:
+    def _was_handled_locally(self, device_id: str, msg_id: str) -> bool:
+        """True if this relay minted an answer carrying `msg_id` for this device."""
         cutoff = time.time() - self._handled_msg_id_ttl_seconds
-        for msg_id in [m for m, seen in self._handled_msg_ids.items() if seen < cutoff]:
-            del self._handled_msg_ids[msg_id]
+        with self._lock:
+            for key in [key for key, seen in self._handled_msg_ids.items() if seen < cutoff]:
+                del self._handled_msg_ids[key]
+            return (device_id, msg_id) in self._handled_msg_ids
 
 
 _NEVER_LOCAL = frozenset(

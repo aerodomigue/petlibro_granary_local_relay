@@ -1,4 +1,9 @@
-"""Read-only API and SSE coverage for the observability dashboard."""
+"""Read-only API and SSE coverage for the multi-device observability dashboard.
+
+Two things are being defended here: the dashboard stays strictly read-only,
+and it never exposes a device's credentials. The multi-device tests also check
+that one device's metrics and state are not attributed to another.
+"""
 
 from __future__ import annotations
 
@@ -9,74 +14,82 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from petlibro_relay.config import RelayConfig
+from conftest import RelayConfigFactory
+
+from petlibro_relay.device_context import LOCAL_TO_UPSTREAM
+from petlibro_relay.device_manager import DeviceManager
 from petlibro_relay.device_registry import DeviceIdentity, DeviceRegistry
-from petlibro_relay.local_responder import LocalResponder, LocalResponderSettings
 from petlibro_relay.message_queue import MessageQueue
 from petlibro_relay.observability.log_buffer import RingBufferLogHandler
 from petlibro_relay.observability.telemetry import RelayTelemetry
+from petlibro_relay.state_cache import StateCache
 from petlibro_relay.state_shadow import StateShadow
 from petlibro_relay.web.app import _stream_logs, create_app
 from petlibro_relay.web.context import DashboardContext
 from petlibro_relay.web.static import DASHBOARD_HTML
 
-DEVICE_ID = "TESTDEVICE0000000001"
-USERNAME = "USER12345678"
-PASSWORD = "must-not-appear"
-CANDIDATE_PASSWORD = "candidate-must-not-appear"
+DEVICE_A = "TESTDEVICE0000000001"
+DEVICE_B = "TESTDEVICE0000000002"
+DEVICE_C = "TESTDEVICE0000000003"
+USERNAME_A = "USER12345678"
+PASSWORD_A = "must-not-appear"
+PASSWORD_B = "b-must-not-appear"
+PASSWORD_C = "c-must-not-appear"
 QUEUE_SECRET = "queue-secret-must-not-appear"
 
 
 @pytest.fixture
-def dashboard(tmp_path: Path) -> Iterator[tuple[DashboardContext, RingBufferLogHandler]]:
-    """Create a fully populated read-only dashboard context."""
-    config = RelayConfig(
-        device_client_id=None,
-        device_username=None,
-        device_password=None,
-        topic_prefix_override=None,
-        upstream_host="unused.invalid",
-        upstream_port=1883,
-        local_host="unused.invalid",
-        local_port=1883,
-        capture_proxy_listen_host="127.0.0.1",
-        capture_proxy_listen_port=1883,
-        keepalive_seconds=90,
-        state_cache_path=str(tmp_path / "state.json"),
-        queue_db_path=str(tmp_path / "queue.sqlite3"),
-        device_registry_db_path=str(tmp_path / "registry.sqlite3"),
-        device_retention_hours=72,
-        state_shadow_db_path=str(tmp_path / "shadow.sqlite3"),
-        handled_msg_id_ttl_seconds=120.0,
-        local_responder=LocalResponderSettings(),
-        web_enabled=True,
-        web_host="127.0.0.1",
-        web_port=8080,
-        max_queue_size=100,
-        log_level="INFO",
-    )
+def dashboard(
+    make_config: RelayConfigFactory, tmp_path: Path
+) -> Iterator[tuple[DashboardContext, RingBufferLogHandler]]:
+    """A dashboard over three devices in deliberately different states.
+
+    A is local-online with a healthy cloud session, B is local-online with the
+    cloud down and a backlog, C has never come online.
+    """
+    config = make_config(web_enabled=True)
     registry = DeviceRegistry(config.device_registry_db_path)
-    identity = DeviceIdentity(DEVICE_ID, USERNAME, PASSWORD)
-    registry.record(identity)
-    registry.record(DeviceIdentity("CANDIDATE0000000001", "CANDIDATEUSER", CANDIDATE_PASSWORD))
+    registry.record(DeviceIdentity(DEVICE_A, USERNAME_A, PASSWORD_A))
+    registry.record(DeviceIdentity(DEVICE_B, "USERBBBBBBBB", PASSWORD_B))
+    registry.record(DeviceIdentity(DEVICE_C, "USERCCCCCCCC", PASSWORD_C))
+
     queue = MessageQueue(config.queue_db_path, config.max_queue_size)
     queue.enqueue(
-        "local-to-upstream",
-        "dl/PLAF203/test/device/event/post",
-        b'{"cmd":"HEART","password":"queue-secret-must-not-appear"}',
+        DEVICE_B,
+        LOCAL_TO_UPSTREAM,
+        f"dl/PLAF203/{DEVICE_B}/device/event/post",
+        b'{"cmd":"HEART","password":"' + QUEUE_SECRET.encode() + b'"}',
         0,
     )
+
     shadow = StateShadow(config.state_shadow_db_path)
-    shadow.record_raw(DEVICE_ID, "dl/PLAF203/test/device/service/post", b'{"password":"hidden"}', "TEST")
-    shadow.record_raw(DEVICE_ID, "dl/PLAF203/test/device/ntp/post", b'{"cmd":"NTP","ts":1}', "NTP")
-    responder = LocalResponder(config.local_responder, shadow, config.handled_msg_id_ttl_seconds)
+    shadow.record_raw(
+        DEVICE_A, f"dl/PLAF203/{DEVICE_A}/device/service/post", b'{"password":"hidden"}', "TEST"
+    )
+    shadow.record_raw(
+        DEVICE_A, f"dl/PLAF203/{DEVICE_A}/device/ntp/post", b'{"cmd":"NTP","ts":1}', "NTP"
+    )
+    shadow.update_reported(DEVICE_A, {"rssi": -43, "firmware": "V3.0.30"})
+    shadow.update_reported(DEVICE_B, {"rssi": -51})
+
+    telemetry = RelayTelemetry()
+    telemetry.device(DEVICE_A).upstream_connect_attempt()
+    telemetry.device(DEVICE_A).upstream_online()
+    telemetry.device(DEVICE_A).increment("ntp_requests")
+    telemetry.device(DEVICE_B).upstream_connect_attempt()
+    telemetry.device(DEVICE_B).upstream_disconnected("socket reset")
+
     logs = RingBufferLogHandler()
     logs.setFormatter(logging.Formatter("%(message)s"))
-    telemetry = RelayTelemetry()
-    telemetry.increment("ntp_requests")
-    context = DashboardContext(config, registry, queue, shadow, telemetry, logs)
-    context.set_active_device(identity, responder)
+    devices = DeviceManager(
+        config, registry, queue, shadow, StateCache(config.state_cache_path), telemetry
+    )
+    context = DashboardContext(config, registry, queue, shadow, telemetry, logs, devices)
+    context.set_device_online(DEVICE_A, "10.3.100.90")
+    context.set_device_online(DEVICE_B, "10.3.100.91")
+
     yield context, logs
+
     queue.close()
     registry.close()
     shadow.close()
@@ -95,9 +108,10 @@ def client(dashboard: tuple[DashboardContext, RingBufferLogHandler]) -> TestClie
         "/api/status",
         "/api/cloud",
         "/api/devices",
-        "/api/queues",
-        "/api/state",
-        "/api/ntp",
+        f"/api/devices/{DEVICE_A}",
+        f"/api/queues?device_id={DEVICE_A}",
+        f"/api/state?device_id={DEVICE_A}",
+        f"/api/ntp?device_id={DEVICE_A}",
         "/api/logs",
         "/api/system",
     ],
@@ -112,40 +126,128 @@ def test_read_only_api_endpoints_return_json(client: TestClient, path: str) -> N
 
 def test_health_remains_ok_when_petlibro_is_down(client: TestClient) -> None:
     """Cloud failure must not make Docker/Kubernetes mark the local relay unhealthy."""
-    response = client.get("/healthz")
+    payload = client.get("/healthz").json()
 
-    assert response.status_code == 200
-    assert response.json()["healthy"] is True
-    assert response.json()["upstream_petlibro"] is False
+    assert payload["healthy"] is True
+    assert payload["devices_known"] == 3
+    assert payload["upstream_petlibro_online"] == 1, "only A has a live cloud session"
 
 
 def test_api_masks_credentials_and_sanitizes_raw_state(client: TestClient) -> None:
     """No learned password or full username can escape through read endpoints."""
-    payload = " ".join(
-        client.get(path).text for path in ("/api/devices", "/api/state", "/api/status", "/api/logs", "/api/queues")
+    paths = (
+        "/api/devices",
+        f"/api/devices/{DEVICE_A}",
+        f"/api/state?device_id={DEVICE_A}",
+        "/api/status",
+        "/api/logs",
+        f"/api/queues?device_id={DEVICE_B}",
     )
+    payload = " ".join(client.get(path).text for path in paths)
 
-    assert PASSWORD not in payload
-    assert CANDIDATE_PASSWORD not in payload
-    assert QUEUE_SECRET not in payload
-    assert USERNAME not in payload
-    assert "<redacted>" in client.get("/api/state").text
+    for secret in (PASSWORD_A, PASSWORD_B, PASSWORD_C, QUEUE_SECRET, USERNAME_A):
+        assert secret not in payload
+    assert "<redacted>" in client.get(f"/api/state?device_id={DEVICE_A}").text
 
 
-def test_candidate_and_disabled_local_responder_are_visible_without_secrets(client: TestClient) -> None:
-    """Candidates are observable, while the default pure-pipe mode remains explicit."""
-    devices = client.get("/api/devices").json()
+def test_devices_endpoint_lists_every_device_with_its_own_status(client: TestClient) -> None:
+    """The devices table shows all three, each with its own local/cloud state."""
+    payload = client.get("/api/devices").json()
+    rows = {row["device_id"]: row for row in payload["devices"]}
+
+    assert set(rows) == {DEVICE_A, DEVICE_B, DEVICE_C}
+    assert rows[DEVICE_A]["local_state"] == "LOCAL_ONLINE"
+    assert rows[DEVICE_A]["cloud_state"] == "ONLINE"
+    assert rows[DEVICE_B]["local_state"] == "LOCAL_ONLINE"
+    assert rows[DEVICE_B]["cloud_state"] == "DISCONNECTED"
+    assert rows[DEVICE_A]["rssi"] == -43
+    assert rows[DEVICE_B]["rssi"] == -51
+
+
+def test_summary_aggregates_across_devices(client: TestClient) -> None:
+    """The header counts come from the individual device rows."""
+    summary = client.get("/api/devices").json()["summary"]
+
+    assert summary["known"] == 3
+    assert summary["bridged"] == 3
+    assert summary["local_online"] == 2
+    assert summary["cloud_online"] == 1
+    assert summary["cloud_degraded"] == 2
+    assert summary["queue_pending"] == 1
+
+
+def test_queue_depth_is_attributed_to_the_right_device(client: TestClient) -> None:
+    """B's backlog must not be reported against A."""
+    rows = {row["device_id"]: row for row in client.get("/api/devices").json()["devices"]}
+
+    assert rows[DEVICE_B]["queue_pending"] == 1
+    assert rows[DEVICE_A]["queue_pending"] == 0
+    assert rows[DEVICE_C]["queue_pending"] == 0
+
+
+def test_metrics_are_isolated_between_devices(client: TestClient) -> None:
+    """A's NTP observation is not visible on B."""
+    ntp_a = client.get(f"/api/ntp?device_id={DEVICE_A}").json()
+    ntp_b = client.get(f"/api/ntp?device_id={DEVICE_B}").json()
+
+    assert ntp_a["requests_observed"] == 1
+    assert ntp_b["requests_observed"] == 0
+
+
+def test_state_is_scoped_to_the_requested_device(client: TestClient) -> None:
+    """A's raw messages must not appear under B."""
+    state_a = client.get(f"/api/state?device_id={DEVICE_A}").json()
+    state_b = client.get(f"/api/state?device_id={DEVICE_B}").json()
+
+    assert state_a["counts"]["raw_messages"] == 2
+    assert state_b["counts"]["raw_messages"] == 0
+
+
+def test_device_detail_covers_one_device_only(client: TestClient) -> None:
+    """The detail view bundles that device's cloud, queues, state and NTP."""
+    detail = client.get(f"/api/devices/{DEVICE_B}").json()
+
+    assert detail["device"]["device_id"] == DEVICE_B
+    assert detail["cloud"]["metrics"]["device_id"] == DEVICE_B
+    assert detail["queues"]["device_to_cloud"]["pending"] == 1
+    assert detail["ntp"]["device_id"] == DEVICE_B
+    assert all(event["device_id"] == DEVICE_B for event in detail["cloud"]["events"])
+
+
+def test_unknown_device_detail_is_404(client: TestClient) -> None:
+    """An unknown id is refused rather than answered with another device's data."""
+    assert client.get("/api/devices/NOT-A-DEVICE").status_code == 404
+
+
+def test_never_connected_device_is_shown_as_offline(client: TestClient) -> None:
+    """A device known only from the registry must not read as online."""
+    detail = client.get(f"/api/devices/{DEVICE_C}").json()
+
+    assert detail["device"]["cloud_state"] == "DISCONNECTED"
+    assert detail["cloud"]["metrics"]["upstream"]["availability"]["1h"] is None
+
+
+def test_cloud_endpoint_reports_each_device_separately(client: TestClient) -> None:
+    """The Cloud tab shows one upstream block per device that has a session."""
+    payload = client.get("/api/cloud").json()
+    states = {item["device_id"]: item["upstream"]["state"] for item in payload["devices"]}
+
+    assert states == {DEVICE_A: "ONLINE", DEVICE_B: "DISCONNECTED"}
+
+
+def test_pure_pipe_mode_is_explicit(client: TestClient) -> None:
+    """The default (responder off) remains visible rather than implied."""
     status = client.get("/api/status").json()
 
-    assert devices["candidates"][0]["status"] == "CANDIDATE"
-    assert devices["candidates"][0]["username"] != "CANDIDATEUSER"
     assert status["local_responder"]["enabled"] is False
     assert status["relay"]["mode"] == "PURE_PIPE"
 
 
-def test_ntp_request_without_cloud_reply_is_shown_as_session_establishment(client: TestClient) -> None:
+def test_ntp_request_without_cloud_reply_is_shown_as_session_establishment(
+    client: TestClient,
+) -> None:
     """NTP is visible as a request; no reply is inferred when none was received."""
-    payload = client.get("/api/ntp").json()
+    payload = client.get(f"/api/ntp?device_id={DEVICE_A}").json()
 
     assert payload["trigger"] == "session_establishment"
     assert payload["requests_observed"] == 1
@@ -154,7 +256,9 @@ def test_ntp_request_without_cloud_reply_is_shown_as_session_establishment(clien
     assert payload["last_ntp_sync"] is None
 
 
-def test_dashboard_has_no_write_routes(dashboard: tuple[DashboardContext, RingBufferLogHandler]) -> None:
+def test_dashboard_has_no_write_routes(
+    dashboard: tuple[DashboardContext, RingBufferLogHandler],
+) -> None:
     """The dashboard must not expose feeder control through HTTP."""
     context, _ = dashboard
     app = create_app(context)
@@ -181,14 +285,26 @@ def test_ui_keeps_raw_data_behind_explicit_debug_controls() -> None:
     assert "EventSource('/api/logs/stream')" in DASHBOARD_HTML
 
 
-def test_sse_emits_new_sanitized_log(dashboard: tuple[DashboardContext, RingBufferLogHandler]) -> None:
+def test_ui_renders_a_device_table_and_per_device_detail() -> None:
+    """The Devices tab is a multi-device table with a drill-down, not one card."""
+    assert "device-row" in DASHBOARD_HTML
+    assert "loadDeviceDetail" in DASHBOARD_HTML
+    assert "/api/devices/${encodeURIComponent(deviceId)}" in DASHBOARD_HTML
+    assert "devicePicker" in DASHBOARD_HTML
+
+
+def test_sse_emits_new_sanitized_log(
+    dashboard: tuple[DashboardContext, RingBufferLogHandler],
+) -> None:
     """The SSE generator publishes a newly appended safe log record."""
     context, logs = dashboard
-    record = logging.makeLogRecord({"msg": f"password={PASSWORD}", "levelno": logging.INFO, "levelname": "INFO"})
+    record = logging.makeLogRecord(
+        {"msg": f"password={PASSWORD_A}", "levelno": logging.INFO, "levelname": "INFO"}
+    )
     logs.emit(record)
 
     event = next(_stream_logs(context, after=0))
 
     assert event.startswith("id: 1\nevent: log\ndata: ")
-    assert PASSWORD not in event
+    assert PASSWORD_A not in event
     assert "<redacted>" in event

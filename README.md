@@ -50,61 +50,108 @@ it into `DeviceRegistry` (SQLite, `device_registry.py`), forwards those exact
 bytes to `mosquitto` unmodified, then becomes a plain bidirectional byte pipe
 for the rest of the session. `mosquitto` never sees anything different.
 
-On startup, `__main__` uses `PETLIBRO_DEVICE_CLIENT_ID` / `_USERNAME` /
-`_PASSWORD` from `.env` if all three are set (manual override - useful to
-run the relay before the feeder has ever connected locally, e.g. during
-development). Otherwise it blocks, polling the registry, until the feeder's
-first local connection has taught it who it is.
+On startup, `__main__` rebuilds every enrolled device from the registry and
+opens each one's cloud session. `PETLIBRO_DEVICE_CLIENT_ID` / `_USERNAME` /
+`_PASSWORD` remain available as a manual seed for one device (useful to
+bridge it before it has ever connected locally, e.g. during development);
+seeding adds that device, it does not restrict the relay to it. Nothing
+blocks waiting for a feeder: devices are picked up as they connect.
 
-Because the bridge can only start *after* an identity is known, and the
-identity comes from the feeder's own connection, the feeder's opening burst
-(`DEVICE_START_EVENT`, NTP handshake) would land before anything is
-subscribed. `prime_local_subscription()` therefore registers the local
-subscription up front, as the same `clean_session=False` client, so the
-broker holds those messages until the bridge connects for real.
+The feeder's opening burst (`DEVICE_START_EVENT`, NTP handshake) would land
+before anything is subscribed on a fresh install, so
+`prime_local_subscription()` registers the local subscription up front, as
+the same `clean_session=False` client, so the broker holds those messages
+until the bridge connects for real.
 
-### Active vs candidate devices
+### Multiple devices
+
+One relay process bridges **N devices**. Each keeps its own MQTT identity and
+its own upstream session - the cloud authenticates the connection *as the
+device*, so a shared session could only ever speak for one of them.
+
+```
+                        PETLIBRO
+             ┌─────────────┼─────────────┐
+       upstream A     upstream B     upstream C
+             │             │             │
+       DeviceContext  DeviceContext  DeviceContext
+             └─────────────┼─────────────┘
+                      DeviceManager
+                           │
+                    Local Mosquitto
+                           │
+                 CONNECT capture proxy
+             ┌─────────────┼─────────────┐
+          Device A      Device B      Device C
+```
+
+`DeviceContext` (`device_context.py`) owns one device's identity, cloud
+client, upstream state machine, responder and metrics. `DeviceManager`
+(`device_manager.py`) owns the set of them and is the only thing that creates
+or destroys one. Routing is by topic: every device topic names its device, so
+`MqttBridge` parses the topic (`protocol.parse_topic`), looks the device up,
+and hands the message to that context. A topic that resolves to no bridged
+device is ignored rather than guessed at.
+
+Adding a feeder needs **no configuration change, no restart and no second
+container** - it is bridged as soon as it connects.
+
+### Enrollment
 
 Anything on the LAN can reach the capture proxy and get itself recorded, so
-"whichever identity was seen most recently" would let a test client - or a
-second feeder - displace the real device just by connecting after it. The
-registry therefore keeps a **sticky active identity**:
+being *seen* is not the same as being *trusted*. Each identity carries a
+status:
 
-| Situation | Result |
+| Status | Meaning |
 |---|---|
-| no active device yet | the connecting device becomes active |
-| the active device reconnects | stays active; credentials and `last_seen_at` refreshed (credentials can legitimately rotate) |
-| a different device connects | stored as a **candidate**, logged as `Learned foreign candidate device B; active device remains A` - it never takes over on its own |
-| active device quiet past the TTL | it expires, the role goes vacant, and the next device to connect takes it |
+| `KNOWN` | enrolled; the relay opens an upstream session for it |
+| `CANDIDATE` | seen and shown on the dashboard, but never bridged |
+| `DISABLED` | explicitly held back |
 
-The active device is a pointer (`registry_state.active_client_id`) rather
-than a per-row flag, so "exactly one active" holds by construction. A restart
-re-reads that pointer, so the active device survives a restart even when a
-candidate has a more recent `last_seen_at`.
+`PETLIBRO_AUTO_ENROLL` (default `true`) decides where a newly learned device
+lands. With it off, a new feeder is stored as a candidate and waits, so
+adding one is a deliberate act rather than a consequence of plugging
+something into the LAN. Seeing a device again never re-opens that decision in
+either direction.
 
-The TTL is `PETLIBRO_DEVICE_RETENTION_HOURS` (72h) and applies to candidates
-too. Identities are deliberately *not* validated against the cloud before
-being trusted - the relay's whole purpose is to keep working while the cloud
-is unreachable (which, observed in practice, means TCP accepted then no
-CONNACK for ~30s before a reset), so cloud reachability must never gate it.
+The TTL is `PETLIBRO_DEVICE_RETENTION_HOURS` (72h): an identity whose device
+has not connected within it is forgotten. Identities are deliberately *not*
+validated against the cloud before being trusted - the relay's whole purpose
+is to keep working while the cloud is unreachable (which, observed in
+practice, means TCP accepted then no CONNACK for ~30s before a reset), so
+cloud reachability must never gate it.
 
-**One device per relay.** The local subscription is device-agnostic (it has
-to be, to exist before the identity is known), but the bridge holds exactly
-one device's upstream session, so messages from any other device are ignored
-with a warning rather than forwarded over the wrong identity. Run a second
-relay instance for a second feeder.
+Upgrading from the previous single-device model preserves its decision
+exactly: the device that was ACTIVE becomes `KNOWN`, and identities that were
+only candidates stay `CANDIDATE` even with auto-enrollment on.
 
-Two independent MQTT connections, never one client relaying through the
-other's socket directly:
+### Connections
 
-- **local**: `relay-local` client connects to the `mosquitto` container.
-- **upstream**: a second client connects to the real cloud broker,
-  authenticated as the device itself, using whichever identity was resolved
-  above.
+One connection to the local broker, plus one cloud connection per device -
+never one client relaying through another's socket directly:
+
+- **local**: a single `relay-local` client connects to the `mosquitto`
+  container and serves every device.
+- **upstream**: one client per device connects to the real cloud broker,
+  authenticated as that device, with its own reconnect and its own state.
 
 Both use MQTT 3.1 (`MQTTv31`), `clean_session=False`, 90s keepalive - matching
 exactly what the physical feeder sends, since the cloud broker's ACL is keyed
 off that exact identity/session.
+
+### Isolation
+
+A device's message never leaves under another's credentials, enters another's
+queue, touches another's shadow, or lands in another's metrics:
+
+- **queue** rows carry `device_id`; draining, counting and replaying are
+  always scoped to one device, and the size cap is per device so a flood
+  cannot evict another's backlog.
+- **state shadow** is keyed by `device_id` on every read and write.
+- **transactions** are keyed by `(device_id, msgId)` - two feeders can
+  legitimately mint the same identifier.
+- **telemetry** is one `DeviceTelemetry` per device, so a cloud outage on one
+  is invisible to the others.
 
 ## MQTT topics
 
@@ -321,14 +368,26 @@ tabs, backed by versionable JSON endpoints:
 ```
 GET /healthz
 GET /api/status     GET /api/cloud      GET /api/devices
-GET /api/queues     GET /api/state      GET /api/ntp
+GET /api/devices/{device_id}
+GET /api/queues?device_id=…    GET /api/state?device_id=…
+GET /api/ntp?device_id=…
 GET /api/logs       GET /api/logs/stream (SSE)
 GET /api/system
 ```
 
+Overview and the header aggregate across devices (known / local online /
+cloud online / cloud degraded / queues pending). Devices is a table with a
+per-device drill-down; Queues, State and NTP are scoped to one device via the
+picker. Logs can be filtered by device, component, level, cmd and text.
+
+Local presence comes from sessions the capture proxy actually observed, not
+from the 72h identity TTL: a device that is merely *known* is shown
+`LOCAL_OFFLINE`.
+
 `/healthz` reports the local relay only: PETLIBRO being down remains HTTP
-200, while its exact `DISCONNECTED` / `MQTT_CONNECTING` / `ONLINE` state and
-the last 15m/1h/24h observed availability remain visible in the Cloud tab.
+200, while each device's exact `DISCONNECTED` / `MQTT_CONNECTING` / `ONLINE`
+state and its last 15m/1h/24h observed availability remain visible in the
+Cloud tab.
 Logs are retained in a process-local ring buffer (5,000 entries), sanitized
 before API/SSE exposure; passwords, secrets, tokens and full MQTT usernames
 are never rendered. Keep the port LAN-only: diagnostics still contain device

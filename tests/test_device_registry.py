@@ -1,7 +1,9 @@
-"""Tests for the sticky active-device logic in `DeviceRegistry`.
+"""Tests for multi-device enrollment in `DeviceRegistry`.
 
-The point of these is that a device on the LAN must not be able to take over
-the relay just by connecting more recently than the real feeder.
+Two properties matter here. Devices must accumulate rather than displace each
+other - the whole point of the multi-device model - and a device on the LAN
+must not be able to get itself bridged when the operator has said newly seen
+devices need approval.
 """
 
 from __future__ import annotations
@@ -14,10 +16,11 @@ from pathlib import Path
 import pytest
 
 from petlibro_relay.device_registry import (
-    ACTIVE_CLIENT_ID_KEY,
+    LEGACY_ACTIVE_CLIENT_ID_KEY,
     SECONDS_PER_HOUR,
     DeviceIdentity,
     DeviceRegistry,
+    DeviceStatus,
     RecordOutcome,
 )
 
@@ -25,6 +28,7 @@ RETENTION_SECONDS = 72 * SECONDS_PER_HOUR
 
 DEVICE_A = DeviceIdentity(client_id="DEVICE-A", username="user-a", password="pass-a")
 DEVICE_B = DeviceIdentity(client_id="DEVICE-B", username="user-b", password="pass-b")
+DEVICE_C = DeviceIdentity(client_id="DEVICE-C", username="user-c", password="pass-c")
 
 
 @pytest.fixture
@@ -35,7 +39,7 @@ def db_path(tmp_path: Path) -> str:
 
 @pytest.fixture
 def registry(db_path: str) -> Iterator[DeviceRegistry]:
-    """A registry with the production retention window."""
+    """A registry with the production retention window and auto-enrollment on."""
     instance = DeviceRegistry(db_path, retention_seconds=RETENTION_SECONDS)
     yield instance
     instance.close()
@@ -52,31 +56,36 @@ def age_device(db_path: str, client_id: str, hours: float) -> None:
     connection.close()
 
 
-def test_first_connect_becomes_active(registry: DeviceRegistry) -> None:
-    """Test 1: an empty registry adopts the first device that connects."""
-    assert registry.get_active() is None
-
-    assert registry.record(DEVICE_A) is RecordOutcome.PROMOTED_TO_ACTIVE
-
-    active = registry.get_active()
-    assert active is not None
-    assert active.client_id == "DEVICE-A"
+def bridged_ids(registry: DeviceRegistry) -> list[str]:
+    """Client ids the relay would open an upstream session for."""
+    return sorted(identity.client_id for identity in registry.get_bridgeable())
 
 
-def test_same_device_reconnecting_stays_active_and_refreshes(
+def test_devices_accumulate_instead_of_displacing_each_other(registry: DeviceRegistry) -> None:
+    """Three feeders connecting leaves three bridgeable devices, not one."""
+    assert registry.get_bridgeable() == []
+
+    assert registry.record(DEVICE_A) is RecordOutcome.ENROLLED
+    assert registry.record(DEVICE_B) is RecordOutcome.ENROLLED
+    assert registry.record(DEVICE_C) is RecordOutcome.ENROLLED
+
+    assert bridged_ids(registry) == ["DEVICE-A", "DEVICE-B", "DEVICE-C"]
+
+
+def test_reconnect_refreshes_credentials_without_duplicating(
     registry: DeviceRegistry, db_path: str
 ) -> None:
-    """Test 2: the active device keeps the role, and its credentials are updated."""
+    """A device reconnecting updates its row rather than adding another."""
     registry.record(DEVICE_A)
     age_device(db_path, "DEVICE-A", hours=10)
 
     rotated = DeviceIdentity(client_id="DEVICE-A", username="user-a", password="rotated-secret")
-    assert registry.record(rotated) is RecordOutcome.REFRESHED_ACTIVE
+    assert registry.record(rotated) is RecordOutcome.REFRESHED
 
-    active = registry.get_active()
-    assert active is not None
-    assert active.client_id == "DEVICE-A"
-    assert active.password == "rotated-secret", "credentials must be refreshed on reconnect"
+    identity = registry.get("DEVICE-A")
+    assert identity is not None
+    assert identity.password == "rotated-secret", "credentials must be refreshed on reconnect"
+    assert bridged_ids(registry) == ["DEVICE-A"]
 
     connection = sqlite3.connect(db_path)
     (last_seen,) = connection.execute(
@@ -86,68 +95,72 @@ def test_same_device_reconnecting_stays_active_and_refreshes(
     assert time.time() - last_seen < 60, "last_seen_at must be refreshed"
 
 
-def test_foreign_device_becomes_candidate_not_active(registry: DeviceRegistry) -> None:
-    """Test 3: a different device connecting does not displace the active one."""
-    registry.record(DEVICE_A)
+def test_auto_enroll_off_parks_new_devices_as_candidates(db_path: str) -> None:
+    """With approval required, a new device is stored but never bridged."""
+    registry = DeviceRegistry(db_path, retention_seconds=RETENTION_SECONDS, auto_enroll=False)
+    try:
+        assert registry.record(DEVICE_A) is RecordOutcome.PENDING_APPROVAL
 
-    assert registry.record(DEVICE_B) is RecordOutcome.STORED_AS_CANDIDATE
+        assert registry.get_bridgeable() == [], "an unapproved device must not be bridged"
+        entries = registry.entries()
+        assert [entry.status for entry in entries] == [DeviceStatus.CANDIDATE]
+        assert entries[0].bridged is False
+    finally:
+        registry.close()
 
-    active = registry.get_active()
-    assert active is not None
-    assert active.client_id == "DEVICE-A", "a foreign device must never take over automatically"
-    assert [c.client_id for c in registry.get_candidates()] == ["DEVICE-B"]
+
+def test_candidate_stays_a_candidate_when_it_reconnects(db_path: str) -> None:
+    """Reconnecting must not be a way to talk yourself into being enrolled."""
+    registry = DeviceRegistry(db_path, retention_seconds=RETENTION_SECONDS, auto_enroll=False)
+    try:
+        registry.record(DEVICE_A)
+        assert registry.record(DEVICE_A) is RecordOutcome.PENDING_APPROVAL
+        assert registry.get_bridgeable() == []
+    finally:
+        registry.close()
 
 
-def test_active_survives_restart_even_with_newer_candidate(db_path: str) -> None:
-    """Test 4: the active role is sticky across a restart, not "most recently seen"."""
+def test_enrollment_survives_restart_for_every_device(db_path: str) -> None:
+    """Restarting rebuilds all three devices, not just the most recent one."""
     first = DeviceRegistry(db_path, retention_seconds=RETENTION_SECONDS)
     first.record(DEVICE_A)
-    first.record(DEVICE_B)  # B is now the most recently seen identity
+    first.record(DEVICE_B)
+    first.record(DEVICE_C)
     first.close()
 
     reopened = DeviceRegistry(db_path, retention_seconds=RETENTION_SECONDS)
-    active = reopened.get_active()
+    restored = bridged_ids(reopened)
     reopened.close()
 
-    assert active is not None
-    assert active.client_id == "DEVICE-A", "restart must not promote the newer candidate"
+    assert restored == ["DEVICE-A", "DEVICE-B", "DEVICE-C"]
 
 
-def test_expired_active_frees_the_role(registry: DeviceRegistry, db_path: str) -> None:
-    """Test 5: once the active device has been quiet past the TTL, the next one takes over."""
+def test_expired_device_stops_being_bridgeable(registry: DeviceRegistry, db_path: str) -> None:
+    """A device quiet past the TTL drops out without affecting the others."""
     registry.record(DEVICE_A)
+    registry.record(DEVICE_B)
     age_device(db_path, "DEVICE-A", hours=73)
 
-    assert registry.get_active() is None, "an expired active identity must not be returned"
-
-    assert registry.record(DEVICE_B) is RecordOutcome.PROMOTED_TO_ACTIVE
-    active = registry.get_active()
-    assert active is not None
-    assert active.client_id == "DEVICE-B"
+    assert bridged_ids(registry) == ["DEVICE-B"]
+    assert [entry.client_id for entry in registry.entries()] == ["DEVICE-B"]
 
 
-def test_purge_removes_expired_and_vacates_the_role(registry: DeviceRegistry, db_path: str) -> None:
-    """Expired identities are forgotten and a stale active pointer is cleared."""
+def test_purge_removes_only_expired_devices(registry: DeviceRegistry, db_path: str) -> None:
+    """Purging is selective: a live device is never collected with a stale one."""
     registry.record(DEVICE_A)
     registry.record(DEVICE_B)
     age_device(db_path, "DEVICE-A", hours=100)
-    age_device(db_path, "DEVICE-B", hours=100)
 
-    assert registry.purge_expired() == 2
-
-    connection = sqlite3.connect(db_path)
-    remaining = connection.execute("SELECT COUNT(*) FROM device_identities").fetchone()[0]
-    pointer = connection.execute(
-        "SELECT value FROM registry_state WHERE key = ?", (ACTIVE_CLIENT_ID_KEY,)
-    ).fetchone()
-    connection.close()
-
-    assert remaining == 0
-    assert pointer is None, "the active pointer must not outlive the identity it referred to"
+    assert registry.purge_expired() == 1
+    assert bridged_ids(registry) == ["DEVICE-B"]
 
 
-def test_migration_adopts_identity_learned_before_the_state_table(db_path: str) -> None:
-    """A database from an earlier version keeps working without waiting for a new CONNECT."""
+def test_migration_preserves_the_previous_active_and_candidate_decision(db_path: str) -> None:
+    """A legacy database keeps bridging exactly the device it used to bridge.
+
+    Auto-enrollment is on here: the point is that it must not retroactively
+    promote a device the single-active model deliberately refused.
+    """
     legacy = sqlite3.connect(db_path)
     with legacy:
         legacy.execute(
@@ -161,15 +174,28 @@ def test_migration_adopts_identity_learned_before_the_state_table(db_path: str) 
             )
             """
         )
+        legacy.execute("CREATE TABLE registry_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        for device in (DEVICE_A, DEVICE_B):
+            legacy.execute(
+                "INSERT INTO device_identities (client_id, username, password) VALUES (?, ?, ?)",
+                (device.client_id, device.username, device.password),
+            )
         legacy.execute(
-            "INSERT INTO device_identities (client_id, username, password) VALUES (?, ?, ?)",
-            (DEVICE_A.client_id, DEVICE_A.username, DEVICE_A.password),
+            "INSERT INTO registry_state (key, value) VALUES (?, ?)",
+            (LEGACY_ACTIVE_CLIENT_ID_KEY, DEVICE_A.client_id),
         )
     legacy.close()
 
     migrated = DeviceRegistry(db_path, retention_seconds=RETENTION_SECONDS)
-    active = migrated.get_active()
-    migrated.close()
-
-    assert active is not None
-    assert active.client_id == "DEVICE-A"
+    try:
+        assert bridged_ids(migrated) == ["DEVICE-A"], "the previously active device stays bridged"
+        statuses = {entry.client_id: entry.status for entry in migrated.entries()}
+        assert statuses == {
+            "DEVICE-A": DeviceStatus.KNOWN,
+            "DEVICE-B": DeviceStatus.CANDIDATE,
+        }
+        identity = migrated.get("DEVICE-A")
+        assert identity is not None
+        assert identity.password == DEVICE_A.password, "credentials must survive migration"
+    finally:
+        migrated.close()

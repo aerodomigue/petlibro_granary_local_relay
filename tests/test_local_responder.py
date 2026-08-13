@@ -223,7 +223,7 @@ def test_late_cloud_response_is_suppressed(responder: LocalResponder) -> None:
     assert action.decision is Decision.RESPOND_LOCAL
 
     # The cloud comes back and answers the same msgId.
-    assert responder.is_suppressed_cloud_response(CLOUD_PLAN_PUSH) is True
+    assert responder.is_suppressed_cloud_response(DEVICE_ID, CLOUD_PLAN_PUSH) is True
     assert responder.counters.suppressed_late_cloud_responses == 1
 
 
@@ -233,7 +233,7 @@ def test_unrelated_cloud_response_is_not_suppressed(responder: LocalResponder) -
     responder.decide(DEVICE_ID, SERVICE_POST, DEVICE_PLAN_REQUEST, UpstreamState.DISCONNECTED)
 
     other = json.dumps({"cmd": "ATTR_SET_SERVICE", "msgId": "different", "soundSwitch": False}).encode()
-    assert responder.is_suppressed_cloud_response(other) is False
+    assert responder.is_suppressed_cloud_response(DEVICE_ID, other) is False
 
 
 def test_state_survives_a_restart(tmp_path: Path) -> None:

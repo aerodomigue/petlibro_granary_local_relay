@@ -18,6 +18,7 @@ DEFAULT_STATE_CACHE_PATH = "/data/state_cache.json"
 DEFAULT_QUEUE_DB_PATH = "/data/relay_queue.sqlite3"
 DEFAULT_DEVICE_REGISTRY_DB_PATH = "/data/device_registry.sqlite3"
 DEFAULT_DEVICE_RETENTION_HOURS = 72
+DEFAULT_AUTO_ENROLL = True
 DEFAULT_STATE_SHADOW_DB_PATH = "/data/state_shadow.sqlite3"
 DEFAULT_DEVICE_TIMEZONE = "UTC"
 DEFAULT_HANDLED_MSG_ID_TTL_SECONDS = 120.0
@@ -33,12 +34,16 @@ DEFAULT_WEB_PORT = 8080
 class RelayConfig:
     """Runtime configuration for the MQTT relay, loaded from environment variables.
 
-    The device's MQTT identity (`device_client_id` / `_username` / `_password`)
-    is optional here: if unset, the relay learns it automatically from the
-    feeder's own CONNECT packet via `CredentialCaptureProxy` and
-    `DeviceRegistry`, rather than requiring it to be extracted and configured
-    by hand. Setting all three still works, as a manual override (useful to
-    run the relay before the feeder has ever connected locally).
+    Device identities are not configured here as a rule: the relay learns each
+    one automatically from that feeder's own CONNECT packet via
+    `CredentialCaptureProxy` and `DeviceRegistry`, and bridges as many devices
+    as connect. Adding a feeder therefore needs no configuration change and no
+    second container.
+
+    The `device_client_id` / `_username` / `_password` triplet remains as a
+    manual seed for a single device, useful to bridge one before it has ever
+    connected locally. It adds that device; it does not restrict the relay to
+    it.
     """
 
     device_client_id: str | None
@@ -56,6 +61,7 @@ class RelayConfig:
     queue_db_path: str
     device_registry_db_path: str
     device_retention_hours: float
+    auto_enroll: bool
     state_shadow_db_path: str
     handled_msg_id_ttl_seconds: float
     local_responder: LocalResponderSettings
@@ -94,6 +100,7 @@ class RelayConfig:
             device_retention_hours=float(
                 os.environ.get("PETLIBRO_DEVICE_RETENTION_HOURS", DEFAULT_DEVICE_RETENTION_HOURS)
             ),
+            auto_enroll=_env_flag("PETLIBRO_AUTO_ENROLL", DEFAULT_AUTO_ENROLL),
             state_shadow_db_path=os.environ.get(
                 "PETLIBRO_STATE_SHADOW_DB_PATH", DEFAULT_STATE_SHADOW_DB_PATH
             ),

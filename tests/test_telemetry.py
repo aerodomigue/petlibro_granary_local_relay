@@ -1,4 +1,4 @@
-"""Tests for transition-aware upstream MQTT observability."""
+"""Tests for transition-aware upstream MQTT observability, per device."""
 
 from __future__ import annotations
 
@@ -8,12 +8,14 @@ from typing import cast
 
 import pytest
 
-from petlibro_relay.mqtt_bridge import MqttBridge
+from petlibro_relay.device_context import DeviceContext
 from petlibro_relay.observability.telemetry import (
     OFFLINE_SUMMARY_INTERVAL_SECONDS,
-    RelayTelemetry,
+    DeviceTelemetry,
     UpstreamTransitionKind,
 )
+
+DEVICE_ID = "DEVICE-A"
 
 
 @dataclass
@@ -34,14 +36,14 @@ class ManualClock:
 def test_online_disconnect_is_one_session_loss_and_warning(caplog: pytest.LogCaptureFixture) -> None:
     """ONLINE -> disconnect is a true lost session, not a failed reconnect."""
     clock = ManualClock()
-    telemetry = RelayTelemetry(clock=clock)
+    telemetry = DeviceTelemetry(DEVICE_ID, clock=clock)
     telemetry.upstream_connect_attempt()
     assert telemetry.upstream_online().kind is UpstreamTransitionKind.ONLINE
     clock.advance(42)
 
     transition = telemetry.upstream_disconnected("Unspecified error", "server=false")
     with caplog.at_level(logging.DEBUG):
-        MqttBridge._log_upstream_transition(cast(MqttBridge, None), transition)
+        DeviceContext._log_upstream_transition(cast(DeviceContext, None), transition)
 
     counters = telemetry.snapshot()["upstream"]["counters"]
     assert transition.kind is UpstreamTransitionKind.SESSION_LOST
@@ -49,17 +51,17 @@ def test_online_disconnect_is_one_session_loss_and_warning(caplog: pytest.LogCap
     assert transition.session_duration_seconds == 42
     assert counters["sessions_lost"] == 1
     assert counters.get("reconnect_failures", 0) == 0
-    assert "UPSTREAM lost reason=Unspecified error session_duration=42.0s state_before=ONLINE" in caplog.text
+    assert "UPSTREAM lost device=DEVICE-A reason=Unspecified error session_duration=42.0s state_before=ONLINE" in caplog.text
 
 
 def test_connecting_disconnect_is_retry_failure_not_session_loss(caplog: pytest.LogCaptureFixture) -> None:
     """MQTT_CONNECTING -> disconnect is a failed CONNECT/CONNACK attempt only."""
-    telemetry = RelayTelemetry(clock=ManualClock())
+    telemetry = DeviceTelemetry(DEVICE_ID, clock=ManualClock())
     telemetry.upstream_connect_attempt()
 
     transition = telemetry.upstream_disconnected("Unspecified error")
     with caplog.at_level(logging.DEBUG):
-        MqttBridge._log_upstream_transition(cast(MqttBridge, None), transition)
+        DeviceContext._log_upstream_transition(cast(DeviceContext, None), transition)
 
     counters = telemetry.snapshot()["upstream"]["counters"]
     assert transition.kind is UpstreamTransitionKind.RETRY_FAILED
@@ -67,14 +69,14 @@ def test_connecting_disconnect_is_retry_failure_not_session_loss(caplog: pytest.
     assert counters.get("sessions_lost", 0) == 0
     assert counters["reconnect_failures"] == 1
     assert counters["connack_timeouts"] == 1
-    assert "Upstream reconnect failed attempt=1 reason=Unspecified error state_before=MQTT_CONNECTING" in caplog.text
+    assert "Upstream reconnect failed device=DEVICE-A attempt=1 reason=Unspecified error state_before=MQTT_CONNECTING" in caplog.text
     assert "UPSTREAM lost" not in caplog.text
 
 
 def test_retries_during_one_outage_do_not_create_extra_session_losses() -> None:
     """Repeated reconnect callbacks are failures in one outage, never new sessions lost."""
     clock = ManualClock()
-    telemetry = RelayTelemetry(clock=clock)
+    telemetry = DeviceTelemetry(DEVICE_ID, clock=clock)
     telemetry.upstream_connect_attempt()
     telemetry.upstream_online()
     telemetry.upstream_disconnected("socket reset")
@@ -94,7 +96,7 @@ def test_retries_during_one_outage_do_not_create_extra_session_losses() -> None:
 def test_restored_reports_outage_duration_and_resets_outage_attempts() -> None:
     """The next CONNACK reports one outage summary then clears outage-local state."""
     clock = ManualClock()
-    telemetry = RelayTelemetry(clock=clock)
+    telemetry = DeviceTelemetry(DEVICE_ID, clock=clock)
     telemetry.upstream_connect_attempt()
     clock.advance(30)
     telemetry.upstream_disconnected("Unspecified error")
@@ -114,7 +116,7 @@ def test_restored_reports_outage_duration_and_resets_outage_attempts() -> None:
 
 def test_tcp_failures_and_connack_refusals_are_distinct() -> None:
     """Paho TCP failures and broker refusals retain separate dashboard counters."""
-    telemetry = RelayTelemetry(clock=ManualClock())
+    telemetry = DeviceTelemetry(DEVICE_ID, clock=ManualClock())
     telemetry.upstream_connect_attempt()
     tcp_transition = telemetry.upstream_connect_failed()
     telemetry.upstream_connect_attempt()
@@ -131,24 +133,24 @@ def test_tcp_failures_and_connack_refusals_are_distinct() -> None:
 def test_long_outage_warning_is_rate_limited(caplog: pytest.LogCaptureFixture) -> None:
     """The five-minute offline summary is emitted at most once per interval."""
     clock = ManualClock()
-    telemetry = RelayTelemetry(clock=clock)
+    telemetry = DeviceTelemetry(DEVICE_ID, clock=clock)
     telemetry.upstream_connect_attempt()
 
     with caplog.at_level(logging.DEBUG):
         first = telemetry.upstream_disconnected("Unspecified error")
-        MqttBridge._log_upstream_transition(cast(MqttBridge, None), first)
+        DeviceContext._log_upstream_transition(cast(DeviceContext, None), first)
         clock.advance(OFFLINE_SUMMARY_INTERVAL_SECONDS - 1)
         telemetry.upstream_connect_attempt()
         second = telemetry.upstream_disconnected("Unspecified error")
-        MqttBridge._log_upstream_transition(cast(MqttBridge, None), second)
+        DeviceContext._log_upstream_transition(cast(DeviceContext, None), second)
         clock.advance(1)
         telemetry.upstream_connect_attempt()
         third = telemetry.upstream_disconnected("Unspecified error")
-        MqttBridge._log_upstream_transition(cast(MqttBridge, None), third)
+        DeviceContext._log_upstream_transition(cast(DeviceContext, None), third)
         clock.advance(1)
         telemetry.upstream_connect_attempt()
         fourth = telemetry.upstream_disconnected("Unspecified error")
-        MqttBridge._log_upstream_transition(cast(MqttBridge, None), fourth)
+        DeviceContext._log_upstream_transition(cast(DeviceContext, None), fourth)
 
     assert first.offline_summary_due is False
     assert second.offline_summary_due is False
