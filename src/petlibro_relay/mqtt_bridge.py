@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import TYPE_CHECKING
 
 import paho.mqtt.client as mqtt
 from paho.mqtt.client import Client, ConnectFlags, DisconnectFlags, MQTTMessage
@@ -51,6 +52,9 @@ from .device_context import LOCAL_TO_UPSTREAM, UPSTREAM_TO_LOCAL
 from .device_manager import DeviceManager
 from .message_queue import MessageQueue
 from .observability.telemetry import RelayTelemetry
+
+if TYPE_CHECKING:
+    from .sound_switch_control import SoundSwitchController
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -143,6 +147,7 @@ class MqttBridge:
         self._telemetry = telemetry
         self._local_topic_filter = ANY_DEVICE_POST_FILTER
         self._unknown_devices_seen: set[str] = set()
+        self._sound_switch_controller: SoundSwitchController | None = None
 
         self._local_client = self._build_local_client()
         self._local_to_upstream_pump = DeliveryPump(
@@ -205,6 +210,34 @@ class MqttBridge:
         self._local_to_upstream_pump.start()
         self._upstream_to_local_pump.start()
 
+    def set_sound_switch_controller(self, controller: SoundSwitchController) -> None:
+        """Attach the one narrow UI control acknowledgement observer.
+
+        This does not alter normal device-to-cloud handling: it only lets the
+        controller correlate a matching service `/post` ACK before the same
+        message continues into the existing queue and upstream bridge.
+        """
+        self._sound_switch_controller = controller
+
+    def publish_sound_switch(self, device_id: str, product_id: str, payload: bytes) -> bool:
+        """Publish the one supported interactive setting without durable replay.
+
+        The caller owns the validated payload. This method constructs the
+        fixed local `/service/sub` topic itself and immediately fails when the
+        broker is unavailable; it never enqueues the command.
+        """
+        if not self._local_client.is_connected():
+            return False
+        topic = protocol.sub_topic(device_id, "service", product_id)
+        result = self._local_client.publish(topic, payload, qos=QOS_AT_MOST_ONCE)
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            return False
+        try:
+            result.wait_for_publish(timeout=1.0)
+        except (RuntimeError, ValueError):
+            return False
+        return result.is_published()
+
     def stop(self) -> None:
         """Stop the delivery pumps and disconnect from the local broker.
 
@@ -262,6 +295,11 @@ class MqttBridge:
         if context is None:
             self._warn_unknown_device_once(address.device_id, message.topic)
             return
+
+        if self._sound_switch_controller is not None:
+            self._sound_switch_controller.observe_device_message(
+                address.device_id, message.topic, message.payload
+            )
 
         _LOGGER.debug(
             "local -> queue(%s) for %s: %s (%d bytes)",

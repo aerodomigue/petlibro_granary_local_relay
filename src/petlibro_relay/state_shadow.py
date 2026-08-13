@@ -13,6 +13,10 @@ and different trust levels:
 * **desired** - settings and configuration the cloud last pushed. The cloud
   is the source of truth; the newest valid cloud message becomes the
   last-known-good the relay may serve back while the cloud is unreachable.
+* **local confirmed** - settings an interactive local control asked for and
+  the feeder explicitly acknowledged. This is intentionally distinct from
+  cloud desired state: it proves device acceptance, not that the cloud has
+  made the setting authoritative.
 * **feeding plans** - the last *complete* plan set the cloud sent, kept whole
   rather than merged, so a stale partial set can never be replayed as if it
   were current.
@@ -29,6 +33,7 @@ import logging
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,6 +51,15 @@ CREATE TABLE IF NOT EXISTS device_reported (
 """
 _CREATE_DESIRED_SQL = """
 CREATE TABLE IF NOT EXISTS cloud_desired (
+    device_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (device_id, key)
+)
+"""
+_CREATE_LOCAL_CONFIRMED_SQL = """
+CREATE TABLE IF NOT EXISTS local_confirmed (
     device_id TEXT NOT NULL,
     key TEXT NOT NULL,
     value TEXT NOT NULL,
@@ -99,6 +113,7 @@ class StateShadow:
             for statement in (
                 _CREATE_REPORTED_SQL,
                 _CREATE_DESIRED_SQL,
+                _CREATE_LOCAL_CONFIRMED_SQL,
                 _CREATE_PLANS_SQL,
                 _CREATE_RAW_SQL,
             ):
@@ -123,7 +138,12 @@ class StateShadow:
     def update_desired(self, device_id: str, values: dict[str, Any]) -> None:
         """Record settings the cloud last pushed for this device."""
         self._update_kv("cloud_desired", device_id, values)
+        self._delete_keys("local_confirmed", device_id, values.keys())
         _LOGGER.info("CACHE UPDATE config (%d key(s))", len(values))
+
+    def update_local_confirmed(self, device_id: str, values: dict[str, Any]) -> None:
+        """Record a setting only after the physical feeder acknowledged it."""
+        self._update_kv("local_confirmed", device_id, values)
 
     def update_feeding_plans(
         self, device_id: str, plans: list[dict[str, Any]], source_msg_id: str | None
@@ -171,6 +191,23 @@ class StateShadow:
                 _LOGGER.exception("Failed to write state shadow")
                 raise
 
+    def _delete_keys(self, table: str, device_id: str, keys: Iterable[str]) -> None:
+        """Remove local confirmations superseded by a cloud desired-state push."""
+        key_list = list(keys)
+        if not key_list:
+            return
+        placeholders = ",".join("?" for _ in key_list)
+        with self._lock:
+            try:
+                with self._connection:
+                    self._connection.execute(
+                        f"DELETE FROM {table} WHERE device_id = ? AND key IN ({placeholders})",  # noqa: S608 - fixed table name
+                        (device_id, *key_list),
+                    )
+            except sqlite3.Error:
+                _LOGGER.exception("Failed to clear superseded %s for %s", table, device_id)
+                raise
+
     # -- reads -------------------------------------------------------------------
 
     def get_desired(self, device_id: str) -> dict[str, Any]:
@@ -180,6 +217,10 @@ class StateShadow:
     def get_reported(self, device_id: str) -> dict[str, Any]:
         """Return the last device-reported facts."""
         return self._read_kv("device_reported", device_id)
+
+    def get_local_confirmed(self, device_id: str) -> dict[str, Any]:
+        """Return settings the feeder confirmed from a local interactive write."""
+        return self._read_kv("local_confirmed", device_id)
 
     def _read_kv(self, table: str, device_id: str) -> dict[str, Any]:
         with self._lock:
@@ -219,6 +260,7 @@ class StateShadow:
             "device_id": device_id,
             "reported": self.get_reported(device_id),
             "desired": self.get_desired(device_id),
+            "local_confirmed": self.get_local_confirmed(device_id),
             "feeding_plans": {
                 "plans": plans.plans if plans else [],
                 "updated_at": plans.updated_at if plans else None,
@@ -235,6 +277,10 @@ class StateShadow:
             ).fetchall()
             desired_rows = self._connection.execute(
                 "SELECT key, value, updated_at FROM cloud_desired WHERE device_id = ? ORDER BY key",
+                (device_id,),
+            ).fetchall()
+            local_confirmed_rows = self._connection.execute(
+                "SELECT key, value, updated_at FROM local_confirmed WHERE device_id = ? ORDER BY key",
                 (device_id,),
             ).fetchall()
             raw_rows = self._connection.execute(
@@ -256,6 +302,10 @@ class StateShadow:
                 {"key": key, "value": json.loads(value), "updated_at": float(updated_at)}
                 for key, value, updated_at in desired_rows
             ],
+            "local_confirmed": [
+                {"key": key, "value": json.loads(value), "updated_at": float(updated_at)}
+                for key, value, updated_at in local_confirmed_rows
+            ],
             "feeding_plans": {
                 "plans": plans.plans if plans else [],
                 "source_msg_id": plans.source_msg_id if plans else None,
@@ -274,6 +324,7 @@ class StateShadow:
             "counts": {
                 "reported": len(reported_rows),
                 "desired": len(desired_rows),
+                "local_confirmed": len(local_confirmed_rows),
                 "raw_messages": int(raw_count),
                 "feeding_plan_cached": plans is not None,
             },

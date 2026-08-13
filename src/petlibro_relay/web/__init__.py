@@ -1,1 +1,1 @@
-"""Read-only FastAPI dashboard for PETLIBRO relay observability."""
+"""FastAPI dashboard with one explicitly confirmed sound control."""

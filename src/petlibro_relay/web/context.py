@@ -1,8 +1,8 @@
-"""Read-only dependency container for the relay dashboard.
+"""State projections and the narrow control dependency for the relay dashboard.
 
-Every method here is a projection of state the relay already owns. Nothing in
-this module - or anything it is reachable from - publishes MQTT, mutates the
-registry, or writes to a database. The dashboard observes; it never controls.
+Dashboard methods project state only. The sole write path is kept outside this
+class in ``SoundSwitchController`` and is explicitly injected for the one
+validated device setting.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from ..observability.log_buffer import RingBufferLogHandler
 from ..observability.sanitizer import mask_username, sanitize_value
 from ..observability.telemetry import RelayTelemetry
 from ..state_shadow import StateShadow
+from ..sound_switch_control import SoundSwitchController
 
 
 class DashboardContext:
@@ -39,6 +40,7 @@ class DashboardContext:
         logs: RingBufferLogHandler,
         devices: DeviceManager,
         presence: DevicePresenceTracker,
+        sound_switch_control: SoundSwitchController | None = None,
     ) -> None:
         self._config = config
         self._registry = registry
@@ -48,6 +50,7 @@ class DashboardContext:
         self._logs = logs
         self._devices = devices
         self._presence = presence
+        self._sound_switch_control = sound_switch_control
 
     @property
     def logs(self) -> RingBufferLogHandler:
@@ -143,6 +146,7 @@ class DashboardContext:
                     "state": self.state(device_id, raw_limit),
                     "ntp": self.ntp(device_id),
                     "local_responder": self.responder(device_id),
+                    "controls": self.controls(device_id),
                 }
             ),
         )
@@ -205,6 +209,34 @@ class DashboardContext:
             "device_timezone": settings.device_timezone,
             "counters": {},
         }
+
+    def controls(self, device_id: str) -> dict[str, Any]:
+        """Return explicit capability state without exposing a generic control path."""
+        if self._sound_switch_control is None:
+            return {
+                "soundSwitch": {
+                    "control": "soundSwitch",
+                    "writable": False,
+                    "device_ack_confirmed": True,
+                    "cloud_sync_confirmed": True,
+                    "device_online": False,
+                    "required_state_available": False,
+                    "pending": False,
+                },
+                "motionDetectionSwitch": {
+                    "control": "motionDetectionSwitch",
+                    "writable": False,
+                    "device_ack_confirmed": True,
+                    "cloud_sync_confirmed": False,
+                },
+                "counters": {},
+            }
+        return self._sound_switch_control.snapshot(device_id)
+
+    @property
+    def sound_switch_control(self) -> SoundSwitchController | None:
+        """Return the narrow service used by the sole write endpoint."""
+        return self._sound_switch_control
 
     def system(self) -> dict[str, Any]:
         """Return local process/database facts for diagnostics only."""

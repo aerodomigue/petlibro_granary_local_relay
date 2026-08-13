@@ -15,6 +15,7 @@ from .sanitizer import sanitize_text
 DEFAULT_LOG_BUFFER_SIZE = 5000
 DEVICE_TOPIC_PATTERN = re.compile(r"dl/[^/]+/([^/]+)/")
 CLIENT_ID_PATTERN = re.compile(r"client_id=([A-Za-z0-9_-]+)")
+DEVICE_ID_FIELD_PATTERN = re.compile(r"device_id=([A-Za-z0-9._-]+)")
 COMMAND_PATTERN = re.compile(r"\bcmd[= ]([A-Z][A-Z0-9_]+)")
 
 
@@ -91,6 +92,7 @@ def _component_from_logger(logger_name: str | None) -> str:
         "message_queue": "queue",
         "state_shadow": "shadow",
         "local_responder": "responder",
+        "sound_switch_control": "control",
         "web": "web",
     }
     for suffix, component in mapping.items():
@@ -107,6 +109,9 @@ def _device_id_from_record(record: logging.LogRecord, message: str) -> str | Non
     topic_match = DEVICE_TOPIC_PATTERN.search(message)
     if topic_match is not None:
         return topic_match.group(1)
+    device_match = DEVICE_ID_FIELD_PATTERN.search(message)
+    if device_match is not None:
+        return device_match.group(1)
     client_match = CLIENT_ID_PATTERN.search(message)
     return client_match.group(1) if client_match is not None else None
 

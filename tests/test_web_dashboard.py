@@ -366,17 +366,21 @@ def test_ntp_request_without_cloud_reply_is_shown_as_session_establishment(
     assert payload["last_ntp_sync"] is None
 
 
-def test_dashboard_has_no_write_routes(
+def test_dashboard_exposes_only_the_narrow_sound_write_route(
     dashboard: tuple[DashboardContext, RingBufferLogHandler],
 ) -> None:
-    """The dashboard must not expose feeder control through HTTP."""
+    """No generic MQTT or arbitrary-control write endpoint can reach HTTP."""
     context, _ = dashboard
     app = create_app(context)
 
-    assert all(
-        methods is None or methods <= {"GET", "HEAD"}
-        for methods in (getattr(route, "methods", None) for route in app.routes)
-    )
+    write_routes = {
+        (route.path, tuple(sorted(route.methods or set())))
+        for route in app.routes
+        if route.methods is not None and not route.methods <= {"GET", "HEAD"}
+    }
+
+    assert write_routes == {("/api/devices/{device_id}/controls/sound", ("PATCH",))}
+    assert all("mqtt/publish" not in route.path for route in app.routes)
 
 
 def test_ui_keeps_raw_data_behind_explicit_debug_controls() -> None:

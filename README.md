@@ -392,11 +392,13 @@ cloud replies to the device's own `cmd: NTP` *request* (as opposed to these
 unsolicited pushes) has not been observed, so enabling it remains a
 deliberate choice.
 
-## Read-only observability dashboard
+## Observability dashboard and confirmed control
 
 Set `PETLIBRO_WEB_ENABLED=true` to start the integrated FastAPI dashboard on
 `PETLIBRO_WEB_HOST:PETLIBRO_WEB_PORT` (default `0.0.0.0:8080`). It is
-strictly read-only: no HTTP endpoint publishes MQTT or changes the feeder.
+read-only except for one deliberately narrow, device-confirmed control:
+`soundSwitch` on a locally present PLAF203. The HTTP API never accepts an
+arbitrary MQTT topic, command, field, or JSON payload.
 The UI has Overview, Cloud, Devices, Queues, State, NTP, Logs and System
 tabs, backed by versionable JSON endpoints:
 
@@ -408,7 +410,14 @@ GET /api/queues?device_id=…    GET /api/state?device_id=…
 GET /api/ntp?device_id=…
 GET /api/logs       GET /api/logs/stream (SSE)
 GET /api/system
+PATCH /api/devices/{device_id}/controls/sound   {"enabled": true|false}
 ```
+
+The sound endpoint requires local presence plus valid `soundSwitch` and
+`soundAgingType` shadow values. It publishes one local `ATTR_SET_SERVICE` and
+returns success only after the feeder posts `code: 0` with the same `msgId`.
+It is never inserted into the durable queue or replayed. All other controls,
+including motion detection, remain read-only.
 
 Overview and the header aggregate across devices (known / local online /
 cloud online / cloud degraded / queues pending). Devices is a table with a

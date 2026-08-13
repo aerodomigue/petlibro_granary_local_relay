@@ -25,11 +25,12 @@ docker compose up -d --build
 docker compose logs -f relay
 ```
 
-### Read-only dashboard (optional)
+### Dashboard (optional)
 
 Set `PETLIBRO_WEB_ENABLED=true` in `.env`, then open
-`http://<relay-LAN-IP>:8080/`. The dashboard is deliberately **read-only**:
-it does not create MQTT commands or expose any feeder control. It shows local
+`http://<relay-LAN-IP>:8080/`. The dashboard is read-only apart from a single
+PLAF203 sound toggle that waits for a feeder ACK before reporting success. It
+does not expose generic MQTT publishing or any other feeder control. It shows local
 MQTT, every device's real PETLIBRO MQTT state (only `CONNACK 0` means
 online), per-device queues, the device registry and its enrollment statuses,
 state shadow, NTP observations and sanitized live logs. The Devices tab lists

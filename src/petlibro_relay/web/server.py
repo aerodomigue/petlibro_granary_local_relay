@@ -1,4 +1,4 @@
-"""Background lifecycle wrapper for the read-only Uvicorn server."""
+"""Background lifecycle wrapper for the narrow relay dashboard server."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ class DashboardServer:
     def start(self) -> None:
         """Start the HTTP server and return without blocking MQTT startup."""
         self._thread.start()
-        _LOGGER.info("Read-only dashboard started on HTTP listener")
+        _LOGGER.info("Dashboard started on HTTP listener")
 
     def stop(self) -> None:
         """Request a clean server stop during relay shutdown."""

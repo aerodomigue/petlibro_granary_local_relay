@@ -18,6 +18,7 @@ from .mqtt_bridge import MqttBridge, prime_local_subscription
 from .observability.telemetry import RelayTelemetry
 from .state_cache import StateCache
 from .state_shadow import StateShadow
+from .sound_switch_control import SoundSwitchController
 from .web.context import DashboardContext
 from .web.server import DashboardServer
 
@@ -142,8 +143,22 @@ def main() -> None:
 
     presence = DevicePresenceTracker()
     devices = DeviceManager(config, registry, queue, shadow, state_cache, telemetry, presence)
+    bridge_holder = BridgeHolder()
+    bridge = MqttBridge(config, devices, queue, telemetry)
+    sound_switch_control = SoundSwitchController(
+        devices, presence, shadow, bridge.publish_sound_switch
+    )
+    bridge.set_sound_switch_controller(sound_switch_control)
     dashboard_context = DashboardContext(
-        config, registry, queue, shadow, telemetry, log_buffer, devices, presence
+        config,
+        registry,
+        queue,
+        shadow,
+        telemetry,
+        log_buffer,
+        devices,
+        presence,
+        sound_switch_control,
     )
 
     dashboard_server: DashboardServer | None = None
@@ -151,7 +166,6 @@ def main() -> None:
         dashboard_server = DashboardServer(dashboard_context, config.web_host, config.web_port)
         dashboard_server.start()
 
-    bridge_holder = BridgeHolder()
     capture_proxy = CredentialCaptureProxy(
         listen_host=config.capture_proxy_listen_host,
         listen_port=config.capture_proxy_listen_port,
@@ -167,7 +181,6 @@ def main() -> None:
     # are still learning that device's identity from that same burst.
     prime_local_subscription(config)
 
-    bridge = MqttBridge(config, devices, queue, telemetry)
     bridge_holder.bridge = bridge
     try:
         # Every already-enrolled device comes up here; anything learned later

@@ -1,9 +1,8 @@
-"""FastAPI application exposing read-only relay diagnostics.
+"""FastAPI diagnostics plus the one confirmed feeder control.
 
-Every route is a GET that projects existing state. There is deliberately no
-endpoint that publishes MQTT, feeds, reboots, resets, changes configuration or
-alters enrollment - not hidden, not undocumented, not behind a flag. The
-dashboard is an observation surface only.
+All routes are read-only except the narrow, typed sound-switch endpoint. It
+cannot choose MQTT topics, commands, fields, or payloads; those are built and
+validated exclusively by the control service after device-local ACK.
 """
 
 from __future__ import annotations
@@ -14,7 +13,16 @@ from collections.abc import Iterator
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict
 
+from ..sound_switch_control import (
+    ControlAckRejectedError,
+    ControlAckTimeoutError,
+    ControlBusyError,
+    ControlOfflineError,
+    ControlPublishError,
+    ControlStateUnavailableError,
+)
 from .context import DashboardContext
 from .static import DASHBOARD_HTML
 
@@ -24,8 +32,16 @@ SSE_WAIT_SECONDS = 15.0
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
+class SoundControlRequest(BaseModel):
+    """The only accepted write body: an explicit boolean sound state."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    enabled: bool
+
+
 def create_app(context: DashboardContext) -> FastAPI:
-    """Create the dashboard application without adding any write routes."""
+    """Create the dashboard app with the one narrow sound write route."""
     app = FastAPI(title="PETLIBRO Local Relay", version="0.1.0", docs_url=None, redoc_url=None)
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -99,6 +115,32 @@ def create_app(context: DashboardContext) -> FastAPI:
         if detail is None:
             raise HTTPException(status_code=404, detail="Unknown device")
         return detail
+
+    @app.patch("/api/devices/{device_id}/controls/sound")
+    def set_device_sound(device_id: str, request: SoundControlRequest) -> dict[str, object]:
+        """Set the sole control validated for device and PETLIBRO cloud sync."""
+        if not DEVICE_ID_PATTERN.fullmatch(device_id) or context.device_detail(device_id, 1) is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        control = context.sound_switch_control
+        if control is None:
+            raise HTTPException(status_code=409, detail="Sound control is unavailable")
+        try:
+            return control.set_sound_switch(device_id, request.enabled)
+        except ControlOfflineError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ControlStateUnavailableError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ControlBusyError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ControlPublishError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except ControlAckTimeoutError as error:
+            raise HTTPException(status_code=504, detail=str(error)) from error
+        except ControlAckRejectedError as error:
+            raise HTTPException(
+                status_code=502,
+                detail={"message": str(error), "device_ack": True, "code": error.code},
+            ) from error
 
     @app.get("/api/queues")
     def queues(
