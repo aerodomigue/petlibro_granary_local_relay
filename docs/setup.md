@@ -128,6 +128,22 @@ would resolve straight to the real cloud, bypassing the proxy entirely.
 > your DNS override is scoped to the feeder's IP/VLAN only, this is moot -
 > but check it anyway, it's the failure mode that looks like success.
 
+### Safe upstream outage test
+
+To test an upstream outage without ever looping the relay back into its own
+capture proxy or local broker, point only the relay upstream at an unused
+local port, for example:
+
+```env
+PETLIBRO_UPSTREAM_HOST=127.0.0.1
+PETLIBRO_UPSTREAM_PORT=65534
+```
+
+Never use `127.0.0.1:1883`, `localhost:1883`, or `[::1]:1883`: port `1883`
+is the capture-proxy/local-broker path and would create an MQTT loop. The
+relay rejects those unsafe literal loopback configurations before starting
+any device or upstream MQTT session.
+
 Do **not** override any other `*.petlibro.com` / `*.dl-aiot.com` hostname
 (REST API, camera/Kalay, or the `sit-svc.` / `demo-svc.` / `test.svc.`
 staging hosts icex2 found in the firmware binary but that aren't expected in

@@ -45,7 +45,7 @@ from .device_registry import DeviceIdentity
 from .local_responder import Decision, LocalResponder, ResponderAction, UpstreamState
 from .message_queue import MessageQueue
 from .observability.telemetry import DeviceTelemetry, UpstreamTransition, UpstreamTransitionKind
-from .replay_policy import coalesce_key_for, extract_command, policy_for
+from .replay_policy import coalesce_key_for, extract_command, policy_for, should_enqueue
 from .state_cache import StateCache
 from .state_shadow import StateShadow
 
@@ -380,11 +380,14 @@ class DeviceContext:
     def _enqueue(
         self, direction: str, topic: str, payload: bytes, qos: int, is_cloud_to_device: bool
     ) -> None:
-        """Queue a message for this device, letting state-carrying commands supersede older ones."""
+        """Queue a message unless an explicitly ephemeral report is offline."""
         command = extract_command(payload)
         policy = policy_for(is_cloud_to_device, command)
+        if not should_enqueue(policy, self.upstream_state is UpstreamState.ONLINE):
+            self._telemetry.increment("queue_dropped_ephemeral")
+            return
         coalesce_key = coalesce_key_for(topic, command, policy)
-        self._queue.enqueue(
+        superseded_count = self._queue.enqueue(
             self.device_id,
             direction,
             topic,
@@ -392,7 +395,10 @@ class DeviceContext:
             qos,
             coalesce_key,
             product_id=self.product_id,
+            max_age_seconds=policy.max_age_seconds,
         )
+        if superseded_count:
+            self._telemetry.increment("queue_coalesced_latest", superseded_count)
 
     def _observe_ntp(self, payload: bytes, source: str) -> None:
         """Record NTP session-establishment traffic without changing its flow."""

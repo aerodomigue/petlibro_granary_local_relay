@@ -22,9 +22,9 @@ from dataclasses import dataclass
 
 import paho.mqtt.client as mqtt
 
-from .message_queue import MessageQueue
+from .message_queue import MessageQueue, QueuedMessage
 from .observability.telemetry import DeviceTelemetry
-from .replay_policy import extract_command, policy_for
+from .replay_policy import extract_command
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ class DeliveryPump:
             if message is None:
                 return delivered
 
-            if self._is_expired(message.payload, message.created_at, message.topic):
+            if self._is_expired(message):
                 self._queue.remove(message.id)
                 target.telemetry.increment("queue_expired")
                 delivered = True
@@ -139,22 +139,20 @@ class DeliveryPump:
             delivered = True
         return delivered
 
-    def _is_expired(self, payload: bytes, created_at: float, topic: str) -> bool:
-        """Return True if this message's replay policy says it's too stale to deliver."""
-        command = extract_command(payload)
-        policy = policy_for(self._is_cloud_to_device, command)
-        if policy.max_age_seconds is None:
+    def _is_expired(self, message: QueuedMessage) -> bool:
+        """Return True if this row's insertion-time expiry has elapsed."""
+        if message.max_age_seconds is None:
             return False
-        age_seconds = time.time() - created_at
-        if age_seconds <= policy.max_age_seconds:
+        age_seconds = time.time() - message.created_at
+        if age_seconds <= message.max_age_seconds:
             return False
         _LOGGER.warning(
             "Dropping stale %s message on %s (cmd=%s, age=%.1fs > %.1fs) rather than acting on it late",
             self._direction,
-            topic,
-            command,
+            message.topic,
+            extract_command(message.payload),
             age_seconds,
-            policy.max_age_seconds,
+            message.max_age_seconds,
         )
         return True
 

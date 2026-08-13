@@ -12,7 +12,10 @@ asked for. Likewise a stale `NTP` response would set the clock to a time
 that has since passed, and a replayed `DEVICE_REBOOT` or `OTA_UPGRADE` would
 fire at an arbitrary later moment.
 
-So each cloud -> device command gets an explicit policy:
+Cloud -> device commands and device -> cloud reports each get an explicit
+policy. The latter matters during a cloud outage: heartbeats and NTP requests
+are useful only live, while feeding/error events must survive long enough to
+reach PETLIBRO after connectivity returns.
 
 * `never_replay`  - only meaningful if delivered essentially immediately.
   Given a small grace window for normal in-flight latency, then dropped.
@@ -45,6 +48,10 @@ NEVER_REPLAY_GRACE_SECONDS = 5.0
 # A user-initiated manual feed stays plausible for about a minute.
 MANUAL_FEED_TTL_SECONDS = 60.0
 
+# Device-originated events describe real occurrences and remain useful after a
+# cloud outage, but a multi-day-old report is no longer operationally useful.
+DURABLE_EVENT_TTL_SECONDS = 24 * 60 * 60
+
 
 @dataclass(frozen=True, slots=True)
 class ReplayPolicy:
@@ -52,12 +59,20 @@ class ReplayPolicy:
 
     max_age_seconds: float | None = None
     coalesce: bool = False
+    drop_when_destination_offline: bool = False
 
 
 DURABLE_FIFO = ReplayPolicy()
 NEVER_REPLAY = ReplayPolicy(max_age_seconds=NEVER_REPLAY_GRACE_SECONDS)
 LATEST_WINS = ReplayPolicy(coalesce=True)
 MANUAL_FEED = ReplayPolicy(max_age_seconds=MANUAL_FEED_TTL_SECONDS)
+DURABLE_EVENT = ReplayPolicy(max_age_seconds=DURABLE_EVENT_TTL_SECONDS)
+# These session-establishment reports must be forwarded when connected but
+# must never accumulate on disk during a cloud outage.
+EPHEMERAL_DEVICE_REPORT = ReplayPolicy(
+    max_age_seconds=NEVER_REPLAY_GRACE_SECONDS,
+    drop_when_destination_offline=True,
+)
 
 # Command names per the protocol documented in icex2/plaf203 and confirmed
 # against this device's own traffic.
@@ -82,6 +97,32 @@ _CLOUD_TO_DEVICE_POLICIES: dict[str, ReplayPolicy] = {
     # State-carrying: only the most recent value matters.
     "ATTR_SET_SERVICE": LATEST_WINS,
     "ATTR_GET_SERVICE": LATEST_WINS,
+    "ATTR_PUSH_EVENT": LATEST_WINS,
+    "FEEDING_PLAN_SERVICE": LATEST_WINS,
+    "DEVICE_FEEDING_PLAN_SERVICE": LATEST_WINS,
+    "GET_FEEDING_PLAN_EVENT": LATEST_WINS,
+    "DEVICE_CONFIG_SYNC": LATEST_WINS,
+    "SERVER_CONFIG_PUSH": LATEST_WINS,
+    "GET_CONFIG": LATEST_WINS,
+    "DEVICE_PROPERTIES_SERVICE": LATEST_WINS,
+    "DEVICE_INFO_SERVICE": LATEST_WINS,
+    "TUTK_CONTRACT_SERVICE": LATEST_WINS,
+}
+
+# Device -> cloud traffic. Unknown messages deliberately retain durable FIFO:
+# the safe default is to preserve data we do not yet understand.
+_DEVICE_TO_CLOUD_POLICIES: dict[str, ReplayPolicy] = {
+    "HEARTBEAT": EPHEMERAL_DEVICE_REPORT,
+    "NTP": EPHEMERAL_DEVICE_REPORT,
+    "GRAIN_OUTPUT_EVENT": DURABLE_EVENT,
+    "ERROR_EVENT": DURABLE_EVENT,
+    "DETECTION_EVENT": DURABLE_EVENT,
+    "DEVICE_START_EVENT": DURABLE_EVENT,
+    "DEVICE_LOG_REPORT_EVENT": DURABLE_EVENT,
+    # These are state-carrying acknowledgements/reports. Keeping only the
+    # newest pending version is safer and bounds an outage backlog.
+    "ATTR_SET_SERVICE": LATEST_WINS,
+    "ATTR_GET_SERVICE": LATEST_WINS,
     "FEEDING_PLAN_SERVICE": LATEST_WINS,
     "DEVICE_FEEDING_PLAN_SERVICE": LATEST_WINS,
     "DEVICE_CONFIG_SYNC": LATEST_WINS,
@@ -89,7 +130,6 @@ _CLOUD_TO_DEVICE_POLICIES: dict[str, ReplayPolicy] = {
     "GET_CONFIG": LATEST_WINS,
     "DEVICE_PROPERTIES_SERVICE": LATEST_WINS,
     "DEVICE_INFO_SERVICE": LATEST_WINS,
-    "TUTK_CONTRACT_SERVICE": LATEST_WINS,
 }
 
 
@@ -117,17 +157,29 @@ def policy_for(is_cloud_to_device: bool, command: str | None) -> ReplayPolicy:
     """Return the replay policy for a message.
 
     Args:
-        is_cloud_to_device: True for the cloud -> device direction, where
-            commands act on the physical world when delivered. Device ->
-            cloud traffic is telemetry and always uses durable FIFO.
+        is_cloud_to_device: True for cloud -> device traffic.
         command: The message's `cmd` field, if any.
 
     Returns:
         The applicable `ReplayPolicy`.
     """
-    if not is_cloud_to_device or command is None:
+    if command is None:
         return DURABLE_FIFO
-    return _CLOUD_TO_DEVICE_POLICIES.get(command, DURABLE_FIFO)
+    policies = _CLOUD_TO_DEVICE_POLICIES if is_cloud_to_device else _DEVICE_TO_CLOUD_POLICIES
+    return policies.get(command, DURABLE_FIFO)
+
+
+def should_enqueue(policy: ReplayPolicy, destination_online: bool) -> bool:
+    """Return whether a message may enter the durable queue.
+
+    Args:
+        policy: The policy resolved for the message.
+        destination_online: Whether the destination MQTT session is ONLINE.
+
+    Returns:
+        False only for explicitly ephemeral reports during an outage.
+    """
+    return destination_online or not policy.drop_when_destination_offline
 
 
 def coalesce_key_for(topic: str, command: str | None, policy: ReplayPolicy) -> str | None:

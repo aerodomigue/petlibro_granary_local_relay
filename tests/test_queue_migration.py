@@ -84,6 +84,7 @@ def test_migrated_messages_keep_their_payload_and_order(legacy_queue_path: str) 
         assert oldest.id == 1, "the original insertion order must be preserved"
         assert oldest.payload == b'{"cmd":"HEARTBEAT"}'
         assert oldest.topic == DEVICE_TOPIC
+        assert oldest.max_age_seconds is None, "a migration must not expire existing backlog rows"
     finally:
         queue.close()
 

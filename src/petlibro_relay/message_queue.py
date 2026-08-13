@@ -1,11 +1,12 @@
 """Durable, disk-persisted FIFO queue used to bridge MQTT outages.
 
-Every message crossing the relay is written here before delivery is attempted.
-A separate pump (see `DeliveryPump`) drains the queue as fast as the destination
-broker allows. Because the queue lives in a SQLite file on a mounted volume, it
-survives both a lost connection and a full container restart: whatever arrived
-while the upstream (or local) broker was offline is still there once it comes
-back, and gets replayed in the original order.
+Durable messages crossing the relay are written here before delivery is
+attempted. Explicitly ephemeral device reports (currently heartbeat and NTP)
+are intentionally discarded before this queue while the cloud is offline. A
+separate pump (see `DeliveryPump`) drains durable rows as fast as the
+destination broker allows. Because the queue lives in a SQLite file on a
+mounted volume, a durable backlog survives both a lost connection and a full
+container restart.
 
 Every row is tagged with the device it belongs to. Each device has its own
 upstream session with its own outages, so "the backlog" is never global:
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS pending_messages (
     payload BLOB NOT NULL,
     qos INTEGER NOT NULL,
     coalesce_key TEXT,
+    max_age_seconds REAL,
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
 )
 """
@@ -49,6 +51,7 @@ _CREATE_DEVICE_INDEX_SQL = (
 _ADD_COALESCE_KEY_COLUMN_SQL = "ALTER TABLE pending_messages ADD COLUMN coalesce_key TEXT"
 _ADD_DEVICE_ID_COLUMN_SQL = "ALTER TABLE pending_messages ADD COLUMN device_id TEXT"
 _ADD_PRODUCT_ID_COLUMN_SQL = "ALTER TABLE pending_messages ADD COLUMN product_id TEXT"
+_ADD_MAX_AGE_SECONDS_COLUMN_SQL = "ALTER TABLE pending_messages ADD COLUMN max_age_seconds REAL"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +63,7 @@ class QueuedMessage:
     payload: bytes
     qos: int
     created_at: float
+    max_age_seconds: float | None
 
 
 class MessageQueue:
@@ -106,6 +110,9 @@ class MessageQueue:
         if "coalesce_key" not in existing_columns:
             self._connection.execute(_ADD_COALESCE_KEY_COLUMN_SQL)
             _LOGGER.info("Migrated queue schema: added coalesce_key column")
+        if "max_age_seconds" not in existing_columns:
+            self._connection.execute(_ADD_MAX_AGE_SECONDS_COLUMN_SQL)
+            _LOGGER.info("Migrated queue schema: added max_age_seconds column")
         if "device_id" in existing_columns and "product_id" in existing_columns:
             return
         if "device_id" not in existing_columns:
@@ -152,7 +159,8 @@ class MessageQueue:
         qos: int,
         coalesce_key: str | None = None,
         product_id: str = protocol.PRODUCT_ID,
-    ) -> None:
+        max_age_seconds: float | None = None,
+    ) -> int:
         """Append a message to the tail of one device's directional queue.
 
         Args:
@@ -168,7 +176,14 @@ class MessageQueue:
                 where only the latest value is meaningful (see
                 `replay_policy`).
             product_id: Product the device reports itself as.
+            max_age_seconds: Expiry fixed when this row is inserted. `None`
+                means durable indefinitely. Existing rows are intentionally
+                left `NULL` during migration and keep their prior behavior.
+
+        Returns:
+            Number of older rows superseded by this insertion.
         """
+        superseded_count = 0
         with self._lock:
             try:
                 with self._connection:
@@ -179,6 +194,7 @@ class MessageQueue:
                             (device_id, direction, coalesce_key),
                         )
                         if cursor.rowcount:
+                            superseded_count = int(cursor.rowcount)
                             _LOGGER.debug(
                                 "Superseded %d pending message(s) for %s/%s (key=%s)",
                                 cursor.rowcount,
@@ -188,14 +204,24 @@ class MessageQueue:
                             )
                     self._connection.execute(
                         "INSERT INTO pending_messages "
-                        "(device_id, product_id, direction, topic, payload, qos, coalesce_key) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (device_id, product_id, direction, topic, payload, qos, coalesce_key),
+                        "(device_id, product_id, direction, topic, payload, qos, coalesce_key, "
+                        "max_age_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            device_id,
+                            product_id,
+                            direction,
+                            topic,
+                            payload,
+                            qos,
+                            coalesce_key,
+                            max_age_seconds,
+                        ),
                     )
             except sqlite3.Error:
                 _LOGGER.exception("Failed to enqueue message for %s on topic %s", direction, topic)
                 raise
             self._enforce_size_limit_locked(device_id, direction)
+        return superseded_count
 
     def _enforce_size_limit_locked(self, device_id: str, direction: str) -> None:
         """Drop the oldest messages of one device's direction beyond the cap.
@@ -249,7 +275,7 @@ class MessageQueue:
         with self._lock:
             try:
                 cursor = self._connection.execute(
-                    "SELECT id, topic, payload, qos, created_at FROM pending_messages "
+                    "SELECT id, topic, payload, qos, created_at, max_age_seconds FROM pending_messages "
                     "WHERE device_id = ? AND direction = ? ORDER BY id ASC LIMIT 1",
                     (device_id, direction),
                 )
@@ -259,9 +285,14 @@ class MessageQueue:
                 raise
         if row is None:
             return None
-        message_id, topic, payload, qos, created_at = row
+        message_id, topic, payload, qos, created_at, max_age_seconds = row
         return QueuedMessage(
-            id=message_id, topic=topic, payload=payload, qos=qos, created_at=float(created_at)
+            id=message_id,
+            topic=topic,
+            payload=payload,
+            qos=qos,
+            created_at=float(created_at),
+            max_age_seconds=float(max_age_seconds) if max_age_seconds is not None else None,
         )
 
     def remove(self, message_id: int) -> None:
@@ -324,7 +355,7 @@ class MessageQueue:
         now = time.time()
         with self._lock:
             rows = self._connection.execute(
-                "SELECT id, topic, payload, qos, created_at FROM pending_messages "
+                "SELECT id, topic, payload, qos, created_at, max_age_seconds FROM pending_messages "
                 "WHERE device_id = ? AND direction = ? ORDER BY id ASC LIMIT ?",
                 (device_id, direction, safe_limit),
             ).fetchall()
@@ -337,11 +368,11 @@ class MessageQueue:
         from .replay_policy import extract_command, policy_for
 
         messages = []
-        for message_id, topic, payload, qos, created_at in rows:
+        for message_id, topic, payload, qos, created_at, max_age_seconds in rows:
             command = extract_command(payload)
             policy = policy_for(direction == "upstream-to-local", command)
             policy_name = "LATEST_WINS" if policy.coalesce else (
-                "FIFO" if policy.max_age_seconds is None else f"TTL_{int(policy.max_age_seconds)}S"
+                "FIFO" if max_age_seconds is None else f"TTL_{int(max_age_seconds)}S"
             )
             messages.append(
                 {

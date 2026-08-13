@@ -29,6 +29,12 @@ DEFAULT_WEB_ENABLED = False
 DEFAULT_WEB_HOST = "0.0.0.0"
 DEFAULT_WEB_PORT = 8080
 
+_LOOPBACK_UPSTREAM_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "0.0.0.0", "::"})
+UNSAFE_UPSTREAM_CONFIGURATION_MESSAGE = (
+    "Unsafe upstream configuration: upstream would connect to the local capture proxy / broker "
+    "and create an MQTT loop."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class RelayConfig:
@@ -122,6 +128,22 @@ class RelayConfig:
         if self.device_client_id and self.device_username and self.device_password:
             return self.device_client_id, self.device_username, self.device_password
         return None
+
+    def validate_upstream_safety(self) -> None:
+        """Reject an upstream endpoint that would point back into this relay.
+
+        This check intentionally compares literal host values only. Resolving a
+        hostname here would make startup dependent on external DNS and could
+        turn an otherwise safe configuration into a false positive.
+
+        Raises:
+            ValueError: If a loopback/wildcard endpoint uses one of this
+                relay's local MQTT ports.
+        """
+        upstream_host = self.upstream_host.strip().lower().rstrip(".")
+        local_ports = {self.local_port, self.capture_proxy_listen_port}
+        if upstream_host in _LOOPBACK_UPSTREAM_HOSTS and self.upstream_port in local_ports:
+            raise ValueError(UNSAFE_UPSTREAM_CONFIGURATION_MESSAGE)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:

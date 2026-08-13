@@ -115,6 +115,11 @@ def main() -> None:
     """Load configuration and run the relay until a shutdown signal is received."""
     config = RelayConfig.from_env()
     log_buffer = configure_logging(config.log_level)
+    try:
+        config.validate_upstream_safety()
+    except ValueError as error:
+        _LOGGER.critical("FATAL %s", error)
+        raise SystemExit(1) from error
     _LOGGER.info(
         "Starting petlibro-relay (upstream=%s:%d, local=%s:%d, capture-proxy=%s:%d, auto_enroll=%s)",
         config.upstream_host,
