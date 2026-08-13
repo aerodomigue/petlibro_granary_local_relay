@@ -37,6 +37,23 @@ PASSWORD_A = "must-not-appear"
 PASSWORD_B = "b-must-not-appear"
 PASSWORD_C = "c-must-not-appear"
 QUEUE_SECRET = "queue-secret-must-not-appear"
+HTML_INJECTION_VALUE = "<script>must-not-run</script>"
+DEVICE_A_PLANS = [
+    {
+        "planId": 101,
+        "executionTime": "07:30",
+        "repeatDay": [1, 2, 3, 4, 5],
+        "grainNum": 3,
+    }
+]
+DEVICE_B_PLANS = [
+    {
+        "planId": 202,
+        "executionTime": "19:00",
+        "repeatDay": [7],
+        "grainNum": 1,
+    }
+]
 
 
 @pytest.fixture
@@ -70,8 +87,24 @@ def dashboard(
     shadow.record_raw(
         DEVICE_A, f"dl/PLAF203/{DEVICE_A}/device/ntp/post", b'{"cmd":"NTP","ts":1}', "NTP"
     )
-    shadow.update_reported(DEVICE_A, {"rssi": -43, "firmware": "V3.0.30"})
+    shadow.update_reported(
+        DEVICE_A,
+        {"rssi": -43, "firmware": "V3.0.30", "tutkP2pRegion": "eu-west"},
+    )
     shadow.update_reported(DEVICE_B, {"rssi": -51})
+    shadow.update_desired(
+        DEVICE_A,
+        {
+            "motionDetectionSwitch": False,
+            "motionDetectionSensitivity": 2,
+            "soundDetectionSwitch": True,
+            "soundSwitch": False,
+            "displayName": HTML_INJECTION_VALUE,
+        },
+    )
+    shadow.update_desired(DEVICE_B, {"soundSwitch": True})
+    shadow.update_feeding_plans(DEVICE_A, DEVICE_A_PLANS, "plan-a")
+    shadow.update_feeding_plans(DEVICE_B, DEVICE_B_PLANS, "plan-b")
 
     telemetry = RelayTelemetry()
     telemetry.device(DEVICE_A).upstream_connect_attempt()
@@ -220,9 +253,32 @@ def test_device_detail_covers_one_device_only(client: TestClient) -> None:
     assert all(event["device_id"] == DEVICE_B for event in detail["cloud"]["events"])
 
 
+def test_device_detail_keeps_schedule_and_controls_isolated(client: TestClient) -> None:
+    """A device view only projects its own desired controls and schedule."""
+    detail_a = client.get(f"/api/devices/{DEVICE_A}").json()
+    detail_b = client.get(f"/api/devices/{DEVICE_B}").json()
+
+    desired_a = {item["key"]: item["value"] for item in detail_a["state"]["desired"]}
+    assert desired_a["motionDetectionSwitch"] is False
+    assert detail_a["state"]["feeding_plans"]["plans"] == DEVICE_A_PLANS
+    assert detail_b["state"]["feeding_plans"]["plans"] == DEVICE_B_PLANS
+
+
 def test_unknown_device_detail_is_404(client: TestClient) -> None:
     """An unknown id is refused rather than answered with another device's data."""
     assert client.get("/api/devices/NOT-A-DEVICE").status_code == 404
+
+
+def test_device_html_routes_validate_device_ids(client: TestClient) -> None:
+    """Fleet and known-device pages are served, unknown or unsafe ids are refused."""
+    fleet = client.get("/devices")
+    detail = client.get(f"/devices/{DEVICE_A}")
+
+    assert fleet.status_code == 200
+    assert detail.status_code == 200
+    assert "device-page" in detail.text
+    assert client.get("/devices/UNKNOWN").status_code == 404
+    assert client.get("/devices/%2E%2E").status_code == 404
 
 
 def test_never_connected_device_is_shown_as_offline(client: TestClient) -> None:
@@ -291,12 +347,31 @@ def test_ui_keeps_raw_data_behind_explicit_debug_controls() -> None:
     assert "EventSource('/api/logs/stream')" in DASHBOARD_HTML
 
 
-def test_ui_renders_a_device_table_and_per_device_detail() -> None:
-    """The Devices tab is a multi-device table with a drill-down, not one card."""
+def test_ui_renders_a_fleet_table_and_dedicated_device_pages() -> None:
+    """Fleet listing links to device-scoped tabs instead of embedding a detail pane."""
     assert "device-row" in DASHBOARD_HTML
-    assert "loadDeviceDetail" in DASHBOARD_HTML
-    assert "/api/devices/${encodeURIComponent(deviceId)}" in DASHBOARD_HTML
+    assert 'href="/devices"' in DASHBOARD_HTML
+    assert "const DEVICE_TABS=" in DASHBOARD_HTML
+    assert "renderDevicePage" in DASHBOARD_HTML
+    assert "/api/devices/${encodeURIComponent(pageDeviceId)}" in DASHBOARD_HTML
     assert "devicePicker" in DASHBOARD_HTML
+
+
+def test_device_ui_has_read_only_controls_schedule_camera_and_reused_views() -> None:
+    """Device sections use safe read-only renderers over existing API projections."""
+    for marker in (
+        "controlsMarkup",
+        "scheduleMarkup",
+        "cameraMarkup",
+        "stateMarkup",
+        "logPanel('device-log',pageDeviceId)",
+        "TUTK/Kalay is not implemented",
+        "No network traffic generated",
+        "renderLogLines('device-log',pageDeviceId)",
+    ):
+        assert marker in DASHBOARD_HTML
+    assert HTML_INJECTION_VALUE not in DASHBOARD_HTML
+    assert "escapeHtml" in DASHBOARD_HTML
 
 
 def test_sse_emits_new_sanitized_log(

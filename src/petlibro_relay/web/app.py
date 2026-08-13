@@ -9,6 +9,7 @@ dashboard is an observation surface only.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 
 from fastapi import FastAPI, HTTPException, Query
@@ -20,6 +21,7 @@ from .static import DASHBOARD_HTML
 DEFAULT_LOG_LIMIT = 500
 MAX_PAGE_SIZE = 500
 SSE_WAIT_SECONDS = 15.0
+DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def create_app(context: DashboardContext) -> FastAPI:
@@ -29,6 +31,18 @@ def create_app(context: DashboardContext) -> FastAPI:
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def dashboard() -> str:
         """Serve the self-contained dashboard UI."""
+        return DASHBOARD_HTML
+
+    @app.get("/devices", response_class=HTMLResponse, include_in_schema=False)
+    def devices_dashboard() -> str:
+        """Serve the fleet view of the dashboard."""
+        return DASHBOARD_HTML
+
+    @app.get("/devices/{device_id}", response_class=HTMLResponse, include_in_schema=False)
+    def device_dashboard(device_id: str) -> str:
+        """Serve a device-scoped dashboard only for a known safe device id."""
+        if not DEVICE_ID_PATTERN.fullmatch(device_id) or context.device_detail(device_id, 1) is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
         return DASHBOARD_HTML
 
     @app.get("/healthz")
