@@ -69,9 +69,17 @@ class DeviceManager:
         Called once at boot. After this, `ensure_device` starts devices as
         soon as they are learned, so a feeder plugged in later needs no
         operator action.
+
+        A device can connect in the window between the capture proxy opening
+        and this call, which creates its context while starting was still
+        deferred. Those are started here too, otherwise such a device would
+        sit bridged but with no cloud session.
         """
         with self._lock:
             self._started = True
+            deferred = list(self._contexts.values())
+        for context in deferred:
+            context.start()
         identities = self._registry.get_bridgeable()
         if not identities:
             _LOGGER.info(

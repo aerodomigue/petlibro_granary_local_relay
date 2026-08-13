@@ -492,6 +492,19 @@ def test_removing_one_device_leaves_the_others_bridged(harness: Harness) -> None
     assert harness.pending("DEVICE-A") == 1
 
 
+def test_device_learned_before_startup_still_gets_started(harness: Harness) -> None:
+    """A feeder connecting during boot must not end up without a cloud session."""
+    started: list[str] = []
+    for context in harness.devices.list_devices():
+        context.start = lambda ctx=context: started.append(ctx.device_id)  # type: ignore[method-assign,misc]
+
+    harness.devices.start()
+
+    assert sorted(started) == ["DEVICE-A", "DEVICE-B"], (
+        "contexts created before start() must be started by it"
+    )
+
+
 def test_context_lookup_is_exact(harness: Harness) -> None:
     """Unknown ids resolve to nothing rather than to a nearby device."""
     assert harness.devices.get_by_device_id("DEVICE-") is None
