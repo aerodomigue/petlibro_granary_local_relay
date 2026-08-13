@@ -411,7 +411,7 @@ class DeviceContext:
         if not should_enqueue(policy, self.upstream_state is UpstreamState.ONLINE):
             self._telemetry.increment("queue_dropped_ephemeral")
             return
-        coalesce_key = coalesce_key_for(topic, command, policy)
+        coalesce_key = coalesce_key_for(topic, command, policy, payload)
         superseded_count = self._queue.enqueue(
             self.device_id,
             direction,

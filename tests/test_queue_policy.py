@@ -10,7 +10,12 @@ import pytest
 from conftest import RelayConfigFactory
 from petlibro_relay.device_context import LOCAL_TO_UPSTREAM, DeviceContext
 from petlibro_relay.local_responder import UpstreamState
-from petlibro_relay.replay_policy import DURABLE_EVENT_TTL_SECONDS, NEVER_REPLAY_GRACE_SECONDS
+from petlibro_relay.replay_policy import (
+    DURABLE_EVENT_TTL_SECONDS,
+    NEVER_REPLAY_GRACE_SECONDS,
+    coalesce_key_for,
+    policy_for,
+)
 
 from test_multi_device_isolation import (
     DEVICE_A,
@@ -72,7 +77,7 @@ def test_durable_events_and_latest_state_survive_outage(harness: Harness) -> Non
     harness.deliver_local(TOPIC_A.replace("/event/", "/service/"), _payload("ATTR_SET_SERVICE", code=0))
     harness.deliver_local(TOPIC_A.replace("/event/", "/service/"), _payload("ATTR_SET_SERVICE", code=0))
 
-    assert harness.pending(DEVICE_A.client_id) == 4
+    assert harness.pending(DEVICE_A.client_id) == 5
     messages = []
     while message := harness.queue.peek_oldest(DEVICE_A.client_id, LOCAL_TO_UPSTREAM):
         messages.append(message)
@@ -82,9 +87,50 @@ def test_durable_events_and_latest_state_survive_outage(harness: Harness) -> Non
         "ERROR_EVENT",
         "DETECTION_EVENT",
         "ATTR_SET_SERVICE",
+        "ATTR_SET_SERVICE",
     ]
     assert all(message.max_age_seconds == DURABLE_EVENT_TTL_SECONDS for message in messages[:3])
-    assert messages[3].max_age_seconds is None
+    assert all(message.max_age_seconds is None for message in messages[3:])
+
+
+def test_attr_set_coalesces_per_modified_setting(harness: Harness) -> None:
+    """Different ATTR_SET settings must never evict each other from a backlog."""
+    service_topic = TOPIC_A.replace("/event/", "/service/")
+    sound_enabled = _payload("ATTR_SET_SERVICE", soundSwitch=True)
+    motion_disabled = _payload("ATTR_SET_SERVICE", motionDetectionSwitch=False)
+    sound_disabled = _payload("ATTR_SET_SERVICE", soundSwitch=False)
+    policy = policy_for(False, "ATTR_SET_SERVICE")
+
+    assert coalesce_key_for(service_topic, "ATTR_SET_SERVICE", policy, sound_enabled) == (
+        f"{service_topic}|ATTR_SET_SERVICE|soundSwitch"
+    )
+    assert coalesce_key_for(service_topic, "ATTR_SET_SERVICE", policy, motion_disabled) == (
+        f"{service_topic}|ATTR_SET_SERVICE|motionDetectionSwitch"
+    )
+    assert coalesce_key_for(
+        service_topic,
+        "ATTR_SET_SERVICE",
+        policy,
+        _payload("ATTR_SET_SERVICE", msgId="ack", code=0),
+    ) is None
+
+    harness.deliver_local(service_topic, sound_enabled)
+    harness.deliver_local(service_topic, motion_disabled)
+    assert harness.pending(DEVICE_A.client_id) == 2
+
+    harness.deliver_local(service_topic, sound_disabled)
+    assert harness.pending(DEVICE_A.client_id) == 2
+    queued_payloads = []
+    while message := harness.queue.peek_oldest(DEVICE_A.client_id, LOCAL_TO_UPSTREAM):
+        queued_payloads.append(json.loads(message.payload))
+        harness.queue.remove(message.id)
+    values_by_setting = {
+        setting: body[setting]
+        for body in queued_payloads
+        for setting in ("soundSwitch", "motionDetectionSwitch")
+        if setting in body
+    }
+    assert values_by_setting == {"soundSwitch": False, "motionDetectionSwitch": False}
 
 
 def test_unknown_device_report_keeps_conservative_durable_fifo(harness: Harness) -> None:

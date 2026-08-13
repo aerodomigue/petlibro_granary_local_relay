@@ -182,17 +182,43 @@ def should_enqueue(policy: ReplayPolicy, destination_online: bool) -> bool:
     return destination_online or not policy.drop_when_destination_offline
 
 
-def coalesce_key_for(topic: str, command: str | None, policy: ReplayPolicy) -> str | None:
+_ATTR_SET_ENVELOPE_FIELDS = frozenset({"cmd", "code", "msgId", "ts"})
+
+
+def coalesce_key_for(
+    topic: str, command: str | None, policy: ReplayPolicy, payload: bytes
+) -> str | None:
     """Return the key superseding older pending messages, or None if not coalescing.
 
     Args:
         topic: The message's MQTT topic.
         command: The message's `cmd` field, if any.
         policy: The policy resolved for this message.
+        payload: Raw message payload, used to distinguish ATTR_SET settings.
 
     Returns:
         A key identifying messages this one supersedes, or `None`.
     """
     if not policy.coalesce or command is None:
         return None
+    if command == "ATTR_SET_SERVICE":
+        setting_fields = _attr_set_setting_fields(payload)
+        if setting_fields:
+            return f"{topic}|{command}|{','.join(setting_fields)}"
+        # A feeder ACK can carry only cmd/msgId/code. It has no setting that
+        # can be coalesced safely, so preserve it rather than using a broad
+        # command-level key that could erase another setting's update.
+        return None
     return f"{topic}|{command}"
+
+
+def _attr_set_setting_fields(payload: bytes) -> tuple[str, ...]:
+    """Return ATTR_SET setting field names, excluding the protocol envelope."""
+    try:
+        decoded = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return ()
+    if not isinstance(decoded, dict):
+        return ()
+    fields = (field for field in decoded if field not in _ATTR_SET_ENVELOPE_FIELDS)
+    return tuple(sorted(fields))

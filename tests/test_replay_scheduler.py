@@ -227,6 +227,36 @@ def test_live_row_is_sent_before_backlog_and_before_replay_delay(tmp_path: Path)
         queue.close()
 
 
+def test_live_row_bypasses_an_already_consumed_replay_budget(tmp_path: Path) -> None:
+    """A live event publishes immediately even while backlog rate limits are exhausted."""
+    queue = MessageQueue(str(tmp_path / "queue.sqlite3"), max_size_per_direction=20)
+    client = FakeClient()
+    clock = ManualClock()
+    try:
+        _enqueue(queue, "A", 3)
+        pump = _pump(
+            queue,
+            [_target("A", client)],
+            clock,
+            rate_per_device=1.0,
+            rate_global=1.0,
+        )
+
+        pump._run_once()
+        assert len(client.published) == 1
+        queue.enqueue("A", LOCAL_TO_UPSTREAM, _topic("A"), _payload(999), qos=0, is_live=True)
+
+        # The replay token is unavailable until T+1s, but the live row must
+        # still publish at T0 rather than wait behind the backlog budget.
+        pump._run_once()
+
+        assert len(client.published) == 2
+        assert json.loads(client.published[-1][1])["sequence"] == 999
+        assert queue.backlog_count("A", LOCAL_TO_UPSTREAM) == 2
+    finally:
+        queue.close()
+
+
 def test_backlog_waits_for_upstream_subscription_confirmation(tmp_path: Path) -> None:
     """The settle timer starts only after the target reports replay readiness."""
     queue = MessageQueue(str(tmp_path / "queue.sqlite3"), max_size_per_direction=20)
