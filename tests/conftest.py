@@ -54,6 +54,10 @@ def make_config(tmp_path: Path) -> RelayConfigFactory:
             "web_port": 8080,
             "max_queue_size": 100,
             "log_level": "INFO",
+            "replay_rate_per_device": 5.0,
+            "replay_rate_global": 20.0,
+            "replay_start_delay_seconds": 1.5,
+            "replay_jitter": 0.15,
         }
         defaults.update(overrides)
         return RelayConfig(**defaults)  # type: ignore[arg-type]

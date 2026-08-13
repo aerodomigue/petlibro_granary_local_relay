@@ -28,6 +28,10 @@ DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_WEB_ENABLED = False
 DEFAULT_WEB_HOST = "0.0.0.0"
 DEFAULT_WEB_PORT = 8080
+DEFAULT_REPLAY_RATE_PER_DEVICE = 5.0
+DEFAULT_REPLAY_RATE_GLOBAL = 20.0
+DEFAULT_REPLAY_START_DELAY_SECONDS = 1.5
+DEFAULT_REPLAY_JITTER = 0.15
 
 _LOOPBACK_UPSTREAM_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "0.0.0.0", "::"})
 UNSAFE_UPSTREAM_CONFIGURATION_MESSAGE = (
@@ -76,6 +80,10 @@ class RelayConfig:
     web_port: int
     max_queue_size: int
     log_level: str
+    replay_rate_per_device: float
+    replay_rate_global: float
+    replay_start_delay_seconds: float
+    replay_jitter: float
 
     @classmethod
     def from_env(cls) -> "RelayConfig":
@@ -121,6 +129,18 @@ class RelayConfig:
             web_port=int(os.environ.get("PETLIBRO_WEB_PORT", DEFAULT_WEB_PORT)),
             max_queue_size=int(os.environ.get("PETLIBRO_MAX_QUEUE_SIZE", DEFAULT_MAX_QUEUE_SIZE)),
             log_level=os.environ.get("PETLIBRO_LOG_LEVEL", DEFAULT_LOG_LEVEL),
+            replay_rate_per_device=float(
+                os.environ.get("PETLIBRO_REPLAY_RATE_PER_DEVICE", DEFAULT_REPLAY_RATE_PER_DEVICE)
+            ),
+            replay_rate_global=float(
+                os.environ.get("PETLIBRO_REPLAY_RATE_GLOBAL", DEFAULT_REPLAY_RATE_GLOBAL)
+            ),
+            replay_start_delay_seconds=float(
+                os.environ.get(
+                    "PETLIBRO_REPLAY_START_DELAY", DEFAULT_REPLAY_START_DELAY_SECONDS
+                )
+            ),
+            replay_jitter=float(os.environ.get("PETLIBRO_REPLAY_JITTER", DEFAULT_REPLAY_JITTER)),
         )
 
     def manually_configured_identity(self) -> tuple[str, str, str] | None:
@@ -144,6 +164,21 @@ class RelayConfig:
         local_ports = {self.local_port, self.capture_proxy_listen_port}
         if upstream_host in _LOOPBACK_UPSTREAM_HOSTS and self.upstream_port in local_ports:
             raise ValueError(UNSAFE_UPSTREAM_CONFIGURATION_MESSAGE)
+
+    def validate_startup_configuration(self) -> None:
+        """Validate configuration before any relay component is constructed.
+
+        Raises:
+            ValueError: If the upstream target would loop locally or replay
+                parameters are outside their safe operating range.
+        """
+        self.validate_upstream_safety()
+        if self.replay_rate_per_device <= 0 or self.replay_rate_global <= 0:
+            raise ValueError("Replay rates must be greater than zero")
+        if self.replay_start_delay_seconds < 0:
+            raise ValueError("Replay start delay must not be negative")
+        if not 0 <= self.replay_jitter <= 1:
+            raise ValueError("Replay jitter must be between zero and one")
 
 
 def _env_flag(name: str, default: bool = False) -> bool:

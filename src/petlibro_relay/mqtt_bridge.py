@@ -155,6 +155,10 @@ class MqttBridge:
             queue,
             targets=self._upstream_targets,
             is_cloud_to_device=False,
+            replay_rate_per_device=config.replay_rate_per_device,
+            replay_rate_global=config.replay_rate_global,
+            replay_start_delay_seconds=config.replay_start_delay_seconds,
+            replay_jitter=config.replay_jitter,
         )
         self._upstream_to_local_pump = DeliveryPump(
             UPSTREAM_TO_LOCAL,
@@ -185,7 +189,12 @@ class MqttBridge:
         until it comes back rather than being dropped.
         """
         return [
-            PumpTarget(context.device_id, client, context.telemetry)
+            PumpTarget(
+                context.device_id,
+                client,
+                context.telemetry,
+                replay_ready=context.upstream_replay_ready,
+            )
             for context in self._devices.list_devices()
             if (client := context.upstream_client) is not None
         ]

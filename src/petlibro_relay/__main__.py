@@ -116,7 +116,7 @@ def main() -> None:
     config = RelayConfig.from_env()
     log_buffer = configure_logging(config.log_level)
     try:
-        config.validate_upstream_safety()
+        config.validate_startup_configuration()
     except ValueError as error:
         _LOGGER.critical("FATAL %s", error)
         raise SystemExit(1) from error

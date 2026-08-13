@@ -112,6 +112,10 @@ class DeviceContext:
         self._responder = responder
         self._topic_prefix = protocol.topic_prefix(identity.client_id, identity.product_id)
         self._pending_upstream_subscriptions: dict[int, str] = {}
+        # True by default for an unstarted context. `start_upstream` resets it
+        # before the real CONNACK; this preserves the test-only fake sessions
+        # that are injected directly without opening a network connection.
+        self._upstream_subscriptions_ready = True
         self._lifecycle_lock = threading.Lock()
         # Built on start rather than here: a device that is not locally present
         # must not have a cloud session opened in its name.
@@ -144,6 +148,12 @@ class DeviceContext:
     def upstream_running(self) -> bool:
         """Return whether a cloud session is currently being maintained."""
         return self.upstream_client is not None
+
+    @property
+    def upstream_replay_ready(self) -> bool:
+        """Return whether cloud subscriptions have finished their SUBACK cycle."""
+        with self._lifecycle_lock:
+            return self._upstream_subscriptions_ready
 
     @property
     def upstream_state(self) -> UpstreamState:
@@ -195,6 +205,7 @@ class DeviceContext:
                 return False
             client = self._build_upstream_client()
             self._upstream_client = client
+            self._upstream_subscriptions_ready = False
         self._log_upstream_transition(self._telemetry.upstream_connect_attempt())
         client.connect_async(
             self._config.upstream_host,
@@ -224,6 +235,7 @@ class DeviceContext:
             if client is None:
                 return False
             self._upstream_client = None
+            self._upstream_subscriptions_ready = False
         # A clean DISCONNECT, not a dropped socket: this is the relay saying
         # the device has gone, which is what an orderly shutdown looks like.
         client.loop_stop()
@@ -311,12 +323,18 @@ class DeviceContext:
         if reason_code.is_failure:
             self._log_upstream_transition(self._telemetry.upstream_refused(str(reason_code)))
             return
+        self._pending_upstream_subscriptions.clear()
+        with self._lifecycle_lock:
+            self._upstream_subscriptions_ready = False
         self._log_upstream_transition(self._telemetry.upstream_online())
         for category in UPSTREAM_SUBSCRIBE_CATEGORIES:
             topic = f"{self._topic_prefix}/{protocol.DEVICE_SEGMENT}/{category}/{protocol.SUB_SUFFIX}"
             result, mid = client.subscribe(topic, qos=QOS_AT_MOST_ONCE)
             if result == mqtt.MQTT_ERR_SUCCESS and mid is not None:
                 self._pending_upstream_subscriptions[mid] = topic
+        if not self._pending_upstream_subscriptions:
+            with self._lifecycle_lock:
+                self._upstream_subscriptions_ready = True
 
     def _is_stale_client(self, client: Client) -> bool:
         """True if a callback came from a session we have already replaced.
@@ -343,6 +361,8 @@ class DeviceContext:
         reason_code_list: List[ReasonCode],
         properties: Properties | None,
     ) -> None:
+        if self._is_stale_client(client):
+            return
         topic = self._pending_upstream_subscriptions.pop(mid, "<unknown>")
         for reason_code in reason_code_list:
             _LOGGER.info(
@@ -351,6 +371,9 @@ class DeviceContext:
                 "denied" if reason_code.is_failure else "granted",
                 reason_code,
             )
+        if not self._pending_upstream_subscriptions:
+            with self._lifecycle_lock:
+                self._upstream_subscriptions_ready = True
 
     def _on_upstream_disconnect(
         self,
@@ -368,6 +391,8 @@ class DeviceContext:
                 "Upstream MQTT stopped intentionally for %s (reason=%s)", self.device_id, reason_code
             )
             return
+        with self._lifecycle_lock:
+            self._upstream_subscriptions_ready = False
         self._log_upstream_transition(
             self._telemetry.upstream_disconnected(
                 str(reason_code), disconnect_flags=str(disconnect_flags)
@@ -396,6 +421,7 @@ class DeviceContext:
             coalesce_key,
             product_id=self.product_id,
             max_age_seconds=policy.max_age_seconds,
+            is_live=(not is_cloud_to_device and self.upstream_state is UpstreamState.ONLINE),
         )
         if superseded_count:
             self._telemetry.increment("queue_coalesced_latest", superseded_count)

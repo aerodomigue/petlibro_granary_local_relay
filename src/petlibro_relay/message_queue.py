@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS pending_messages (
     qos INTEGER NOT NULL,
     coalesce_key TEXT,
     max_age_seconds REAL,
+    is_live INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
 )
 """
@@ -52,6 +53,7 @@ _ADD_COALESCE_KEY_COLUMN_SQL = "ALTER TABLE pending_messages ADD COLUMN coalesce
 _ADD_DEVICE_ID_COLUMN_SQL = "ALTER TABLE pending_messages ADD COLUMN device_id TEXT"
 _ADD_PRODUCT_ID_COLUMN_SQL = "ALTER TABLE pending_messages ADD COLUMN product_id TEXT"
 _ADD_MAX_AGE_SECONDS_COLUMN_SQL = "ALTER TABLE pending_messages ADD COLUMN max_age_seconds REAL"
+_ADD_IS_LIVE_COLUMN_SQL = "ALTER TABLE pending_messages ADD COLUMN is_live INTEGER NOT NULL DEFAULT 0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +66,7 @@ class QueuedMessage:
     qos: int
     created_at: float
     max_age_seconds: float | None
+    is_live: bool
 
 
 class MessageQueue:
@@ -113,6 +116,9 @@ class MessageQueue:
         if "max_age_seconds" not in existing_columns:
             self._connection.execute(_ADD_MAX_AGE_SECONDS_COLUMN_SQL)
             _LOGGER.info("Migrated queue schema: added max_age_seconds column")
+        if "is_live" not in existing_columns:
+            self._connection.execute(_ADD_IS_LIVE_COLUMN_SQL)
+            _LOGGER.info("Migrated queue schema: added is_live column")
         if "device_id" in existing_columns and "product_id" in existing_columns:
             return
         if "device_id" not in existing_columns:
@@ -160,6 +166,7 @@ class MessageQueue:
         coalesce_key: str | None = None,
         product_id: str = protocol.PRODUCT_ID,
         max_age_seconds: float | None = None,
+        is_live: bool = False,
     ) -> int:
         """Append a message to the tail of one device's directional queue.
 
@@ -179,6 +186,8 @@ class MessageQueue:
             max_age_seconds: Expiry fixed when this row is inserted. `None`
                 means durable indefinitely. Existing rows are intentionally
                 left `NULL` during migration and keep their prior behavior.
+            is_live: True when the destination was already online. Live rows
+                are selected ahead of replay backlog by the upstream pump.
 
         Returns:
             Number of older rows superseded by this insertion.
@@ -205,7 +214,7 @@ class MessageQueue:
                     self._connection.execute(
                         "INSERT INTO pending_messages "
                         "(device_id, product_id, direction, topic, payload, qos, coalesce_key, "
-                        "max_age_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "max_age_seconds, is_live) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             device_id,
                             product_id,
@@ -215,6 +224,7 @@ class MessageQueue:
                             qos,
                             coalesce_key,
                             max_age_seconds,
+                            int(is_live),
                         ),
                     )
             except sqlite3.Error:
@@ -262,21 +272,26 @@ class MessageQueue:
             _LOGGER.exception("Failed to enforce queue size limit for %s", direction)
             raise
 
-    def peek_oldest(self, device_id: str, direction: str) -> QueuedMessage | None:
+    def peek_oldest(
+        self, device_id: str, direction: str, prioritize_live: bool = False
+    ) -> QueuedMessage | None:
         """Return one device's oldest pending message, without removing it.
 
         Args:
             device_id: Device whose queue to read.
             direction: Logical queue name to read from.
+            prioritize_live: Return live rows ahead of replay backlog rows.
 
         Returns:
             The oldest `QueuedMessage`, or `None` if that queue is empty.
         """
         with self._lock:
             try:
+                order_by = "is_live DESC, id ASC" if prioritize_live else "id ASC"
                 cursor = self._connection.execute(
-                    "SELECT id, topic, payload, qos, created_at, max_age_seconds FROM pending_messages "
-                    "WHERE device_id = ? AND direction = ? ORDER BY id ASC LIMIT 1",
+                    "SELECT id, topic, payload, qos, created_at, max_age_seconds, is_live "
+                    "FROM pending_messages WHERE device_id = ? AND direction = ? "
+                    f"ORDER BY {order_by} LIMIT 1",
                     (device_id, direction),
                 )
                 row = cursor.fetchone()
@@ -285,7 +300,7 @@ class MessageQueue:
                 raise
         if row is None:
             return None
-        message_id, topic, payload, qos, created_at, max_age_seconds = row
+        message_id, topic, payload, qos, created_at, max_age_seconds, is_live = row
         return QueuedMessage(
             id=message_id,
             topic=topic,
@@ -293,6 +308,7 @@ class MessageQueue:
             qos=qos,
             created_at=float(created_at),
             max_age_seconds=float(max_age_seconds) if max_age_seconds is not None else None,
+            is_live=bool(is_live),
         )
 
     def remove(self, message_id: int) -> None:
@@ -324,6 +340,32 @@ class MessageQueue:
                 _LOGGER.exception("Failed to count queue %s", direction)
                 raise
         return int(pending_count)
+
+    def backlog_count(self, device_id: str, direction: str) -> int:
+        """Return non-live messages awaiting controlled replay."""
+        with self._lock:
+            cursor = self._connection.execute(
+                "SELECT COUNT(*) FROM pending_messages WHERE device_id = ? AND direction = ? "
+                "AND is_live = 0",
+                (device_id, direction),
+            )
+            (pending_count,) = cursor.fetchone()
+        return int(pending_count)
+
+    def demote_live_messages(self, device_id: str, direction: str) -> int:
+        """Turn unsent live rows into backlog after their destination disconnects."""
+        with self._lock:
+            try:
+                with self._connection:
+                    cursor = self._connection.execute(
+                        "UPDATE pending_messages SET is_live = 0 WHERE device_id = ? "
+                        "AND direction = ? AND is_live = 1",
+                        (device_id, direction),
+                    )
+            except sqlite3.Error:
+                _LOGGER.exception("Failed to demote live queue rows for %s", device_id)
+                raise
+        return int(cursor.rowcount)
 
     def depth_by_device(self) -> dict[str, int]:
         """Return total pending messages per device, for the global overview."""

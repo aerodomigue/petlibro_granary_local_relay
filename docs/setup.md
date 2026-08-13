@@ -150,6 +150,25 @@ staging hosts icex2 found in the firmware binary but that aren't expected in
 normal production traffic) - only the MQTT hosts move local, everything else
 keeps talking straight to the cloud as before.
 
+## Controlled cloud-backlog replay
+
+When a PETLIBRO MQTT session returns, device-to-cloud backlog is replayed as
+background traffic rather than drained in one burst. New live feeder reports
+are selected before old backlog rows. The defaults are a 1.5-second settling
+period, then at most 5 replay messages/second per device and 20/second across
+the relay. Jitter can add up to 15% spacing, but never exceeds those caps:
+
+```env
+PETLIBRO_REPLAY_RATE_PER_DEVICE=5
+PETLIBRO_REPLAY_RATE_GLOBAL=20
+PETLIBRO_REPLAY_START_DELAY=1.5
+PETLIBRO_REPLAY_JITTER=0.15
+```
+
+Only durable device-to-cloud backlog is affected. Local interactive control
+publishes, including the confirmed `soundSwitch` flow, are never queued or
+rate-limited by this scheduler.
+
 To roll back at any time: remove the three DNS overrides. No changes are
 needed on the feeder itself - it will simply resolve the real cloud IPs
 again on its next DNS lookup/reconnect.

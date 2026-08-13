@@ -42,3 +42,22 @@ def test_error_message_is_actionable(make_config: RelayConfigFactory) -> None:
         config.validate_upstream_safety()
 
     assert str(error.value) == UNSAFE_UPSTREAM_CONFIGURATION_MESSAGE
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("replay_rate_per_device", 0.0),
+        ("replay_rate_global", 0.0),
+        ("replay_start_delay_seconds", -1.0),
+        ("replay_jitter", 1.1),
+    ],
+)
+def test_invalid_replay_settings_fail_before_startup(
+    make_config: RelayConfigFactory, field: str, value: float
+) -> None:
+    """Invalid replay scheduling parameters cannot start a partial relay."""
+    config = make_config(**{field: value})
+
+    with pytest.raises(ValueError):
+        config.validate_startup_configuration()
