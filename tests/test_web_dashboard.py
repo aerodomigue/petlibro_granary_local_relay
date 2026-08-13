@@ -281,6 +281,54 @@ def test_device_html_routes_validate_device_ids(client: TestClient) -> None:
     assert client.get("/devices/%2E%2E").status_code == 404
 
 
+@pytest.mark.parametrize("path", ("/", "/cloud", "/devices", "/queues", "/state", "/ntp", "/logs", "/system"))
+def test_global_deep_links_return_the_dashboard_shell(client: TestClient, path: str) -> None:
+    """Every global URL can be loaded or refreshed without relying on prior navigation."""
+    response = client.get(path)
+
+    assert response.status_code == 200
+    assert 'id="global-pages"' in response.text
+    assert "applyRoute()" in response.text
+
+
+def test_devices_api_contract_supports_one_and_many_device_fleet_rendering(client: TestClient) -> None:
+    """The fleet renderer receives the exact rows/summary shape it validates."""
+    payload = client.get("/api/devices").json()
+
+    assert isinstance(payload["devices"], list)
+    assert isinstance(payload["summary"], dict)
+    assert [row["device_id"] for row in payload["devices"]] == [DEVICE_A, DEVICE_B, DEVICE_C]
+    assert all("queue_pending" in row and "cloud_state" in row for row in payload["devices"])
+
+
+def test_empty_devices_api_contract_is_renderable(
+    make_config: RelayConfigFactory,
+) -> None:
+    """An empty fleet retains the renderer's required list/summary shape."""
+    config = make_config(web_enabled=True)
+    registry = DeviceRegistry(config.device_registry_db_path)
+    queue = MessageQueue(config.queue_db_path, config.max_queue_size)
+    shadow = StateShadow(config.state_shadow_db_path)
+    telemetry = RelayTelemetry()
+    logs = RingBufferLogHandler()
+    presence = DevicePresenceTracker()
+    devices = DeviceManager(
+        config, registry, queue, shadow, StateCache(config.state_cache_path), telemetry, presence
+    )
+    client = TestClient(
+        create_app(DashboardContext(config, registry, queue, shadow, telemetry, logs, devices, presence))
+    )
+    try:
+        payload = client.get("/api/devices").json()
+        assert payload["devices"] == []
+        assert payload["summary"]["known"] == 0
+        assert "No devices known yet. Waiting for a PETLIBRO device" in DASHBOARD_HTML
+    finally:
+        queue.close()
+        registry.close()
+        shadow.close()
+
+
 def test_never_connected_device_is_shown_as_offline(client: TestClient) -> None:
     """A device known only from the registry must not read as online."""
     detail = client.get(f"/api/devices/{DEVICE_C}").json()
@@ -353,8 +401,23 @@ def test_ui_renders_a_fleet_table_and_dedicated_device_pages() -> None:
     assert 'href="/devices"' in DASHBOARD_HTML
     assert "const DEVICE_TABS=" in DASHBOARD_HTML
     assert "renderDevicePage" in DASHBOARD_HTML
-    assert "/api/devices/${encodeURIComponent(pageDeviceId)}" in DASHBOARD_HTML
+    assert "/api/devices/${encodeURIComponent(deviceId)}" in DASHBOARD_HTML
     assert "devicePicker" in DASHBOARD_HTML
+
+
+def test_ui_initial_route_activates_the_matching_section_and_supports_history() -> None:
+    """Direct links do not leave the target section hidden behind the shell."""
+    for marker in (
+        "const GLOBAL_ROUTES=",
+        "function tabForPath",
+        "function applyRoute",
+        "byId(tab).classList.toggle('active',!deviceId&&tab===runtime.active)",
+        "history.pushState",
+        "window.addEventListener('popstate',applyRoute)",
+        "bindRoutes()",
+        "Failed to render",
+    ):
+        assert marker in DASHBOARD_HTML
 
 
 def test_device_ui_has_read_only_controls_schedule_camera_and_reused_views() -> None:
@@ -364,10 +427,10 @@ def test_device_ui_has_read_only_controls_schedule_camera_and_reused_views() -> 
         "scheduleMarkup",
         "cameraMarkup",
         "stateMarkup",
-        "logPanel('device-log',pageDeviceId)",
+        "logPanel('device-log',deviceId)",
         "TUTK/Kalay is not implemented",
         "No network traffic generated",
-        "renderLogLines('device-log',pageDeviceId)",
+        "renderLogLines('device-log',deviceId)",
     ):
         assert marker in DASHBOARD_HTML
     assert HTML_INJECTION_VALUE not in DASHBOARD_HTML

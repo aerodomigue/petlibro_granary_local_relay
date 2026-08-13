@@ -38,6 +38,16 @@ def create_app(context: DashboardContext) -> FastAPI:
         """Serve the fleet view of the dashboard."""
         return DASHBOARD_HTML
 
+    @app.get("/cloud", response_class=HTMLResponse, include_in_schema=False)
+    @app.get("/queues", response_class=HTMLResponse, include_in_schema=False)
+    @app.get("/state", response_class=HTMLResponse, include_in_schema=False)
+    @app.get("/ntp", response_class=HTMLResponse, include_in_schema=False)
+    @app.get("/logs", response_class=HTMLResponse, include_in_schema=False)
+    @app.get("/system", response_class=HTMLResponse, include_in_schema=False)
+    def global_dashboard_route() -> str:
+        """Serve the shell for a deep link to a global dashboard view."""
+        return DASHBOARD_HTML
+
     @app.get("/devices/{device_id}", response_class=HTMLResponse, include_in_schema=False)
     def device_dashboard(device_id: str) -> str:
         """Serve a device-scoped dashboard only for a known safe device id."""
