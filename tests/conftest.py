@@ -58,6 +58,7 @@ def make_config(tmp_path: Path) -> RelayConfigFactory:
             "replay_rate_global": 20.0,
             "replay_start_delay_seconds": 1.5,
             "replay_jitter": 0.15,
+            "log_upstream_service_payloads": False,
         }
         defaults.update(overrides)
         return RelayConfig(**defaults)  # type: ignore[arg-type]

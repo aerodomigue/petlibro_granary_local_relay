@@ -6,7 +6,14 @@ import pytest
 
 from conftest import RelayConfigFactory
 
-from petlibro_relay.config import UNSAFE_UPSTREAM_CONFIGURATION_MESSAGE
+from petlibro_relay.config import RelayConfig, UNSAFE_UPSTREAM_CONFIGURATION_MESSAGE
+
+
+def test_upstream_service_payload_diagnostic_defaults_to_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Service payloads are never logged at INFO until an operator opts in."""
+    monkeypatch.delenv("PETLIBRO_LOG_UPSTREAM_SERVICE_PAYLOADS", raising=False)
+
+    assert RelayConfig.from_env().log_upstream_service_payloads is False
 
 
 @pytest.mark.parametrize("upstream_host", ["127.0.0.1", "localhost", "::1"])

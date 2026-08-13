@@ -32,6 +32,7 @@ DEFAULT_REPLAY_RATE_PER_DEVICE = 5.0
 DEFAULT_REPLAY_RATE_GLOBAL = 20.0
 DEFAULT_REPLAY_START_DELAY_SECONDS = 1.5
 DEFAULT_REPLAY_JITTER = 0.15
+DEFAULT_LOG_UPSTREAM_SERVICE_PAYLOADS = False
 
 _LOOPBACK_UPSTREAM_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "0.0.0.0", "::"})
 UNSAFE_UPSTREAM_CONFIGURATION_MESSAGE = (
@@ -84,6 +85,7 @@ class RelayConfig:
     replay_rate_global: float
     replay_start_delay_seconds: float
     replay_jitter: float
+    log_upstream_service_payloads: bool
 
     @classmethod
     def from_env(cls) -> "RelayConfig":
@@ -141,6 +143,9 @@ class RelayConfig:
                 )
             ),
             replay_jitter=float(os.environ.get("PETLIBRO_REPLAY_JITTER", DEFAULT_REPLAY_JITTER)),
+            log_upstream_service_payloads=_env_flag(
+                "PETLIBRO_LOG_UPSTREAM_SERVICE_PAYLOADS", DEFAULT_LOG_UPSTREAM_SERVICE_PAYLOADS
+            ),
         )
 
     def manually_configured_identity(self) -> tuple[str, str, str] | None:

@@ -52,7 +52,37 @@ def sanitize_value(value: Any) -> Any:
     return value
 
 
+def sanitize_upstream_service_payload(value: Any) -> Any:
+    """Recursively redact sensitive values from diagnostic cloud payload logs.
+
+    Service payload diagnostics are intentionally more conservative than the
+    dashboard state view: TUTK/Kalay data is never useful for this MQTT
+    setting investigation, so any such field is redacted before it reaches a
+    log sink.
+    """
+    if isinstance(value, dict):
+        return {
+            key: REDACTED_VALUE
+            if _is_upstream_service_sensitive_key(str(key))
+            else sanitize_upstream_service_payload(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [sanitize_upstream_service_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_upstream_service_payload(item) for item in value]
+    return value
+
+
 def _is_sensitive_key(key: str) -> bool:
     """Return whether a JSON property name may carry a secret."""
     normalized = key.lower()
     return any(fragment in normalized for fragment in ("password", "secret", "authorization", "token"))
+
+
+def _is_upstream_service_sensitive_key(key: str) -> bool:
+    """Return whether a diagnostic service-payload field must be redacted."""
+    normalized = key.lower()
+    return _is_sensitive_key(key) or normalized in {"username", "user"} or any(
+        fragment in normalized for fragment in ("credential", "tutk", "kalay")
+    )

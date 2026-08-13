@@ -437,6 +437,21 @@ from the 72h identity TTL: a device that is merely *known* is shown
 200, while each device's exact `DISCONNECTED` / `MQTT_CONNECTING` / `ONLINE`
 state and its last 15m/1h/24h observed availability remain visible in the
 Cloud tab.
+
+### Temporary cloud service-payload diagnosis
+
+To inspect settings pushed by the official app, set
+`PETLIBRO_LOG_UPSTREAM_SERVICE_PAYLOADS=true` in `.env` and recreate only the
+`relay` container. The relay then logs each incoming
+`/device/service/sub` message at INFO before forwarding its bytes unchanged
+to local Mosquitto. Functional setting values are visible; passwords, tokens,
+credentials, and TUTK/Kalay fields are redacted. The default is `false`.
+
+```bash
+sudo docker compose logs -f relay | grep -E 'UPSTREAM SERVICE RX|ATTR_SET_SERVICE'
+```
+
+Turn the flag back off when the capture is complete.
 Logs are retained in a process-local ring buffer (5,000 entries), sanitized
 before API/SSE exposure; passwords, secrets, tokens and full MQTT usernames
 are never rendered. Keep the port LAN-only: diagnostics still contain device

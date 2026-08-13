@@ -29,6 +29,7 @@ rebuilds.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from typing import List, Sequence
@@ -45,6 +46,7 @@ from .device_registry import DeviceIdentity
 from .local_responder import Decision, LocalResponder, ResponderAction, UpstreamState
 from .message_queue import MessageQueue
 from .observability.telemetry import DeviceTelemetry, UpstreamTransition, UpstreamTransitionKind
+from .observability.sanitizer import sanitize_upstream_service_payload
 from .replay_policy import coalesce_key_for, extract_command, policy_for, should_enqueue
 from .state_cache import StateCache
 from .state_shadow import StateShadow
@@ -279,6 +281,7 @@ class DeviceContext:
         if self._is_stale_client(client):
             _LOGGER.debug("Discarding message from a replaced session for %s", self.device_id)
             return
+        self._log_upstream_service_payload(message.topic, message.payload)
         _LOGGER.debug(
             "upstream -> queue(%s) for %s: %s (%d bytes)",
             UPSTREAM_TO_LOCAL,
@@ -303,6 +306,45 @@ class DeviceContext:
             message.payload,
             message.qos,
             is_cloud_to_device=True,
+        )
+
+    def _log_upstream_service_payload(self, topic: str, payload: bytes) -> None:
+        """Log an opt-in, redacted cloud service message before forwarding it."""
+        if not self._config.log_upstream_service_payloads:
+            return
+        address = protocol.parse_topic(topic)
+        if address is None or not address.is_sub or address.category != "service":
+            return
+        try:
+            decoded = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            _LOGGER.info(
+                "UPSTREAM SERVICE RX source=petlibro-cloud device_id=%s topic=%s "
+                "cmd=unknown msgId=none payload=<%d bytes non-json>",
+                self.device_id,
+                topic,
+                len(payload),
+            )
+            return
+        if not isinstance(decoded, dict):
+            _LOGGER.info(
+                "UPSTREAM SERVICE RX source=petlibro-cloud device_id=%s topic=%s "
+                "cmd=unknown msgId=none payload=<%d bytes non-object-json>",
+                self.device_id,
+                topic,
+                len(payload),
+            )
+            return
+        command = decoded.get("cmd")
+        message_id = decoded.get("msgId")
+        _LOGGER.info(
+            "UPSTREAM SERVICE RX source=petlibro-cloud device_id=%s topic=%s cmd=%s msgId=%s "
+            "payload=%s",
+            self.device_id,
+            topic,
+            command if isinstance(command, str) else "unknown",
+            message_id if isinstance(message_id, str) else "none",
+            json.dumps(sanitize_upstream_service_payload(decoded), separators=(",", ":"), sort_keys=True),
         )
 
     # -- upstream callbacks ------------------------------------------------------
