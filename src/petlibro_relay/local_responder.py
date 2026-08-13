@@ -167,6 +167,7 @@ class LocalResponder:
             # overwrite the real plans with useless stubs.
             if isinstance(plans, list) and all(_is_complete_plan(p) for p in plans) and plans:
                 self._shadow.update_feeding_plans(device_id, plans, body.get("msgId"))
+                self._shadow.update_cloud_schedule_plans(device_id, plans)
         elif command in (
             protocol.Command.ATTR_SET_SERVICE,
             protocol.Command.SERVER_CONFIG_PUSH,

@@ -452,6 +452,35 @@ sudo docker compose logs -f relay | grep -E 'UPSTREAM SERVICE RX|ATTR_SET_SERVIC
 ```
 
 Turn the flag back off when the capture is complete.
+
+## Local device settings and schedules
+
+The device page exposes only typed, feeder-confirmed MQTT controls. Each
+change is published locally on `/device/service/sub` and becomes successful
+only after the matching `/device/service/post` `code: 0` ACK for the same
+device and `msgId`. Interactive writes are never added to the durable replay
+queue; the feeder's natural acknowledgement remains forwarded normally.
+
+Settings are grouped as detection, speaker, lighting, camera, recording,
+feeding video, and bowl mode. Booleans, enums, numeric bounds, and local
+`HH:MM` values are validated before MQTT is touched. `ts` uses Unix epoch
+milliseconds; schedule `syncTime` is epoch milliseconds truncated to the
+second. The configured IANA `PETLIBRO_DEVICE_TIMEZONE` is used for local-time
+to UTC conversion, including DST. No fixed UTC offset is assumed.
+
+`repeatDay` is a set: `1` through `7` mean Monday through Sunday, `0` is
+ignored legacy padding, and `[]` means **Never**. The order received from
+PETLIBRO is not meaningful. `grainNum` is limited to `1..48` and `audioTimes`
+to `1..5`.
+
+### Local MQTT schedule is not PETLIBRO Cloud schedule
+
+Schedule writes use `FEEDING_PLAN_SERVICE` with the complete known snapshot.
+Plans created locally receive persistent negative IDs (`-1`, `-2`, …) per
+device, so they cannot collide with PETLIBRO's positive cloud IDs. They apply
+directly to the feeder, but PETLIBRO Cloud does not create them and the
+official app may not display them. `cloudVideoRecordSwitch` is retained in the
+shadow but deliberately has no writable route.
 Logs are retained in a process-local ring buffer (5,000 entries), sanitized
 before API/SSE exposure; passwords, secrets, tokens and full MQTT usernames
 are never rendered. Keep the port LAN-only: diagnostics still contain device

@@ -52,7 +52,7 @@ class ControlHarness:
         if self.controller is not None and self.ack_code is not None:
             body = json.loads(payload)
             ack_body = {
-                "cmd": "ATTR_SET_SERVICE",
+                "cmd": body["cmd"],
                 "msgId": self.ack_message_id or body["msgId"],
                 "code": self.ack_code,
             }
@@ -237,13 +237,11 @@ def test_motion_route_is_strict_and_offline_never_queues(
     client, harness, _, queue, _ = control_environment
 
     assert client.patch(f"/api/devices/{DEVICE_A}/controls/motion", json={"enabled": 1}).status_code == 422
-    assert (
-        client.patch(
-            f"/api/devices/{DEVICE_A}/controls/motion",
-            json={"enabled": True, "motionDetectionAgingType": 1},
-        ).status_code
-        == 422
-    )
+    assert client.patch(
+        f"/api/devices/{DEVICE_A}/controls/motion",
+        json={"enabled": True, "motionDetectionAgingType": 1},
+    ).status_code == 200
+    harness.published.clear()
     offline = client.patch(f"/api/devices/{DEVICE_B}/controls/motion", json={"enabled": True})
 
     assert offline.status_code == 409
@@ -360,14 +358,14 @@ def test_local_confirmation_persists_across_shadow_reopen(tmp_path: Path) -> Non
         reopened.close()
 
 
-def test_cloud_desired_update_supersedes_local_confirmation(tmp_path: Path) -> None:
-    """A later cloud push remains authoritative over a locally confirmed setting."""
+def test_cloud_desired_delta_does_not_erase_local_confirmation(tmp_path: Path) -> None:
+    """Local feeder ACK stays visible if a divergent cloud value arrives later."""
     shadow = StateShadow(str(tmp_path / "shadow.sqlite3"))
     try:
         shadow.update_local_confirmed(DEVICE_A, {"soundSwitch": True})
         shadow.update_desired(DEVICE_A, {"soundSwitch": False})
 
-        assert shadow.get_local_confirmed(DEVICE_A) == {}
+        assert shadow.get_local_confirmed(DEVICE_A)["soundSwitch"] is True
         assert shadow.get_desired(DEVICE_A)["soundSwitch"] is False
     finally:
         shadow.close()

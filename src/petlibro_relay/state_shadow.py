@@ -75,6 +75,16 @@ CREATE TABLE IF NOT EXISTS feeding_plans (
     updated_at REAL NOT NULL
 )
 """
+_CREATE_SCHEDULE_PLANS_SQL = """
+CREATE TABLE IF NOT EXISTS schedule_plans (
+    device_id TEXT NOT NULL,
+    plan_id INTEGER NOT NULL,
+    plan_json TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('cloud', 'local')),
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (device_id, plan_id)
+)
+"""
 _CREATE_RAW_SQL = """
 CREATE TABLE IF NOT EXISTS raw_messages (
     device_id TEXT NOT NULL,
@@ -93,6 +103,15 @@ class FeedingPlans:
 
     plans: list[dict[str, Any]]
     source_msg_id: str | None
+    updated_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class SchedulePlan:
+    """One editable feeding plan scoped to a feeder and its source."""
+
+    plan: dict[str, Any]
+    source: str
     updated_at: float
 
 
@@ -115,6 +134,7 @@ class StateShadow:
                 _CREATE_DESIRED_SQL,
                 _CREATE_LOCAL_CONFIRMED_SQL,
                 _CREATE_PLANS_SQL,
+                _CREATE_SCHEDULE_PLANS_SQL,
                 _CREATE_RAW_SQL,
             ):
                 self._connection.execute(statement)
@@ -138,7 +158,9 @@ class StateShadow:
     def update_desired(self, device_id: str, values: dict[str, Any]) -> None:
         """Record settings the cloud last pushed for this device."""
         self._update_kv("cloud_desired", device_id, values)
-        self._delete_keys("local_confirmed", device_id, values.keys())
+        # A cloud push and a local feeder ACK have different authorities. Do
+        # not erase the ACK merely because an older cloud snapshot was
+        # delivered after it; the dashboard can show the divergence instead.
         _LOGGER.info("CACHE UPDATE config (%d key(s))", len(values))
 
     def update_local_confirmed(self, device_id: str, values: dict[str, Any]) -> None:
@@ -162,6 +184,88 @@ class StateShadow:
             (device_id, json.dumps(plans), source_msg_id, time.time()),
         )
         _LOGGER.info("CACHE UPDATE feeding_plan (%d plan(s))", len(plans))
+
+    def update_cloud_schedule_plans(self, device_id: str, plans: list[dict[str, Any]]) -> None:
+        """Merge a complete cloud schedule snapshot without erasing local IDs.
+
+        Positive cloud IDs are replaced as a set. Negative local IDs remain
+        independent, because PETLIBRO does not create them in its own API.
+        """
+        now = time.time()
+        valid_plans = [plan for plan in plans if isinstance(plan.get("planId"), int)]
+        cloud_ids = [int(plan["planId"]) for plan in valid_plans if int(plan["planId"]) >= 0]
+        with self._lock:
+            try:
+                with self._connection:
+                    if cloud_ids:
+                        placeholders = ",".join("?" for _ in cloud_ids)
+                        self._connection.execute(
+                            "DELETE FROM schedule_plans WHERE device_id = ? AND source = 'cloud' "
+                            f"AND plan_id NOT IN ({placeholders})",  # noqa: S608 - generated placeholders
+                            (device_id, *cloud_ids),
+                        )
+                    else:
+                        self._connection.execute(
+                            "DELETE FROM schedule_plans WHERE device_id = ? AND source = 'cloud'",
+                            (device_id,),
+                        )
+                    self._connection.executemany(
+                        "INSERT INTO schedule_plans (device_id, plan_id, plan_json, source, updated_at) "
+                        "VALUES (?, ?, ?, 'cloud', ?) "
+                        "ON CONFLICT(device_id, plan_id) DO UPDATE SET "
+                        "plan_json = excluded.plan_json, source = excluded.source, "
+                        "updated_at = excluded.updated_at",
+                        [
+                            (device_id, int(plan["planId"]), json.dumps(plan), now)
+                            for plan in valid_plans
+                            if int(plan["planId"]) >= 0
+                        ],
+                    )
+            except sqlite3.Error:
+                _LOGGER.exception("Failed to update cloud schedule plans for %s", device_id)
+                raise
+
+    def replace_local_schedule_plans(self, device_id: str, plans: list[dict[str, Any]]) -> None:
+        """Persist the local schedule projection after a feeder-confirmed edit."""
+        now = time.time()
+        local_plans = [plan for plan in plans if isinstance(plan.get("planId"), int)]
+        with self._lock:
+            try:
+                with self._connection:
+                    self._connection.execute(
+                        "DELETE FROM schedule_plans WHERE device_id = ? AND source = 'local'", (device_id,)
+                    )
+                    self._connection.executemany(
+                        "INSERT INTO schedule_plans (device_id, plan_id, plan_json, source, updated_at) "
+                        "VALUES (?, ?, ?, 'local', ?) "
+                        "ON CONFLICT(device_id, plan_id) DO UPDATE SET "
+                        "plan_json = excluded.plan_json, source = excluded.source, "
+                        "updated_at = excluded.updated_at",
+                        [
+                            (device_id, int(plan["planId"]), json.dumps(plan), now)
+                            for plan in local_plans
+                        ],
+                    )
+            except sqlite3.Error:
+                _LOGGER.exception("Failed to update local schedule plans for %s", device_id)
+                raise
+
+    def get_schedule_plans(self, device_id: str) -> list[SchedulePlan]:
+        """Return the editable schedule, isolated by device and plan ID."""
+        with self._lock:
+            try:
+                rows = self._connection.execute(
+                    "SELECT plan_json, source, updated_at FROM schedule_plans "
+                    "WHERE device_id = ? ORDER BY plan_id",
+                    (device_id,),
+                ).fetchall()
+            except sqlite3.Error:
+                _LOGGER.exception("Failed to read schedule plans for %s", device_id)
+                raise
+        return [
+            SchedulePlan(plan=json.loads(plan_json), source=source, updated_at=float(updated_at))
+            for plan_json, source, updated_at in rows
+        ]
 
     def _update_kv(self, table: str, device_id: str, values: dict[str, Any]) -> None:
         now = time.time()
@@ -265,6 +369,10 @@ class StateShadow:
                 "plans": plans.plans if plans else [],
                 "updated_at": plans.updated_at if plans else None,
             },
+            "schedule_plans": [
+                {"plan": entry.plan, "source": entry.source, "updated_at": entry.updated_at}
+                for entry in self.get_schedule_plans(device_id)
+            ],
         }
 
     def dashboard_snapshot(self, device_id: str, raw_limit: int = 100) -> dict[str, Any]:
@@ -292,6 +400,7 @@ class StateShadow:
                 "SELECT COUNT(*) FROM raw_messages WHERE device_id = ?", (device_id,)
             ).fetchone()[0]
         plans = self.get_feeding_plans(device_id)
+        schedule_plans = self.get_schedule_plans(device_id)
         return {
             "device_id": device_id,
             "reported": [
@@ -312,6 +421,10 @@ class StateShadow:
                 "updated_at": plans.updated_at if plans else None,
                 "complete": plans is not None,
             },
+            "schedule_plans": [
+                {"plan": entry.plan, "source": entry.source, "updated_at": entry.updated_at}
+                for entry in schedule_plans
+            ],
             "raw_messages": [
                 {
                     "topic": topic,

@@ -151,7 +151,11 @@ def main() -> None:
     bridge_holder = BridgeHolder()
     bridge = MqttBridge(config, devices, queue, telemetry)
     sound_switch_control = SoundSwitchController(
-        devices, presence, shadow, bridge.publish_sound_switch
+        devices,
+        presence,
+        shadow,
+        bridge.publish_sound_switch,
+        timezone_name=config.local_responder.device_timezone,
     )
     bridge.set_sound_switch_controller(sound_switch_control)
     dashboard_context = DashboardContext(

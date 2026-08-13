@@ -194,10 +194,12 @@ class DeviceManager:
             context.start_upstream()
         return context
 
-    def _build_responder(self) -> LocalResponder | None:
-        """Give each device its own responder so caches never cross over."""
-        if not self._config.local_responder.enabled:
-            return None
+    def _build_responder(self) -> LocalResponder:
+        """Give each device an observer, even when local replies are disabled.
+
+        `LocalResponder.enabled` gates answering, not learning: the shadow
+        must keep receiving cloud settings and schedules in pure-pipe mode.
+        """
         return LocalResponder(
             self._config.local_responder, self._shadow, self._config.handled_msg_id_ttl_seconds
         )

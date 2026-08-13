@@ -380,8 +380,17 @@ def test_dashboard_exposes_only_narrow_confirmed_control_write_routes(
     }
 
     assert write_routes == {
+        ("/api/devices/{device_id}/controls/bowl", ("PATCH",)),
+        ("/api/devices/{device_id}/controls/camera", ("PATCH",)),
+        ("/api/devices/{device_id}/controls/feeding-video", ("PATCH",)),
+        ("/api/devices/{device_id}/controls/light", ("PATCH",)),
         ("/api/devices/{device_id}/controls/motion", ("PATCH",)),
         ("/api/devices/{device_id}/controls/sound", ("PATCH",)),
+        ("/api/devices/{device_id}/controls/sound-detection", ("PATCH",)),
+        ("/api/devices/{device_id}/controls/video", ("PATCH",)),
+        ("/api/devices/{device_id}/schedule", ("POST",)),
+        ("/api/devices/{device_id}/schedule/{plan_id}", ("DELETE",)),
+        ("/api/devices/{device_id}/schedule/{plan_id}", ("PATCH",)),
     }
     assert all("mqtt/publish" not in route.path for route in app.routes)
     assert all(route.path != "/api/devices/{device_id}/controls" for route in app.routes)
@@ -430,8 +439,8 @@ def test_ui_initial_route_activates_the_matching_section_and_supports_history() 
         assert marker in DASHBOARD_HTML
 
 
-def test_device_ui_has_read_only_controls_schedule_camera_and_reused_views() -> None:
-    """Device sections use safe read-only renderers over existing API projections."""
+def test_device_ui_has_typed_controls_schedule_camera_and_reused_views() -> None:
+    """Device sections expose only the typed ACK-confirmed controls and plans."""
     for marker in (
         "controlsMarkup",
         "scheduleMarkup",
@@ -441,6 +450,10 @@ def test_device_ui_has_read_only_controls_schedule_camera_and_reused_views() -> 
         "TUTK/Kalay is not implemented",
         "No network traffic generated",
         "renderLogLines('device-log',deviceId)",
+        "schedule-edit",
+        "schedulePayload",
+        "Local MQTT schedule",
+        "Local confirmation differs from cloud desired.",
     ):
         assert marker in DASHBOARD_HTML
     assert HTML_INJECTION_VALUE not in DASHBOARD_HTML
