@@ -283,6 +283,18 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 	switch event.State {
 	case plaf203.StateDiscovering:
 		switch event.Step {
+		case "route_source":
+			log.Printf("CAMERA ROUTE SOURCE device=%s target=%s source=%s", deviceID, safeAddress(event.Address), safeAddress(event.LocalAddress))
+		case "route_failed":
+			log.Printf("CAMERA DISCOVERY ROUTE FAILED device=%s target=%s error=%s", deviceID, safeAddress(event.Address), event.Error)
+		case "udp_socket":
+			log.Printf("CAMERA UDP SOCKET device=%s local=%s", deviceID, safeAddress(event.LocalAddress))
+		case "udp_tx":
+			log.Printf("CAMERA UDP TX device=%s target=%s bytes=%d", deviceID, safeAddress(event.Address), event.PacketLength)
+		case "udp_tx_ok":
+			log.Printf("CAMERA UDP TX OK device=%s bytes=%d local=%s", deviceID, event.PacketLength, safeAddress(event.LocalAddress))
+		case "udp_tx_failed":
+			log.Printf("CAMERA UDP TX FAILED device=%s target=%s error=%s", deviceID, safeAddress(event.Address), event.Error)
 		case "response":
 			log.Printf("CAMERA DISCOVERY RESPONSE device=%s peer=%s bytes=%d opcode=0x%04x", deviceID, safeAddress(event.Address), event.PacketLength, event.Opcode)
 		case "valid":

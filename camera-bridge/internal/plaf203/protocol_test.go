@@ -334,7 +334,7 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 	if session.Address == nil || !session.Address.IP.Equal(net.ParseIP("192.0.2.25")) || session.Address.Port != 41135 {
 		t.Fatalf("session address=%v", session.Address)
 	}
-	want := []SessionState{StateDiscovering, StateDiscovering, StateDiscovering, StateKnocking, StateKnocking, StateLoggingIn, StateLoggingIn, StateLoggingIn, StateConnected, StateBootstrapping, StateStreaming}
+	want := []SessionState{StateDiscovering, StateDiscovering, StateDiscovering, StateDiscovering, StateDiscovering, StateDiscovering, StateKnocking, StateKnocking, StateLoggingIn, StateLoggingIn, StateLoggingIn, StateConnected, StateBootstrapping, StateStreaming}
 	if len(states) != len(want) {
 		t.Fatalf("states=%v want=%v", states, want)
 	}
@@ -588,6 +588,10 @@ func (transport *fakeTransport) Receive(ctx context.Context) ([]byte, *net.UDPAd
 	return nil, nil, ctx.Err()
 }
 
+func (transport *fakeTransport) LocalAddress() *net.UDPAddr {
+	return nil
+}
+
 func (transport *fakeTransport) Close() error {
 	transport.mu.Lock()
 	transport.closeCalls++
@@ -613,4 +617,38 @@ type fakeTransportFactory struct {
 
 func (factory fakeTransportFactory) Open() (DatagramTransport, error) {
 	return factory.transport, nil
+}
+
+type fakeRoutedTransportFactory struct {
+	transport    DatagramTransport
+	destinations []net.IP
+}
+
+func (factory *fakeRoutedTransportFactory) Open() (DatagramTransport, error) {
+	return factory.transport, nil
+}
+
+func (factory *fakeRoutedTransportFactory) OpenForDestination(_ context.Context, destination net.IP) (DatagramTransport, error) {
+	factory.destinations = append(factory.destinations, append(net.IP(nil), destination...))
+	return factory.transport, nil
+}
+
+func TestDirectConnectorResolvesSourcePerFeederDestination(t *testing.T) {
+	transport := &fakeTransport{}
+	factory := &fakeRoutedTransportFactory{transport: transport}
+	connector := DirectConnector{TransportFactory: factory}
+	feederA := net.IPv4(10, 3, 100, 90)
+	feederB := net.IPv4(10, 3, 100, 91)
+
+	_, targetA, err := connector.openTransport(context.Background(), feederA)
+	if err != nil || targetA == nil || !targetA.IP.Equal(feederA) || targetA.Port != LANPort {
+		t.Fatalf("target A=%v error=%v", targetA, err)
+	}
+	_, targetB, err := connector.openTransport(context.Background(), feederB)
+	if err != nil || targetB == nil || !targetB.IP.Equal(feederB) || targetB.Port != LANPort {
+		t.Fatalf("target B=%v error=%v", targetB, err)
+	}
+	if len(factory.destinations) != 2 || !factory.destinations[0].Equal(feederA) || !factory.destinations[1].Equal(feederB) {
+		t.Fatalf("routed destinations=%v", factory.destinations)
+	}
 }

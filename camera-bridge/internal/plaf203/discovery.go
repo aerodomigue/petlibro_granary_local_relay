@@ -16,7 +16,13 @@ import (
 type DatagramTransport interface {
 	SendTo(packet []byte, address *net.UDPAddr) error
 	Receive(context.Context) ([]byte, *net.UDPAddr, error)
+	LocalAddress() *net.UDPAddr
 	Close() error
+}
+
+type routedTransportFactory interface {
+	TransportFactory
+	OpenForDestination(context.Context, net.IP) (DatagramTransport, error)
 }
 
 // Discover sends a UID-specific LAN_SEARCH3 broadcast probe and accepts only a
@@ -50,9 +56,31 @@ func discover(ctx context.Context, transport DatagramTransport, uid string, nonc
 		if target == nil || target.IP == nil {
 			continue
 		}
+		emit(observe, Event{
+			State:        StateDiscovering,
+			Step:         "udp_tx",
+			Address:      cloneDiscoveryAddress(target),
+			LocalAddress: transport.LocalAddress(),
+			PacketLength: len(wireSearch),
+		})
 		if err := transport.SendTo(wireSearch, target); err != nil {
+			emit(observe, Event{
+				State:        StateDiscovering,
+				Step:         "udp_tx_failed",
+				Address:      cloneDiscoveryAddress(target),
+				LocalAddress: transport.LocalAddress(),
+				PacketLength: len(wireSearch),
+				Error:        err.Error(),
+			})
 			return nil, fmt.Errorf("PLAF203 discovery send %s: %w", target, err)
 		}
+		emit(observe, Event{
+			State:        StateDiscovering,
+			Step:         "udp_tx_ok",
+			Address:      cloneDiscoveryAddress(target),
+			LocalAddress: transport.LocalAddress(),
+			PacketLength: len(wireSearch),
+		})
 	}
 
 	var searchPeer *net.UDPAddr

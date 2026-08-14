@@ -35,9 +35,11 @@ const (
 type Event struct {
 	State        SessionState
 	Address      *net.UDPAddr
+	LocalAddress *net.UDPAddr
 	Step         string
 	PacketLength int
 	Opcode       uint16
+	Error        string
 	Frame        *VideoFrame
 }
 
@@ -90,8 +92,17 @@ func (connector *DirectConnector) Connect(ctx context.Context, uid string, feede
 	if connector.TransportFactory == nil {
 		return nil, errors.New("PLAF203 transport factory is unavailable")
 	}
-	transport, err := connector.TransportFactory.Open()
+	transport, routeTarget, err := connector.openTransport(ctx, feederIP)
 	if err != nil {
+		var routeErr *RouteSourceError
+		if errors.As(err, &routeErr) {
+			emit(observe, Event{
+				State:   StateDiscovering,
+				Step:    "route_failed",
+				Address: &net.UDPAddr{IP: append(net.IP(nil), routeErr.Destination...), Port: LANPort},
+				Error:   routeErr.Err.Error(),
+			})
+		}
 		return nil, err
 	}
 	keepTransport := false
@@ -100,6 +111,16 @@ func (connector *DirectConnector) Connect(ctx context.Context, uid string, feede
 			_ = transport.Close()
 		}
 	}()
+	localAddress := transport.LocalAddress()
+	if routeTarget != nil {
+		emit(observe, Event{
+			State:        StateDiscovering,
+			Step:         "route_source",
+			Address:      cloneUDPAddress(routeTarget),
+			LocalAddress: localAddress,
+		})
+	}
+	emit(observe, Event{State: StateDiscovering, Step: "udp_socket", LocalAddress: localAddress})
 
 	var nonce [8]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -190,6 +211,17 @@ func (connector *DirectConnector) Connect(ctx context.Context, uid string, feede
 		emit(observe, Event{State: StateStreaming, Address: address, Step: "bootstrap", Frame: frame})
 		return session, nil
 	}
+}
+
+func (connector *DirectConnector) openTransport(ctx context.Context, feederIP net.IP) (DatagramTransport, *net.UDPAddr, error) {
+	if ipv4 := feederIP.To4(); ipv4 != nil && !ipv4.IsUnspecified() {
+		if factory, supportsRoutedSource := connector.TransportFactory.(routedTransportFactory); supportsRoutedSource {
+			transport, err := factory.OpenForDestination(ctx, ipv4)
+			return transport, &net.UDPAddr{IP: append(net.IP(nil), ipv4...), Port: LANPort}, err
+		}
+	}
+	transport, err := connector.TransportFactory.Open()
+	return transport, nil, err
 }
 
 func (connector *DirectConnector) discover(ctx context.Context, transport DatagramTransport, uid string, nonce [8]byte, feederIP net.IP, timeout time.Duration, observe Observer) (*net.UDPAddr, string, error) {
