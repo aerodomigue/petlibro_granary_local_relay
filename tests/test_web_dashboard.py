@@ -480,7 +480,7 @@ def test_controls_and_schedule_use_conditional_human_friendly_components() -> No
         "Custom days",
         "Local MQTT schedules",
         "Delete this feeding plan? This cannot be undone locally.",
-        "repeatDay=mode==='every'?[1,2,3,4,5,6,7]",
+        "scheduleDraftDays",
     ):
         assert marker in DASHBOARD_HTML
     assert "Days (1=Mon … 7=Sun)" not in DASHBOARD_HTML
@@ -567,6 +567,118 @@ updateControlConditions(form);
 if (visibility.hidden !== false) throw new Error('Initial visibility state was not applied.');
 if (output.writes !== 1 || output.textContent !== '37%') {{
   throw new Error(`Condition initialization was not idempotent: ${{output.writes}} writes.`);
+}}
+"""
+    result = subprocess.run(
+        ["node", "-e", node_test],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_schedule_drafts_survive_polling_for_create_and_edit() -> None:
+    """Polling server state never replaces an active schedule editor's local draft."""
+    script = DASHBOARD_HTML.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+    schedule_start = script.rindex("function scheduleRepeatMode")
+    schedule_end = script.rindex("async function requestScheduleEditor")
+    node_test = f"""
+const runtime = {{ scheduleEditor: null, scheduleFeedback: null }};
+const escapeHtml = value => String(value ?? '—');
+const readControlValue = (form, key) => form.values[key];
+const timeField = (values, key) => `<input name="${{key}}" value="${{values[key] ?? ''}}">`;
+const numberField = (values, key) => `<input name="${{key}}" value="${{values[key] ?? ''}}">`;
+const checkboxRow = (values, key) => `<input name="${{key}}" type="checkbox" ${{values[key] === true ? 'checked' : ''}}>`;
+const conditional = (_condition, content) => content;
+const radioChoice = (values, key, _label, options) => options.map(([value]) => `<input name="${{key}}" value="${{value}}" ${{values[key] === value ? 'checked' : ''}}>`).join('');
+const scheduleDays = days => Array.isArray(days) ? days.join(',') : '—';
+{script[schedule_start:schedule_end]}
+function form(values, selectedDays) {{
+  return {{
+    values,
+    querySelectorAll: selector => selector === 'input[name="repeatDay"]:checked'
+      ? selectedDays.map(value => ({{ value: String(value) }})) : [],
+  }};
+}}
+runtime.scheduleEditor = {{ mode: 'create', planId: null, draft: scheduleDraftFromPlan() }};
+if (!scheduleMarkup({{ schedule_plans: [] }}).includes('value="every" checked')) {{
+  throw new Error('Create editor no longer defaults to every day.');
+}}
+updateScheduleDraft(form({{
+  executionTime: '12:34', grainNum: '4', enableAudio: true,
+  audioTimes: '3', repeatMode: 'custom',
+}}, [1, 3, 5]));
+const createAfterPoll = scheduleMarkup({{ schedule_plans: [] }});
+if (!createAfterPoll.includes('value="12:34"') || !createAfterPoll.includes('value="4"')) {{
+  throw new Error('Create draft was replaced by the polling render.');
+}}
+if (!createAfterPoll.includes('value="custom" checked') || !createAfterPoll.includes('value="1" checked')) {{
+  throw new Error('Create repeat draft was replaced by the polling render.');
+}}
+runtime.scheduleEditor = {{
+  mode: 'edit', planId: 42,
+  draft: scheduleDraftFromPlan({{ executionTime: '07:30', grainNum: 1, enableAudio: false, audioTimes: 1, repeatDay: [1, 2, 3, 4, 5, 6, 7] }}),
+}};
+updateScheduleDraft(form({{
+  executionTime: '19:45', grainNum: '7', enableAudio: true,
+  audioTimes: '2', repeatMode: 'never',
+}}, []));
+const editAfterPoll = scheduleMarkup({{
+  schedule_plans: [{{ plan: {{ planId: 42, executionTime: '07:30', grainNum: 1, repeatDay: [1, 2, 3, 4, 5, 6, 7] }}, source: 'local' }}],
+}});
+if (!editAfterPoll.includes('value="19:45"') || !editAfterPoll.includes('value="7"')) {{
+  throw new Error('Edit draft was replaced by the polling render.');
+}}
+if (!editAfterPoll.includes('value="never" checked')) {{
+  throw new Error('Edit repeat draft was replaced by the polling render.');
+}}
+"""
+    result = subprocess.run(
+        ["node", "-e", node_test],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_control_draft_survives_server_render() -> None:
+    """An unsaved Controls field is restored after a polling-driven rerender."""
+    script = DASHBOARD_HTML.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+    draft_start = script.rindex("function controlDraftKey")
+    draft_end = script.rindex("function controlPayload")
+    node_test = f"""
+const runtime = {{ controlDrafts: {{}} }};
+const currentDeviceId = () => 'DEVICE-A';
+const CSS = {{ escape: value => value }};
+const updateControlConditions = () => undefined;
+globalThis.HTMLInputElement = class {{}};
+globalThis.HTMLSelectElement = class {{}};
+{script[draft_start:draft_end]}
+class Input extends HTMLInputElement {{
+  constructor(name, type, checked) {{
+    super();
+    this.name = name;
+    this.type = type;
+    this.checked = checked;
+    this.value = checked ? 'true' : 'false';
+    this.dataset = {{}};
+  }}
+}}
+const edited = new Input('soundSwitch', 'checkbox', true);
+const editingForm = {{ dataset: {{ controlPath: 'sound' }} }};
+updateControlDraft(editingForm, edited);
+const rerendered = new Input('soundSwitch', 'checkbox', false);
+const renderedForm = {{
+  dataset: {{ controlPath: 'sound' }},
+  querySelectorAll: selector => selector === '[name="soundSwitch"]' ? [rerendered] : [],
+}};
+restoreControlDrafts({{ querySelectorAll: selector => selector === '.control-form' ? [renderedForm] : [] }}, 'DEVICE-A');
+if (rerendered.checked !== true || rerendered.dataset.dirty !== 'true') {{
+  throw new Error('Controls draft was replaced by the polling render.');
 }}
 """
     result = subprocess.run(
