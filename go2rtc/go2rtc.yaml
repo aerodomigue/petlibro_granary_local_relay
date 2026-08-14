@@ -5,10 +5,11 @@
 api:
   listen: ":1984"
 
-# camera-bridge owns host port 8554. go2rtc only needs the RTSP client module
-# to pull that source, so no second RTSP listener is started here.
+# camera-bridge owns host port 8554. go2rtc needs its RTSP module enabled to
+# let FFmpeg pull that source, so its own server is bound to a separate local
+# loopback-only port rather than disabling the module entirely.
 rtsp:
-  listen: ""
+  listen: "127.0.0.1:8556"
 
 webrtc:
   listen: ":8555"
