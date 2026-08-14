@@ -32,7 +32,6 @@ const (
 	keepalivePacketLength     = 24
 	sessionHeartbeatLength    = 16
 	sessionHeartbeatAckLength = 20
-	bootstrapAckMarker        = 0x09
 	bootstrapHeartbeatMarker  = 0x0A
 	formatControlIndex        = 1
 )
@@ -51,25 +50,31 @@ func (session *Session) bootstrap(ctx context.Context) (_ *VideoFrame, returnErr
 	if err := session.sendLoginPair(timestampMillis); err != nil {
 		return nil, err
 	}
-	if err := session.sendBody(encodeBootstrapHeartbeat(session.nextControlCounter(), timestampMillis)); err != nil {
+	if err := session.sendBody(encodeBootstrapHeartbeat(session.nextSession25ControlCounter(), timestampMillis)); err != nil {
 		return nil, fmt.Errorf("send PLAF203 bootstrap heartbeat: %w", err)
+	}
+	if err := session.sendSession25Counters(diagnostics); err != nil {
+		return nil, fmt.Errorf("send PLAF203 initial Session25 counters: %w", err)
 	}
 	if err := session.sendControl(controlChannelStream, 0, controlSetStream, streamControlHD[:]); err != nil {
 		return nil, err
 	}
+	if err := session.sendSession25Counters(diagnostics); err != nil {
+		return nil, fmt.Errorf("send PLAF203 post-stream-control counters: %w", err)
+	}
 	if err := session.sendControl(controlChannelSystem, formatControlIndex, controlGetFormat, nil); err != nil {
 		return nil, err
-	}
-	// The V3.0.30 capture sends this acknowledgement immediately after
-	// GET_FORMAT, before the corresponding device control replies arrive.
-	if err := session.sendBody(encodeBootstrapAck(session.nextControlCounter(), formatControlIndex, uint16(session.clock().UnixMilli()))); err != nil {
-		return nil, fmt.Errorf("send PLAF203 bootstrap acknowledgement: %w", err)
 	}
 	if err := session.waitForControlReplies(ctx, diagnostics); err != nil {
 		return nil, err
 	}
 	if err := session.sendStartVideo(); err != nil {
 		return nil, err
+	}
+	// The official application sends another counters frame immediately after
+	// IPCAM_START. This is Session25 flow control, not an additional IOCtrl.
+	if err := session.sendSession25Counters(diagnostics); err != nil {
+		return nil, fmt.Errorf("send PLAF203 post-start counters: %w", err)
 	}
 	return session.waitForVideo(ctx, diagnostics)
 }
@@ -83,7 +88,7 @@ func (session *Session) sendStartVideo() error {
 	// eight-byte command argument.
 	payload := make([]byte, 4+streamStartArgumentSize)
 	binary.LittleEndian.PutUint32(payload, controlStartVideo)
-	body := encodeControlData(session.nextControlCounter(), controlChannelSystem, 2, payload)
+	body := encodeControlData(session.nextSession25ControlCounter(), controlChannelSystem, 2, payload)
 	packet := encodeClientSessionPacket(session.ID, session.nextSequence(), body)
 	wire := tutk.TransCodePartial(nil, packet)
 	emit(session.observer, Event{
@@ -135,7 +140,7 @@ func (session *Session) sendControl(channel uint16, index uint32, controlType ui
 	payload := make([]byte, 4+len(controlData))
 	binary.LittleEndian.PutUint32(payload, controlType)
 	copy(payload[4:], controlData)
-	if err := session.sendBody(encodeControlData(session.nextControlCounter(), channel, index, payload)); err != nil {
+	if err := session.sendBody(encodeControlData(session.nextSession25ControlCounter(), channel, index, payload)); err != nil {
 		return fmt.Errorf("send PLAF203 bootstrap control type=0x%04x: %w", controlType, err)
 	}
 	return nil
@@ -154,15 +159,34 @@ func (session *Session) waitForControlReplies(ctx context.Context, diagnostics *
 			return fmt.Errorf("receive PLAF203 bootstrap control reply: %w", err)
 		}
 		decoded, details := diagnostics.observe(packet, peer)
+		if handled, heartbeatErr := session.replySessionHeartbeat(decoded, peer, diagnostics); heartbeatErr != nil {
+			return heartbeatErr
+		} else if handled {
+			if countersErr := session.sendSession25Counters(diagnostics); countersErr != nil {
+				return countersErr
+			}
+			continue
+		}
 		inner, decodeErr := decodeDeviceSession(decoded, session.ID)
 		if decodeErr != nil {
 			diagnostics.ignore(details, details.classification)
+			continue
+		}
+		if handled, countersErr := session.replySession25Counters(inner, peer, diagnostics); countersErr != nil {
+			return countersErr
+		} else if handled {
 			continue
 		}
 		reply, valid := parseControlReply(inner)
 		if !valid {
 			diagnostics.ignore(details, "not_control_reply")
 			continue
+		}
+		session.session25.noteReceivedControlReply()
+		if reply.channel == controlChannelStream {
+			if countersErr := session.sendSession25Counters(diagnostics); countersErr != nil {
+				return countersErr
+			}
 		}
 		key := controlReplyKey{channel: reply.channel, controlType: reply.controlType}
 		if _, expected := expectedReplies[key]; !expected {
@@ -192,6 +216,11 @@ func (session *Session) waitForVideo(ctx context.Context, diagnostics *bootstrap
 			continue
 		}
 		if inner, decodeErr := decodeDeviceSession(decoded, session.ID); decodeErr == nil {
+			if handled, countersErr := session.replySession25Counters(inner, peer, diagnostics); countersErr != nil {
+				return nil, countersErr
+			} else if handled {
+				continue
+			}
 			if reply, valid := parseControlReply(inner); valid && reply.channel == controlChannelSystem && reply.controlType == controlStartVideoReply {
 				emit(session.observer, Event{
 					State:       StateBootstrapping,
@@ -217,7 +246,54 @@ func (session *Session) waitForVideo(ctx context.Context, diagnostics *bootstrap
 			continue
 		}
 		diagnostics.media(details)
+		session.noteSession25Media(decoded)
 		return frame, nil
+	}
+}
+
+// replySession25Counters accepts the 24-byte Session25 09000b00 counters
+// packet previously rejected as a short body and returns a dynamic counters
+// acknowledgement. The response advances live per-session state.
+func (session *Session) replySession25Counters(inner []byte, peer *net.UDPAddr, diagnostics *bootstrapDiagnostics) (bool, error) {
+	counters, recognized := decodeSession25Counters(inner)
+	if !recognized {
+		return false, nil
+	}
+	diagnostics.emitLimited("session25_counters_rx", 4, session25Event("session25_counters_rx", peer, counters, session.session25))
+	if err := session.sendSession25Counters(diagnostics); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func (session *Session) sendSession25Counters(diagnostics *bootstrapDiagnostics) error {
+	body, counters := session.session25.nextCounters(uint16(session.clock().UnixMilli()))
+	if err := session.sendBody(body); err != nil {
+		return fmt.Errorf("send PLAF203 Session25 counters: %w", err)
+	}
+	diagnostics.emitLimited("session25_counters_tx", 4, session25Event("session25_counters_tx", session.Address, counters, session.session25))
+	return nil
+}
+
+func (session *Session) noteSession25Media(packet []byte) {
+	inner, err := decodeDeviceSession(packet, session.ID)
+	if err != nil || len(inner) < controlInnerLength || inner[0] != 0x0C || inner[2] != loginCommandVersion {
+		return
+	}
+	session.session25.noteReceivedMedia(binary.LittleEndian.Uint16(inner[18:20]))
+}
+
+func session25Event(step string, address *net.UDPAddr, counters session25Counters, state session25State) Event {
+	return Event{
+		State:                StateBootstrapping,
+		Address:              cloneUDPAddress(address),
+		Step:                 step,
+		Session25SeqSendCmd1: counters.seqSendCmd1,
+		Session25SeqSendCmd2: state.seqSendCmd2,
+		Session25SeqRecvCmd2: counters.seqRecvCmd2,
+		Session25SeqRecvPkt0: counters.seqRecvPkt0,
+		Session25SeqRecvPkt1: counters.seqRecvPkt1,
+		Session25SeqSendCnt:  counters.seqSendCnt,
 	}
 }
 
@@ -321,12 +397,10 @@ func (session *Session) nextSequence() uint16 {
 	return sequence
 }
 
-func (session *Session) nextControlCounter() uint16 {
+func (session *Session) nextSession25ControlCounter() uint16 {
 	session.sendMu.Lock()
 	defer session.sendMu.Unlock()
-	counter := session.controlCounter
-	session.controlCounter++
-	return counter
+	return session.session25.nextOutboundCommand()
 }
 
 func encodeClientSessionPacket(sessionID [8]byte, sequence uint16, body []byte) []byte {
@@ -371,19 +445,6 @@ func encodeBootstrapHeartbeat(counter uint16, timestamp uint32) []byte {
 	body[2] = loginCommandVersion
 	binary.LittleEndian.PutUint16(body[4:6], counter)
 	binary.LittleEndian.PutUint32(body[8:12], timestamp)
-	return body
-}
-
-func encodeBootstrapAck(counter uint16, subsequence uint16, tick uint16) []byte {
-	body := make([]byte, 24)
-	body[0] = bootstrapAckMarker
-	body[2] = loginCommandVersion
-	binary.LittleEndian.PutUint16(body[4:6], counter)
-	binary.LittleEndian.PutUint16(body[8:10], 0x3FFF)
-	binary.LittleEndian.PutUint16(body[10:12], 0x3FFF)
-	binary.LittleEndian.PutUint32(body[12:16], 0xFFFF)
-	binary.LittleEndian.PutUint16(body[16:18], subsequence)
-	binary.LittleEndian.PutUint16(body[20:22], tick)
 	return body
 }
 

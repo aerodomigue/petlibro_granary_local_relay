@@ -353,6 +353,10 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 			log.Printf("CAMERA SESSION HEARTBEAT RX device=%s peer=%s bytes=%d", deviceID, safeAddress(event.Address), event.PacketLength)
 		case "session_heartbeat_tx":
 			log.Printf("CAMERA SESSION HEARTBEAT TX device=%s peer=%s bytes=%d", deviceID, safeAddress(event.Address), event.PacketLength)
+		case "session25_counters_rx":
+			log.Printf("CAMERA SESSION25 COUNTERS RX device=%s peer=%s seq_send_cmd1=%d seq_send_cmd2=%d seq_recv_cmd2=%d seq_recv_pkt0=%d seq_recv_pkt1=%d seq_send_cnt=%d", deviceID, safeAddress(event.Address), event.Session25SeqSendCmd1, event.Session25SeqSendCmd2, event.Session25SeqRecvCmd2, event.Session25SeqRecvPkt0, event.Session25SeqRecvPkt1, event.Session25SeqSendCnt)
+		case "session25_counters_tx":
+			log.Printf("CAMERA SESSION25 COUNTERS TX device=%s peer=%s seq_send_cmd1=%d seq_send_cmd2=%d seq_recv_cmd2=%d seq_recv_pkt0=%d seq_recv_pkt1=%d seq_send_cnt=%d", deviceID, safeAddress(event.Address), event.Session25SeqSendCmd1, event.Session25SeqSendCmd2, event.Session25SeqRecvCmd2, event.Session25SeqRecvPkt0, event.Session25SeqRecvPkt1, event.Session25SeqSendCnt)
 		case "stream_start_tx":
 			log.Printf("CAMERA STREAM START TX device=%s channel=0x%04x control_type=0x%04x", deviceID, 0x7000, event.ControlType)
 		case "stream_start_ack":

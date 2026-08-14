@@ -18,3 +18,9 @@ the peer endpoint. The direct-LAN sequence continues with a client-emitted
 response captured during the V3.0.30 post-LOGIN bootstrap. Tests decrypt it,
 preserve its envelope and echo payload, and verify the corresponding
 `0x0427`/`0x0021` reply through the official TUTK transform.
+
+`session25_counters_client_decoded.hex` and
+`session25_counters_device_decoded.hex` are complete 52-byte Session25
+`0x0900` counter packets from the official PLAF203 V3.0.30 capture. They have
+already passed through `ReverseTransCodePartial`; tests deliberately parse
+them directly to avoid applying the transform twice.

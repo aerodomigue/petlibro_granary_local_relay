@@ -33,26 +33,32 @@ const (
 
 // Event reports an immutable protocol transition to the owning bridge.
 type Event struct {
-	State          SessionState
-	Address        *net.UDPAddr
-	LocalAddress   *net.UDPAddr
-	Step           string
-	PacketLength   int
-	BodyLength     int
-	Opcode         uint16
-	Sequence       uint16
-	SessionChannel uint16
-	SessionCommand uint16
-	ControlType    uint32
-	Reason         string
-	PacketCount    uint64
-	ByteCount      uint64
-	Types          string
-	Rejected       string
-	Error          string
-	DecodedHex     string
-	WireHex        string
-	Frame          *VideoFrame
+	State                SessionState
+	Address              *net.UDPAddr
+	LocalAddress         *net.UDPAddr
+	Step                 string
+	PacketLength         int
+	BodyLength           int
+	Opcode               uint16
+	Sequence             uint16
+	SessionChannel       uint16
+	SessionCommand       uint16
+	ControlType          uint32
+	Session25SeqSendCmd1 uint16
+	Session25SeqSendCmd2 uint16
+	Session25SeqRecvCmd2 uint16
+	Session25SeqRecvPkt0 uint16
+	Session25SeqRecvPkt1 uint16
+	Session25SeqSendCnt  uint16
+	Reason               string
+	PacketCount          uint64
+	ByteCount            uint64
+	Types                string
+	Rejected             string
+	Error                string
+	DecodedHex           string
+	WireHex              string
+	Frame                *VideoFrame
 }
 
 // Observer receives state transitions without receiving the UID or any secret.
@@ -191,14 +197,14 @@ func (connector *DirectConnector) Connect(ctx context.Context, uid string, feede
 			continue
 		}
 		session := &Session{
-			ID:             nonce,
-			Address:        cloneUDPAddress(address),
-			transport:      transport,
-			clock:          clock,
-			sequence:       2,
-			controlCounter: 0,
-			media:          NewMediaReceiver(),
-			observer:       observe,
+			ID:        nonce,
+			Address:   cloneUDPAddress(address),
+			transport: transport,
+			clock:     clock,
+			sequence:  2,
+			session25: newSession25State(),
+			media:     NewMediaReceiver(),
+			observer:  observe,
 		}
 		emit(observe, Event{State: StateConnected, Address: address})
 		emit(observe, Event{State: StateBootstrapping, Address: address})

@@ -65,6 +65,19 @@ func capturedKeepaliveResponseWire(t *testing.T) []byte {
 	return wire
 }
 
+func capturedSession25Counters(t *testing.T, name string) []byte {
+	t.Helper()
+	rawHex, err := os.ReadFile("testdata/" + name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := hex.DecodeString(strings.Join(strings.Fields(string(rawHex)), ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return packet
+}
+
 func TestCapturedKeepaliveResponseGetsPLAF203Reply(t *testing.T) {
 	wire := capturedKeepaliveResponseWire(t)
 	decoded := tutk.ReverseTransCodePartial(nil, wire)
@@ -89,6 +102,78 @@ func TestCapturedSessionHeartbeatGetsSession25Acknowledgement(t *testing.T) {
 	want := []byte{0x0B, 0x00, 0x0B, 0x00, 0x00, 0x00, 0x01, 0x00, 0x7A, 0xDD, 0x03, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 	if string(ack) != string(want) {
 		t.Fatalf("session heartbeat acknowledgement=%x want=%x", ack, want)
+	}
+}
+
+func TestCapturedSession25CountersDecodeWithoutWireTransform(t *testing.T) {
+	packet := capturedSession25Counters(t, "session25_counters_device_decoded.hex")
+	sessionID := [8]byte{0x59, 0x33, 0x60, 0x8D, 0xC8, 0xD1, 0xD8, 0x9E}
+	inner, err := decodeDeviceSession(packet, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counters, recognized := decodeSession25Counters(inner)
+	if !recognized {
+		t.Fatalf("captured counters were rejected: %x", inner)
+	}
+	if counters.seqSendCmd1 != 7 || counters.seqRecvPkt0 != 0xFFFF || counters.seqRecvPkt1 != 0xFFFF || counters.seqRecvCmd2 != 2 || counters.seqSendCnt != 2 || counters.random != 0x44C2 {
+		t.Fatalf("unexpected counters: %+v", counters)
+	}
+	details := inspectBootstrapPacket(packet, &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 41135}, sessionID)
+	if details.classification != "session25_counters" {
+		t.Fatalf("classification=%s", details.classification)
+	}
+}
+
+func TestSession25CountersMatchCapturedClientFrame(t *testing.T) {
+	packet := capturedSession25Counters(t, "session25_counters_client_decoded.hex")
+	sessionID := [8]byte{0x59, 0x33, 0x60, 0x8D, 0xC8, 0xD1, 0xD8, 0x9E}
+	state := session25State{
+		seqSendCmd1: 8,
+		seqSendCmd2: 3,
+		seqRecvCmd2: 3,
+		seqRecvPkt0: 0x3FFF,
+		seqRecvPkt1: 0x3FFF,
+		seqSendCnt:  4,
+	}
+	body, counters := state.nextCounters(0x47E7)
+	if counters.seqSendCmd1 != 8 || counters.seqSendCnt != 4 || state.seqSendCmd1 != 9 || state.seqRecvPkt0 != 0x3FFF || state.seqSendCnt != 5 {
+		t.Fatalf("state transition counters=%+v state=%+v", counters, state)
+	}
+	if got := encodeClientSessionPacket(sessionID, 15, body); string(got) != string(packet) {
+		t.Fatalf("counters packet=%x want=%x", got, packet)
+	}
+}
+
+func TestSession25CountersContinueToMedia(t *testing.T) {
+	transport := &fakeTransport{}
+	sessionID := [8]byte{0x59, 0x33, 0x60, 0x8D, 0xC8, 0xD1, 0xD8, 0x9E}
+	peer := &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 41135}
+	deviceCounters := capturedSession25Counters(t, "session25_counters_device_decoded.hex")
+	transport.addResponse(tutk.TransCodePartial(nil, deviceCounters), peer)
+	transport.addResponse(tutk.TransCodePartial(nil, testVideoFragment(sessionID, 0x4000, 1, 0, true, 0, append([]byte{0, 0, 0, 1, 0x65, 0x01}, testMediaTrailer(42)...))), peer)
+	session := &Session{
+		ID:        sessionID,
+		Address:   peer,
+		transport: transport,
+		clock:     time.Now,
+		sequence:  15,
+		session25: newSession25State(),
+		media:     NewMediaReceiver(),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	frame, err := session.waitForVideo(ctx, newBootstrapDiagnostics(sessionID, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil || !frame.Keyframe || len(transport.sent) != 1 {
+		t.Fatalf("frame=%+v counters_packets=%d", frame, len(transport.sent))
+	}
+	decoded := tutk.ReverseTransCodePartial(nil, transport.sent[0])
+	counters, recognized := decodeSession25Counters(decoded[sessionHeaderLength:])
+	if !recognized || counters.seqSendCmd1 != 0 || counters.seqRecvPkt0 != session25InitialPacket || counters.seqRecvPkt1 != session25InitialPacket {
+		t.Fatalf("outgoing counters=%+v recognized=%t", counters, recognized)
 	}
 }
 
@@ -387,7 +472,7 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 			t.Fatalf("states=%v want=%v", states, want)
 		}
 	}
-	if len(transport.sent) != 11 {
+	if len(transport.sent) != 15 {
 		t.Fatalf("wire messages=%d want discovery phases, login, and bootstrap", len(transport.sent))
 	}
 	phaseOne := tutk.ReverseTransCodePartial(nil, transport.sent[0])
@@ -396,25 +481,37 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 		binary.LittleEndian.Uint16(phaseTwo[8:10]) != lanSearchOpcode || phaseTwo[lanSearchPhase] != 2 {
 		t.Fatalf("unexpected direct-discovery sequence: phase_one=%x phase_two=%x", phaseOne[:12], phaseTwo[:12])
 	}
-	bootstrapPackets := make([][]byte, 0, 7)
+	bootstrapPackets := make([][]byte, 0, 11)
 	for _, packet := range transport.sent[4:] {
 		bootstrapPackets = append(bootstrapPackets, tutk.ReverseTransCodePartial(nil, packet))
 	}
-	if len(bootstrapPackets) != 7 || len(bootstrapPackets[0]) != loginRequestLength || len(bootstrapPackets[1]) != loginRequestLength {
+	if len(bootstrapPackets) != 11 || len(bootstrapPackets[0]) != loginRequestLength || len(bootstrapPackets[1]) != loginRequestLength {
 		t.Fatalf("unexpected bootstrap login pair: %d packets", len(bootstrapPackets))
 	}
 	if body := bootstrapPackets[2][sessionHeaderLength:]; len(body) != 16 || body[0] != bootstrapHeartbeatMarker || body[2] != loginCommandVersion {
 		t.Fatalf("heartbeat=%x", body)
 	}
-	assertControlPacket(t, bootstrapPackets[3], controlChannelStream, controlSetStream, streamControlHD[:])
-	assertControlPacket(t, bootstrapPackets[4], controlChannelSystem, controlGetFormat, nil)
-	if body := bootstrapPackets[5][sessionHeaderLength:]; len(body) != 24 || body[0] != bootstrapAckMarker || binary.LittleEndian.Uint16(body[16:18]) != 1 {
-		t.Fatalf("ack=%x", body)
+	if body := bootstrapPackets[3][sessionHeaderLength:]; len(body) != session25CountersLength || body[0] != session25CounterCommand || binary.LittleEndian.Uint16(body[4:6]) != 1 {
+		t.Fatalf("initial counters=%x", body)
 	}
-	assertControlPacket(t, bootstrapPackets[6], controlChannelSystem, controlStartVideo, make([]byte, streamStartArgumentSize))
-	startWire := transport.sent[len(transport.sent)-1]
+	assertControlPacket(t, bootstrapPackets[4], controlChannelStream, controlSetStream, streamControlHD[:])
+	if body := bootstrapPackets[5][sessionHeaderLength:]; len(body) != session25CountersLength || body[0] != session25CounterCommand || binary.LittleEndian.Uint16(body[4:6]) != 3 {
+		t.Fatalf("post-stream-control counters=%x", body)
+	}
+	assertControlPacket(t, bootstrapPackets[6], controlChannelSystem, controlGetFormat, nil)
+	if body := bootstrapPackets[7][sessionHeaderLength:]; len(body) != session25CountersLength || body[0] != session25CounterCommand || binary.LittleEndian.Uint16(body[4:6]) != 5 || binary.LittleEndian.Uint16(body[12:14]) != 1 {
+		t.Fatalf("first stream-reply counters=%x", body)
+	}
+	if body := bootstrapPackets[8][sessionHeaderLength:]; len(body) != session25CountersLength || body[0] != session25CounterCommand || binary.LittleEndian.Uint16(body[4:6]) != 6 || binary.LittleEndian.Uint16(body[12:14]) != 2 {
+		t.Fatalf("second stream-reply counters=%x", body)
+	}
+	assertControlPacket(t, bootstrapPackets[9], controlChannelSystem, controlStartVideo, make([]byte, streamStartArgumentSize))
+	if body := bootstrapPackets[10][sessionHeaderLength:]; len(body) != session25CountersLength || body[0] != session25CounterCommand || binary.LittleEndian.Uint16(body[4:6]) != 8 || binary.LittleEndian.Uint16(body[12:14]) != 3 || binary.LittleEndian.Uint16(body[18:20]) != 4 {
+		t.Fatalf("post-start counters=%x", body)
+	}
+	startWire := transport.sent[len(transport.sent)-2]
 	startDecoded := tutk.ReverseTransCodePartial(nil, startWire)
-	if len(startWire) != 76 || len(startDecoded) != 76 || binary.LittleEndian.Uint16(startDecoded[8:10]) != clientSessionOpcode || binary.LittleEndian.Uint16(startDecoded[10:12]) != clientSessionSubtype || binary.LittleEndian.Uint16(startDecoded[6:8]) != 8 {
+	if len(startWire) != 76 || len(startDecoded) != 76 || binary.LittleEndian.Uint16(startDecoded[8:10]) != clientSessionOpcode || binary.LittleEndian.Uint16(startDecoded[10:12]) != clientSessionSubtype || binary.LittleEndian.Uint16(startDecoded[6:8]) != 11 {
 		t.Fatalf("unexpected IPCAM_START Session16 envelope: wire=%x decoded=%x", startWire, startDecoded)
 	}
 	if body := startDecoded[sessionHeaderLength:]; len(body) != 48 || binary.LittleEndian.Uint16(body[:2]) != 0x000C || binary.LittleEndian.Uint16(body[16:18]) != controlChannelSystem || binary.LittleEndian.Uint32(body[controlInnerLength:]) != controlStartVideo || string(body[controlInnerLength+4:]) != string(make([]byte, streamStartArgumentSize)) {

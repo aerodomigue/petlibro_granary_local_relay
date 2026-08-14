@@ -55,20 +55,22 @@ type bootstrapDiagnostics struct {
 	sessionID [8]byte
 	observer  Observer
 
-	packetCount uint64
-	byteCount   uint64
-	types       map[string]uint64
-	rejected    map[string]uint64
-	emitted     map[string]struct{}
+	packetCount  uint64
+	byteCount    uint64
+	types        map[string]uint64
+	rejected     map[string]uint64
+	emitted      map[string]struct{}
+	emittedCount map[string]uint
 }
 
 func newBootstrapDiagnostics(sessionID [8]byte, observer Observer) *bootstrapDiagnostics {
 	return &bootstrapDiagnostics{
-		sessionID: sessionID,
-		observer:  observer,
-		types:     make(map[string]uint64),
-		rejected:  make(map[string]uint64),
-		emitted:   make(map[string]struct{}),
+		sessionID:    sessionID,
+		observer:     observer,
+		types:        make(map[string]uint64),
+		rejected:     make(map[string]uint64),
+		emitted:      make(map[string]struct{}),
+		emittedCount: make(map[string]uint),
 	}
 }
 
@@ -118,6 +120,17 @@ func (diagnostics *bootstrapDiagnostics) emitOnce(key string, event Event) {
 	emit(diagnostics.observer, event)
 }
 
+// emitLimited publishes only the first limit occurrences of a protocol shape.
+// It keeps counter diagnostics useful without turning a high-rate flow-control
+// exchange into a log flood.
+func (diagnostics *bootstrapDiagnostics) emitLimited(key string, limit uint, event Event) {
+	if diagnostics.emittedCount[key] >= limit {
+		return
+	}
+	diagnostics.emittedCount[key]++
+	emit(diagnostics.observer, event)
+}
+
 func inspectBootstrapPacket(packet []byte, peer *net.UDPAddr, expectedSessionID [8]byte) bootstrapPacketDetails {
 	details := bootstrapPacketDetails{
 		peer:           peer,
@@ -160,6 +173,10 @@ func inspectBootstrapPacket(packet []byte, peer *net.UDPAddr, expectedSessionID 
 		return details
 	}
 	details.sessionCommand = binary.LittleEndian.Uint16(inner[:2])
+	if _, isCounters := decodeSession25Counters(inner); isCounters {
+		details.classification = "session25_counters"
+		return details
+	}
 	if len(inner) < controlInnerLength {
 		details.classification = "session_body_short"
 		return details

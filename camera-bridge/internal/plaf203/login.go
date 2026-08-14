@@ -78,7 +78,7 @@ type Session struct {
 	transport      DatagramTransport
 	clock          func() time.Time
 	sequence       uint16
-	controlCounter uint16
+	session25      session25State
 	media          *MediaReceiver
 	observer       Observer
 	sendMu         sync.Mutex

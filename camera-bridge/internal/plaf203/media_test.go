@@ -60,6 +60,25 @@ func TestMediaReceiverAssemblesH264AndIgnoresDuplicateFragments(t *testing.T) {
 	}
 }
 
+func TestMediaReceiverAcceptsV303TerminalFragmentFlags(t *testing.T) {
+	sessionID := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+	receiver := NewMediaReceiver()
+	now := time.Unix(1_786_544_102, 0).UTC()
+	first := testVideoFragment(sessionID, 0x4000, 2, 0, false, 0, []byte{0, 0, 0, 1, 0x67})
+	terminal := testVideoFragment(sessionID, 0x4001, 2, 16, true, 0, append([]byte{0, 0, 0, 1, 0x65}, testMediaTrailer(42)...))
+	inner := terminal[sessionHeaderLength:]
+	inner[1] = 0x05
+	inner[17] = 0x01
+
+	if frame, err := receiver.HandlePacket(first, sessionID, now); err != nil || frame != nil {
+		t.Fatalf("first fragment frame=%+v err=%v", frame, err)
+	}
+	frame, err := receiver.HandlePacket(terminal, sessionID, now)
+	if err != nil || frame == nil || !frame.Keyframe {
+		t.Fatalf("terminal fragment frame=%+v err=%v", frame, err)
+	}
+}
+
 func TestMediaReceiverRejectsUnexpectedSessionAndIncompleteFrame(t *testing.T) {
 	sessionID := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
 	receiver := NewMediaReceiver()

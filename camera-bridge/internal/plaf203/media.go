@@ -90,7 +90,11 @@ func (receiver *MediaReceiver) HandlePacket(packet []byte, expectedSessionID [8]
 	payload := append([]byte(nil), inner[mediaHeaderLength:mediaHeaderLength+payloadLength]...)
 	subsequence := binary.LittleEndian.Uint16(inner[18:20])
 	frameNumber := binary.LittleEndian.Uint32(inner[28:32])
-	isEndFragment := inner[1] == 0x01 && inner[17] == 0x01
+	// V3.0.30 marks the terminal fragment with the low flag bit while retaining
+	// additional flags (observed as 0x05), and sets the high channel byte.
+	// Checking equality to 0x01 drops real terminal fragments such as 0x0c05
+	// on channel 0x0105 before their SPS/PPS/IDR access unit can assemble.
+	isEndFragment := inner[1]&0x01 != 0 && channelID&0x0100 != 0
 
 	receiver.mu.Lock()
 	defer receiver.mu.Unlock()
