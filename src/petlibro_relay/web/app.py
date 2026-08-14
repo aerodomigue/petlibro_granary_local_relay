@@ -262,6 +262,13 @@ def create_app(context: DashboardContext) -> FastAPI:
             raise HTTPException(status_code=404, detail="Unknown device")
         return detail
 
+    @app.get("/api/devices/{device_id}/camera")
+    def camera(device_id: str) -> dict[str, object]:
+        """Return constrained go2rtc status without exposing source details."""
+        if not DEVICE_ID_PATTERN.fullmatch(device_id) or context.device_detail(device_id, 1) is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        return context.camera(device_id)
+
     @app.patch("/api/devices/{device_id}/controls/sound")
     def set_device_sound(device_id: str, request: SoundRequest) -> dict[str, object]:
         """Set the device sound control validated for PETLIBRO cloud sync."""

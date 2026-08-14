@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from petlibro_relay.config import RelayConfig
+from petlibro_relay.config import Go2RtcSettings, RelayConfig
 from petlibro_relay.local_responder import LocalResponderSettings
 
 RelayConfigFactory = Callable[..., RelayConfig]
@@ -59,6 +59,7 @@ def make_config(tmp_path: Path) -> RelayConfigFactory:
             "replay_start_delay_seconds": 1.5,
             "replay_jitter": 0.15,
             "log_upstream_service_payloads": False,
+            "go2rtc": Go2RtcSettings(enabled=False),
         }
         defaults.update(overrides)
         return RelayConfig(**defaults)  # type: ignore[arg-type]

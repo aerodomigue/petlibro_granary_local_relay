@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from conftest import RelayConfigFactory
 
 from petlibro_relay.device_context import LOCAL_TO_UPSTREAM
+from petlibro_relay.camera import CameraStatus
 from petlibro_relay.device_manager import DeviceManager
 from petlibro_relay.device_presence import DevicePresenceTracker
 from petlibro_relay.device_registry import DeviceIdentity, DeviceRegistry
@@ -56,6 +57,22 @@ DEVICE_B_PLANS = [
         "grainNum": 1,
     }
 ]
+
+
+class FakeCameraProvider:
+    """Provide deterministic camera state without reaching a real sidecar."""
+
+    def status(self, device_id: str, product_id: str | None) -> CameraStatus:
+        """Return a safe status scoped to the requested device."""
+        return CameraStatus(
+            available=False,
+            configured=product_id == "PLAF203",
+            online=device_id == DEVICE_A,
+            stream=f"plaf203_{device_id}",
+            webrtc=False,
+            go2rtc_reachable=True,
+            reason="plaf203_tutk_unsupported",
+        )
 
 
 @pytest.fixture
@@ -124,7 +141,7 @@ def dashboard(
         config, registry, queue, shadow, StateCache(config.state_cache_path), telemetry, presence
     )
     context = DashboardContext(
-        config, registry, queue, shadow, telemetry, logs, devices, presence
+        config, registry, queue, shadow, telemetry, logs, devices, presence, camera=FakeCameraProvider()
     )
 
     yield context, logs
@@ -148,6 +165,7 @@ def client(dashboard: tuple[DashboardContext, RingBufferLogHandler]) -> TestClie
         "/api/cloud",
         "/api/devices",
         f"/api/devices/{DEVICE_A}",
+        f"/api/devices/{DEVICE_A}/camera",
         f"/api/queues?device_id={DEVICE_A}",
         f"/api/state?device_id={DEVICE_A}",
         f"/api/ntp?device_id={DEVICE_A}",
@@ -170,6 +188,20 @@ def test_health_remains_ok_when_petlibro_is_down(client: TestClient) -> None:
     assert payload["healthy"] is True
     assert payload["devices_known"] == 3
     assert payload["upstream_petlibro_online"] == 1, "only A has a live cloud session"
+
+
+def test_camera_status_is_device_scoped_and_excludes_sensitive_source_data(client: TestClient) -> None:
+    """Camera diagnostics expose only safe go2rtc status, never a source URL."""
+    camera_a = client.get(f"/api/devices/{DEVICE_A}/camera").json()
+    camera_b = client.get(f"/api/devices/{DEVICE_B}/camera").json()
+
+    assert camera_a["stream"] == f"plaf203_{DEVICE_A}"
+    assert camera_a["configured"] is True
+    assert camera_a["online"] is True
+    assert camera_b["stream"] == f"plaf203_{DEVICE_B}"
+    assert camera_b["online"] is False
+    assert "source" not in camera_a
+    assert "password" not in camera_a
 
 
 def test_api_masks_credentials_and_sanitizes_raw_state(client: TestClient) -> None:
@@ -449,7 +481,8 @@ def test_device_ui_has_typed_controls_schedule_camera_and_reused_views() -> None
         "cameraMarkup",
         "stateMarkup",
         "logPanel('device-log',deviceId)",
-        "TUTK/Kalay is not implemented",
+        "go2rtc stream status",
+        "go2rtc_reachable",
         "No network traffic generated",
         "renderLogLines('device-log',deviceId)",
         "schedule-edit",

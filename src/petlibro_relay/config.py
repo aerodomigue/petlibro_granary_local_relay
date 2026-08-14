@@ -33,12 +33,26 @@ DEFAULT_REPLAY_RATE_GLOBAL = 20.0
 DEFAULT_REPLAY_START_DELAY_SECONDS = 1.5
 DEFAULT_REPLAY_JITTER = 0.15
 DEFAULT_LOG_UPSTREAM_SERVICE_PAYLOADS = False
+DEFAULT_GO2RTC_ENABLED = False
+DEFAULT_GO2RTC_HOST = "go2rtc"
+DEFAULT_GO2RTC_PORT = 1984
+DEFAULT_GO2RTC_TIMEOUT_SECONDS = 1.0
 
 _LOOPBACK_UPSTREAM_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "0.0.0.0", "::"})
 UNSAFE_UPSTREAM_CONFIGURATION_MESSAGE = (
     "Unsafe upstream configuration: upstream would connect to the local capture proxy / broker "
     "and create an MQTT loop."
 )
+
+
+@dataclass(frozen=True, slots=True)
+class Go2RtcSettings:
+    """Read-only connection settings for the optional go2rtc sidecar."""
+
+    enabled: bool = DEFAULT_GO2RTC_ENABLED
+    host: str = DEFAULT_GO2RTC_HOST
+    port: int = DEFAULT_GO2RTC_PORT
+    timeout_seconds: float = DEFAULT_GO2RTC_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +100,7 @@ class RelayConfig:
     replay_start_delay_seconds: float
     replay_jitter: float
     log_upstream_service_payloads: bool
+    go2rtc: Go2RtcSettings
 
     @classmethod
     def from_env(cls) -> "RelayConfig":
@@ -146,6 +161,14 @@ class RelayConfig:
             log_upstream_service_payloads=_env_flag(
                 "PETLIBRO_LOG_UPSTREAM_SERVICE_PAYLOADS", DEFAULT_LOG_UPSTREAM_SERVICE_PAYLOADS
             ),
+            go2rtc=Go2RtcSettings(
+                enabled=_env_flag("PETLIBRO_GO2RTC_ENABLED", DEFAULT_GO2RTC_ENABLED),
+                host=os.environ.get("PETLIBRO_GO2RTC_HOST", DEFAULT_GO2RTC_HOST),
+                port=int(os.environ.get("PETLIBRO_GO2RTC_PORT", DEFAULT_GO2RTC_PORT)),
+                timeout_seconds=float(
+                    os.environ.get("PETLIBRO_GO2RTC_TIMEOUT_SECONDS", DEFAULT_GO2RTC_TIMEOUT_SECONDS)
+                ),
+            ),
         )
 
     def manually_configured_identity(self) -> tuple[str, str, str] | None:
@@ -184,6 +207,10 @@ class RelayConfig:
             raise ValueError("Replay start delay must not be negative")
         if not 0 <= self.replay_jitter <= 1:
             raise ValueError("Replay jitter must be between zero and one")
+        if self.go2rtc.port <= 0 or self.go2rtc.port > 65535:
+            raise ValueError("go2rtc port must be between 1 and 65535")
+        if self.go2rtc.timeout_seconds <= 0:
+            raise ValueError("go2rtc timeout must be greater than zero")
 
 
 def _env_flag(name: str, default: bool = False) -> bool:

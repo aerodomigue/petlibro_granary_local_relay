@@ -8,6 +8,7 @@ import threading
 from types import FrameType
 
 from .config import RelayConfig
+from .camera import Go2RtcCameraClient
 from .credential_capture_proxy import CredentialCaptureProxy, DeviceSessionListener
 from .device_manager import DeviceManager
 from .device_presence import DevicePresenceTracker
@@ -171,6 +172,7 @@ def main() -> None:
         devices,
         presence,
         sound_switch_control,
+        Go2RtcCameraClient(config.go2rtc),
     )
 
     dashboard_server: DashboardServer | None = None

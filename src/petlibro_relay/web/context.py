@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
+from ..camera import CameraStatusProvider, Go2RtcCameraClient
 from ..config import RelayConfig
 from ..device_context import LOCAL_TO_UPSTREAM, UPSTREAM_TO_LOCAL
 from ..device_manager import DeviceManager
@@ -40,6 +41,7 @@ class DashboardContext:
         devices: DeviceManager,
         presence: DevicePresenceTracker,
         sound_switch_control: SoundSwitchController | None = None,
+        camera: CameraStatusProvider | None = None,
     ) -> None:
         self._config = config
         self._registry = registry
@@ -50,6 +52,7 @@ class DashboardContext:
         self._devices = devices
         self._presence = presence
         self._sound_switch_control = sound_switch_control
+        self._camera = camera or Go2RtcCameraClient(config.go2rtc)
 
     @property
     def logs(self) -> RingBufferLogHandler:
@@ -146,9 +149,21 @@ class DashboardContext:
                     "ntp": self.ntp(device_id),
                     "local_responder": self.responder(device_id),
                     "controls": self.controls(device_id),
+                    "camera": self.camera(device_id, entry.product_id),
                 }
             ),
         )
+
+    def camera(self, device_id: str, product_id: str | None = None) -> dict[str, object]:
+        """Return the safe go2rtc camera status for one known device."""
+        if product_id is None:
+            entry = next(
+                (item for item in self._registry.entries() if item.client_id == device_id), None
+            )
+            if entry is None:
+                return {}
+            product_id = entry.product_id
+        return self._camera.status(device_id, product_id).snapshot()
 
     def queues(self, device_id: str, limit: int) -> dict[str, Any]:
         """Return bounded metadata for one device's two durable directions."""

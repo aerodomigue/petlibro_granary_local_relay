@@ -25,12 +25,23 @@ services:
       - mosquitto-data:/mosquitto/data
       - mosquitto-log:/mosquitto/log
 
+  # Internal-only video sidecar. The PLAF203 TUTK AV source is deliberately
+  # empty until its device-specific protocol has been documented; the relay
+  # only reads go2rtc's stream status API on this Docker network.
+  go2rtc:
+    image: alexxit/go2rtc:v1.9.14
+    container_name: petlibro-relay-go2rtc
+    restart: unless-stopped
+    volumes:
+      - ./go2rtc/go2rtc.yaml:/config/go2rtc.yaml:ro
+
   relay:
     build: .
     container_name: petlibro-relay
     restart: unless-stopped
     depends_on:
       - mosquitto
+      - go2rtc
     env_file:
       - .env
     # The DNS override that points the feeder at this relay rewrites
