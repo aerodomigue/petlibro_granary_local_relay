@@ -19,11 +19,39 @@ func NewHandler(registry *Registry) http.Handler {
 	mux.HandleFunc("PUT /devices/{device_id}", func(writer http.ResponseWriter, request *http.Request) {
 		upsertDevice(writer, request, registry)
 	})
+	mux.HandleFunc("POST /devices/{device_id}/connect", func(writer http.ResponseWriter, request *http.Request) {
+		connectDevice(writer, request, registry)
+	})
+	mux.HandleFunc("POST /devices/{device_id}/disconnect", func(writer http.ResponseWriter, request *http.Request) {
+		disconnectDevice(writer, request, registry)
+	})
 	mux.HandleFunc("DELETE /devices/{device_id}", func(writer http.ResponseWriter, request *http.Request) {
 		registry.Delete(request.PathValue("device_id"))
 		writer.WriteHeader(http.StatusNoContent)
 	})
 	return mux
+}
+
+func connectDevice(writer http.ResponseWriter, request *http.Request, registry *Registry) {
+	device, started, err := registry.Connect(request.PathValue("device_id"))
+	if errors.Is(err, ErrDeviceNotFound) {
+		writeError(writer, http.StatusNotFound, "device is not registered")
+		return
+	}
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "camera connection is unavailable")
+		return
+	}
+	status := http.StatusOK
+	if started {
+		status = http.StatusAccepted
+	}
+	writeJSON(writer, status, device)
+}
+
+func disconnectDevice(writer http.ResponseWriter, request *http.Request, registry *Registry) {
+	registry.Disconnect(request.PathValue("device_id"))
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 func healthHandler(writer http.ResponseWriter, request *http.Request) {

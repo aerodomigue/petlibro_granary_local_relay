@@ -86,3 +86,41 @@ func TestDeleteIsIdempotentAndHealthDoesNotClaimMediaIsAvailable(t *testing.T) {
 		}
 	}
 }
+
+func TestConnectionEndpointsAreInternalAndIdempotent(t *testing.T) {
+	connector := &scriptedConnector{release: make(chan struct{})}
+	registry := NewRegistryWithConnector(connector)
+	handler := NewHandler(registry)
+
+	missing := httptest.NewRequest(http.MethodPost, "/devices/MISSING/connect", nil)
+	missingResponse := httptest.NewRecorder()
+	handler.ServeHTTP(missingResponse, missing)
+	if missingResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing device status=%d", missingResponse.Code)
+	}
+
+	register := httptest.NewRequest(http.MethodPut, "/devices/"+testDeviceID, strings.NewReader(`{"uid":"`+testUID+`"}`))
+	registerResponse := httptest.NewRecorder()
+	handler.ServeHTTP(registerResponse, register)
+	if registerResponse.Code != http.StatusOK {
+		t.Fatalf("register status=%d", registerResponse.Code)
+	}
+
+	connect := httptest.NewRequest(http.MethodPost, "/devices/"+testDeviceID+"/connect", nil)
+	connectResponse := httptest.NewRecorder()
+	handler.ServeHTTP(connectResponse, connect)
+	if connectResponse.Code != http.StatusAccepted || bytes.Contains(connectResponse.Body.Bytes(), []byte(testUID)) {
+		t.Fatalf("connect status=%d body=%s", connectResponse.Code, connectResponse.Body.String())
+	}
+	secondConnect := httptest.NewRecorder()
+	handler.ServeHTTP(secondConnect, httptest.NewRequest(http.MethodPost, "/devices/"+testDeviceID+"/connect", nil))
+	if secondConnect.Code != http.StatusOK {
+		t.Fatalf("idempotent connect status=%d", secondConnect.Code)
+	}
+
+	disconnect := httptest.NewRecorder()
+	handler.ServeHTTP(disconnect, httptest.NewRequest(http.MethodPost, "/devices/"+testDeviceID+"/disconnect", nil))
+	if disconnect.Code != http.StatusNoContent {
+		t.Fatalf("disconnect status=%d", disconnect.Code)
+	}
+}
