@@ -59,6 +59,7 @@ class DeviceEnroller(DeviceSessionListener):
     def device_session_opened(self, identity: DeviceIdentity, peer_address: str) -> None:
         """Mark the device present, bridge it if enrolled, and resume its session."""
         self._presence.session_opened(identity.client_id, peer_address)
+        self._devices.record_camera_peer_address(identity.client_id, peer_address)
         if not self._is_bridgeable(identity.client_id):
             return
         self._devices.ensure_device(identity)
@@ -142,7 +143,7 @@ def main() -> None:
         config.camera_bridge, CameraBridgeClient(config.camera_bridge)
     )
     camera_registrar.reconcile(
-        (entry.device_id, entry.uid) for entry in shadow.get_camera_uids()
+        (entry.device_id, entry.uid, entry.feeder_ip) for entry in shadow.get_camera_uids()
     )
     queue = MessageQueue(config.queue_db_path, config.max_queue_size)
     telemetry = RelayTelemetry()

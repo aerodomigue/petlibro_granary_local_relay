@@ -123,6 +123,111 @@ func TestDiscoveryTimeoutIsBounded(t *testing.T) {
 	}
 }
 
+func TestDiscoverUnicastAcceptsOnlyKnownIPWithDynamicSourcePort(t *testing.T) {
+	knownIP := net.ParseIP("192.0.2.40")
+	nonce := [8]byte{9, 8, 7, 6, 5, 4, 3, 2}
+	transport := &fakeTransport{}
+	transport.onSend = func(_ []byte, address *net.UDPAddr) {
+		if address == nil || !address.IP.Equal(knownIP) || address.Port != LANPort {
+			t.Fatalf("unicast target=%v", address)
+		}
+		transport.addResponse(tutk.TransCodePartial(nil, testKnock2(protocolTestUID, nonce)), &net.UDPAddr{IP: net.ParseIP("192.0.2.41"), Port: 49152})
+		transport.addResponse(tutk.TransCodePartial(nil, testKnock2("PLAF2030000000000002", nonce)), &net.UDPAddr{IP: knownIP, Port: 49153})
+		transport.addResponse(tutk.TransCodePartial(nil, testKnock2(protocolTestUID, nonce)), &net.UDPAddr{IP: knownIP, Port: 49154})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, err := DiscoverUnicast(ctx, transport, knownIP, protocolTestUID, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IP.Equal(knownIP) || result.Port != 49154 || len(transport.sent) != 1 {
+		t.Fatalf("result=%v sends=%d", result, len(transport.sent))
+	}
+}
+
+func TestDirectDiscoveryUsesUnicastBeforeBroadcast(t *testing.T) {
+	knownIP := net.ParseIP("192.0.2.40")
+	transport := &fakeTransport{}
+	connector := &DirectConnector{
+		DiscoveryTargeter: func() ([]*net.UDPAddr, error) {
+			t.Fatal("broadcast targeter must not run after successful unicast")
+			return nil, nil
+		},
+	}
+	transport.onSend = func(packet []byte, address *net.UDPAddr) {
+		decoded := tutk.ReverseTransCodePartial(nil, packet)
+		if len(decoded) != lanSearchLength {
+			return
+		}
+		var nonce [8]byte
+		copy(nonce[:], decoded[lanSearchNonce:lanSearchNonce+len(nonce)])
+		transport.addResponse(tutk.TransCodePartial(nil, testKnock2(protocolTestUID, nonce)), &net.UDPAddr{IP: knownIP, Port: 40238})
+		if address == nil || !address.IP.Equal(knownIP) {
+			t.Fatalf("unicast address=%v", address)
+		}
+	}
+	result, mode, err := connector.discover(context.Background(), transport, protocolTestUID, [8]byte{}, knownIP, time.Second, nil)
+	if err != nil || result == nil || mode != "unicast" || len(transport.sent) != 1 {
+		t.Fatalf("result=%v mode=%s sends=%d err=%v", result, mode, len(transport.sent), err)
+	}
+}
+
+func TestDirectDiscoveryFallsBackOnlyWhenEnabled(t *testing.T) {
+	knownIP := net.ParseIP("192.0.2.40")
+	broadcastIP := net.ParseIP("192.0.2.255")
+	transport := &fakeTransport{}
+	connector := &DirectConnector{
+		BroadcastFallback: true,
+		DiscoveryTargeter: func() ([]*net.UDPAddr, error) {
+			return []*net.UDPAddr{{IP: broadcastIP, Port: LANPort}}, nil
+		},
+	}
+	transport.onSend = func(packet []byte, address *net.UDPAddr) {
+		decoded := tutk.ReverseTransCodePartial(nil, packet)
+		if len(decoded) != lanSearchLength || address == nil || !address.IP.Equal(broadcastIP) {
+			return
+		}
+		var nonce [8]byte
+		copy(nonce[:], decoded[lanSearchNonce:lanSearchNonce+len(nonce)])
+		transport.addResponse(tutk.TransCodePartial(nil, testKnock2(protocolTestUID, nonce)), &net.UDPAddr{IP: knownIP, Port: 40238})
+	}
+	result, mode, err := connector.discover(context.Background(), transport, protocolTestUID, [8]byte{}, knownIP, 5*time.Millisecond, nil)
+	if err != nil || result == nil || mode != "broadcast" || len(transport.sent) != 2 {
+		t.Fatalf("result=%v mode=%s sends=%d err=%v", result, mode, len(transport.sent), err)
+	}
+
+	disabled := &DirectConnector{BroadcastFallback: false}
+	_, _, err = disabled.discover(context.Background(), &fakeTransport{}, protocolTestUID, [8]byte{}, knownIP, 5*time.Millisecond, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("fallback-disabled error=%v", err)
+	}
+}
+
+func TestDirectDiscoveryUsesBroadcastWhenNoFeederIPIsKnown(t *testing.T) {
+	broadcastIP := net.ParseIP("192.0.2.255")
+	feederIP := net.ParseIP("192.0.2.40")
+	transport := &fakeTransport{}
+	connector := &DirectConnector{
+		DiscoveryTargeter: func() ([]*net.UDPAddr, error) {
+			return []*net.UDPAddr{{IP: broadcastIP, Port: LANPort}}, nil
+		},
+	}
+	transport.onSend = func(packet []byte, address *net.UDPAddr) {
+		if address == nil || !address.IP.Equal(broadcastIP) {
+			t.Fatalf("broadcast address=%v", address)
+		}
+		decoded := tutk.ReverseTransCodePartial(nil, packet)
+		var nonce [8]byte
+		copy(nonce[:], decoded[lanSearchNonce:lanSearchNonce+len(nonce)])
+		transport.addResponse(tutk.TransCodePartial(nil, testKnock2(protocolTestUID, nonce)), &net.UDPAddr{IP: feederIP, Port: 40238})
+	}
+	result, mode, err := connector.discover(context.Background(), transport, protocolTestUID, [8]byte{}, nil, time.Second, nil)
+	if err != nil || result == nil || mode != "broadcast" || !result.IP.Equal(feederIP) || len(transport.sent) != 1 {
+		t.Fatalf("result=%v mode=%s sends=%d err=%v", result, mode, len(transport.sent), err)
+	}
+}
+
 func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) {
 	transport := &fakeTransport{}
 	transport.onSend = func(packet []byte, address *net.UDPAddr) {
@@ -163,7 +268,7 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 		Clock:             func() time.Time { return time.UnixMilli(1_786_544_102_000) },
 	}
 	states := make([]SessionState, 0, 5)
-	session, err := connector.Connect(context.Background(), protocolTestUID, func(event Event) {
+	session, err := connector.Connect(context.Background(), protocolTestUID, nil, func(event Event) {
 		states = append(states, event.State)
 	})
 	if err != nil {
@@ -227,7 +332,7 @@ func TestDirectConnectorTimesOutDuringBootstrapWithoutMedia(t *testing.T) {
 	connector := testDirectConnector(transport, time.Second)
 	connector.BootstrapTimeout = 10 * time.Millisecond
 	states := make([]SessionState, 0, 6)
-	_, err := connector.Connect(context.Background(), protocolTestUID, func(event Event) {
+	_, err := connector.Connect(context.Background(), protocolTestUID, nil, func(event Event) {
 		states = append(states, event.State)
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {
@@ -309,7 +414,7 @@ func TestDirectConnectorRejectsUnexpectedLoginResponseAndTimesOut(t *testing.T) 
 		transport.addResponse(tutk.TransCodePartial(nil, testLoginSuccess([8]byte{9, 9, 9, 9, 9, 9, 9, 9})), address)
 	})
 	connector := testDirectConnector(transport, 10*time.Millisecond)
-	_, err := connector.Connect(context.Background(), protocolTestUID, nil)
+	_, err := connector.Connect(context.Background(), protocolTestUID, nil, nil)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error=%v", err)
 	}
@@ -328,7 +433,7 @@ func TestDirectConnectorHonorsCancellationDuringLogin(t *testing.T) {
 		}
 	})
 	connector := testDirectConnector(transport, time.Second)
-	_, err := connector.Connect(connectionContext, protocolTestUID, nil)
+	_, err := connector.Connect(connectionContext, protocolTestUID, nil, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error=%v", err)
 	}

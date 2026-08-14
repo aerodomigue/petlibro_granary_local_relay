@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/aerodomigue/petlibro-camera-bridge/internal/bridge"
@@ -23,11 +24,24 @@ func main() {
 
 	server := &http.Server{
 		Addr:              listenAddress,
-		Handler:           bridge.NewHandler(bridge.NewRegistry()),
+		Handler:           bridge.NewHandler(bridge.NewRegistryWithBroadcastFallback(broadcastFallback())),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 	log.Printf("camera bridge listening on %s", listenAddress)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+func broadcastFallback() bool {
+	value := os.Getenv("PETLIBRO_CAMERA_DISCOVERY_BROADCAST_FALLBACK")
+	if value == "" {
+		return true
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		log.Printf("invalid PETLIBRO_CAMERA_DISCOVERY_BROADCAST_FALLBACK=%q; using true", value)
+		return true
+	}
+	return parsed
 }

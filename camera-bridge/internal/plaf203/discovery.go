@@ -17,9 +17,24 @@ type DatagramTransport interface {
 	Close() error
 }
 
-// Discover sends a UID-specific LAN_SEARCH3 probe and accepts only a KNOCK2
-// that proves both the requested UID and the generated nonce.
+// Discover sends a UID-specific LAN_SEARCH3 broadcast probe and accepts only a
+// KNOCK2 that proves both the requested UID and the generated nonce.
 func Discover(ctx context.Context, transport DatagramTransport, uid string, nonce [8]byte, targets []*net.UDPAddr) (*net.UDPAddr, error) {
+	return discover(ctx, transport, uid, nonce, targets, nil)
+}
+
+// DiscoverUnicast sends LAN_SEARCH3 directly to one known feeder IPv4 address.
+// A matching KNOCK2 must come back from that same IP, but may use a dynamic UDP
+// source port as observed on the PLAF203.
+func DiscoverUnicast(ctx context.Context, transport DatagramTransport, ip net.IP, uid string, nonce [8]byte) (*net.UDPAddr, error) {
+	ipv4 := ip.To4()
+	if ipv4 == nil || ipv4.IsUnspecified() {
+		return nil, fmt.Errorf("PLAF203 discovery requires a valid feeder IPv4 address")
+	}
+	return discover(ctx, transport, uid, nonce, []*net.UDPAddr{{IP: ipv4, Port: LANPort}}, ipv4)
+}
+
+func discover(ctx context.Context, transport DatagramTransport, uid string, nonce [8]byte, targets []*net.UDPAddr, expectedSourceIP net.IP) (*net.UDPAddr, error) {
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("PLAF203 discovery has no targets")
 	}
@@ -43,6 +58,9 @@ func Discover(ctx context.Context, transport DatagramTransport, uid string, nonc
 			return nil, fmt.Errorf("PLAF203 discovery receive: %w", receiveErr)
 		}
 		if address == nil || address.IP == nil {
+			continue
+		}
+		if expectedSourceIP != nil && !address.IP.Equal(expectedSourceIP) {
 			continue
 		}
 		decoded := tutk.ReverseTransCodePartial(nil, packet)

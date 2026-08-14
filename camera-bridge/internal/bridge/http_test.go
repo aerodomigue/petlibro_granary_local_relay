@@ -14,7 +14,7 @@ const testUID = "PLAF2030000000000001"
 
 func TestDeviceRegistrationIsIdempotentAndDoesNotExposeUID(t *testing.T) {
 	handler := NewHandler(NewRegistry())
-	body := []byte(`{"uid":"` + testUID + `"}`)
+	body := []byte(`{"uid":"` + testUID + `","ip":"192.0.2.10"}`)
 
 	for attempt := 0; attempt < 2; attempt++ {
 		request := httptest.NewRequest(http.MethodPut, "/devices/"+testDeviceID, bytes.NewReader(body))
@@ -40,7 +40,7 @@ func TestDeviceRegistrationIsIdempotentAndDoesNotExposeUID(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &listing); err != nil {
 		t.Fatal(err)
 	}
-	if len(listing.Devices) != 1 || !listing.Devices[0].UIDLearned || listing.Devices[0].StreamAvailable {
+	if len(listing.Devices) != 1 || !listing.Devices[0].UIDLearned || listing.Devices[0].StreamAvailable || listing.Devices[0].IP != "192.0.2.10" {
 		t.Fatalf("unexpected listing: %+v", listing.Devices)
 	}
 	if !bytes.Contains(response.Body.Bytes(), []byte(`"frames_received":0`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"bytes_received":0`)) {
@@ -58,6 +58,7 @@ func TestRegistrationRejectsInvalidInput(t *testing.T) {
 		{"short uid", "/devices/DEVICE_A", `{"uid":"short"}`},
 		{"unknown field", "/devices/DEVICE_A", `{"uid":"PLAF2030000000000001","other":true}`},
 		{"unsafe device id", "/devices/device!", `{"uid":"PLAF2030000000000001"}`},
+		{"invalid ip", "/devices/DEVICE_A", `{"uid":"PLAF2030000000000001","ip":"not-an-ip"}`},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -68,6 +69,16 @@ func TestRegistrationRejectsInvalidInput(t *testing.T) {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 			}
 		})
+	}
+}
+
+func TestRegistrationRejectsInvalidIPWithBadRequest(t *testing.T) {
+	handler := NewHandler(NewRegistry())
+	request := httptest.NewRequest(http.MethodPut, "/devices/DEVICE_A", strings.NewReader(`{"uid":"`+testUID+`","ip":"not-an-ip"}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

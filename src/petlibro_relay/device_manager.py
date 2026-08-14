@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
+from ipaddress import IPv4Address, ip_address
 
 from .camera import CameraBridgeRegistrar
 from .config import RelayConfig
@@ -225,8 +226,30 @@ class DeviceManager:
             self._config.local_responder,
             self._shadow,
             self._config.handled_msg_id_ttl_seconds,
-            self._camera_registrar.register if self._camera_registrar is not None else None,
+            self._register_camera_uid if self._camera_registrar is not None else None,
         )
+
+    def record_camera_peer_address(self, device_id: str, peer_address: str | None) -> None:
+        """Persist a known feeder IPv4 address and refresh bridge registration.
+
+        An active camera session is deliberately left alone. A later explicit
+        bridge connection uses the newly observed address.
+        """
+        camera_uid = self._shadow.get_camera_uid(device_id)
+        feeder_ip = _parse_ipv4(peer_address)
+        if camera_uid is None or feeder_ip is None:
+            return
+        self._shadow.record_camera_uid(device_id, camera_uid.uid, feeder_ip)
+        if self._camera_registrar is not None:
+            self._camera_registrar.register(device_id, camera_uid.uid, feeder_ip)
+
+    def _register_camera_uid(self, device_id: str, uid: str) -> None:
+        """Register a learned UID with the most recent local feeder address."""
+        record = self._presence.record(device_id)
+        feeder_ip = _parse_ipv4(record.peer_address if record is not None else None)
+        self._shadow.record_camera_uid(device_id, uid, feeder_ip)
+        if self._camera_registrar is not None:
+            self._camera_registrar.register(device_id, uid, feeder_ip)
 
     def remove_device(self, device_id: str) -> None:
         """Stop bridging one device, leaving every other untouched."""
@@ -279,3 +302,14 @@ class DeviceManager:
     def device_ids(self) -> list[str]:
         """Return the ids of every bridged device."""
         return [context.device_id for context in self.list_devices()]
+
+
+def _parse_ipv4(value: str | None) -> str | None:
+    """Return a canonical IPv4 address sourced from the local TCP peer."""
+    if value is None:
+        return None
+    try:
+        parsed = ip_address(value)
+    except ValueError:
+        return None
+    return str(parsed) if isinstance(parsed, IPv4Address) else None

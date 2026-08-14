@@ -65,6 +65,7 @@ func healthHandler(writer http.ResponseWriter, request *http.Request) {
 
 type upsertRequest struct {
 	UID string `json:"uid"`
+	IP  string `json:"ip"`
 }
 
 func upsertDevice(writer http.ResponseWriter, request *http.Request, registry *Registry) {
@@ -79,7 +80,11 @@ func upsertDevice(writer http.ResponseWriter, request *http.Request, registry *R
 		writeError(writer, http.StatusBadRequest, "invalid JSON payload")
 		return
 	}
-	device, err := registry.Upsert(request.PathValue("device_id"), input.UID)
+	device, err := registry.Upsert(request.PathValue("device_id"), input.UID, input.IP)
+	if errors.Is(err, ErrInvalidIP) {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
 	if errors.Is(err, ErrInvalidDeviceID) || errors.Is(err, ErrInvalidUID) {
 		writeError(writer, http.StatusUnprocessableEntity, err.Error())
 		return

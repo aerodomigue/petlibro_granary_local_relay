@@ -30,11 +30,16 @@ the last frame time. The UID and media payload are never returned.
 The implementation is deliberately limited to the PLAF203 V3.0.30 exchange
 confirmed in the local capture:
 
-1. UDP `LAN_SEARCH3` is broadcast to port `32761`, carrying the requested
-   20-character UID and a fresh 8-byte nonce.
-2. The feeder answers from its dynamic UDP source port with `KNOCK2`. The
-   bridge accepts the candidate only when **both** the UID and nonce match the
-   request, then sends `KNOCK_RR2` back to that exact address.
+1. The relay observes the feeder IPv4 address from its local TCP CONNECT
+   session, persists it alongside the learned UID, and registers both values
+   with the internal bridge. A known address makes the bridge send UDP
+   `LAN_SEARCH3` by unicast to `<feeder-ip>:32761`, carrying the requested
+   20-character UID and a fresh 8-byte nonce. This avoids relying on Docker
+   bridge-network broadcast delivery.
+2. The feeder answers from a dynamic UDP source port with `KNOCK2`. The bridge
+   accepts the candidate only when the source IP, UID, and nonce match the
+   request, then sends `KNOCK_RR2` back to that exact address. The response
+   port is intentionally not required to be `32761`.
 3. The bridge enters `logging_in`, sends the two captured Session16
    `client-start` datagrams (`0x0407`, 598 bytes each), and applies the same
    official TUTK partial wire transform as the preamble. The pair differs only
@@ -135,7 +140,14 @@ PETLIBRO_CAMERA_BRIDGE_ENABLED=true
 PETLIBRO_CAMERA_BRIDGE_HOST=camera-bridge
 PETLIBRO_CAMERA_BRIDGE_PORT=8081
 PETLIBRO_CAMERA_BRIDGE_TIMEOUT_SECONDS=1
+PETLIBRO_CAMERA_DISCOVERY_BROADCAST_FALLBACK=true
 ```
+
+`PETLIBRO_CAMERA_DISCOVERY_BROADCAST_FALLBACK` defaults to `true`. Broadcast
+is used only when no feeder IPv4 is known, or after a unicast discovery timeout
+when this fallback remains enabled. A successful unicast sends no broadcast.
+An IP update is an idempotent bridge registration and does not interrupt an
+active camera session; a later explicit connection uses the updated address.
 
 The API returns only safe state: `available`, `configured`, `online`,
 `stream`, `webrtc`, `go2rtc_reachable`, `bridge_reachable`,

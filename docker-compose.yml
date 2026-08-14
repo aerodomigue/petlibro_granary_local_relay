@@ -32,6 +32,8 @@ services:
       context: ./camera-bridge
     container_name: petlibro-relay-camera-bridge
     restart: unless-stopped
+    environment:
+      PETLIBRO_CAMERA_DISCOVERY_BROADCAST_FALLBACK: ${PETLIBRO_CAMERA_DISCOVERY_BROADCAST_FALLBACK:-true}
 
   # Internal-only media sidecar. No unverified PLAF203 source is configured.
   go2rtc:

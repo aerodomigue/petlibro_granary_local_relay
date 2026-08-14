@@ -63,7 +63,7 @@ class CameraStatusProvider(Protocol):
 class CameraBridgeRegistrationClient(Protocol):
     """Register a feeder UID with the internal camera bridge."""
 
-    def register(self, device_id: str, uid: str) -> bool:
+    def register(self, device_id: str, uid: str, feeder_ip: str | None) -> bool:
         """Register one UID and return whether the bridge accepted it."""
 
 
@@ -73,7 +73,7 @@ class CameraBridgeClient:
     def __init__(self, settings: CameraBridgeSettings) -> None:
         self._settings = settings
 
-    def register(self, device_id: str, uid: str) -> bool:
+    def register(self, device_id: str, uid: str, feeder_ip: str | None) -> bool:
         """PUT one learned UID without exposing it in diagnostics.
 
         This operation is only called from the registrar worker, never from an
@@ -81,7 +81,10 @@ class CameraBridgeClient:
         """
         if not self._settings.enabled:
             return False
-        payload = json.dumps({"uid": uid}).encode()
+        payload_fields: dict[str, str] = {"uid": uid}
+        if feeder_ip is not None:
+            payload_fields["ip"] = feeder_ip
+        payload = json.dumps(payload_fields).encode()
         request = Request(
             f"{self._base_url()}{CAMERA_BRIDGE_DEVICES_PATH}/{device_id}",
             data=payload,
@@ -121,9 +124,9 @@ class CameraBridgeRegistrar:
     def __init__(self, settings: CameraBridgeSettings, client: CameraBridgeRegistrationClient) -> None:
         self._settings = settings
         self._client = client
-        self._registered: set[tuple[str, str]] = set()
+        self._registered: set[tuple[str, str, str | None]] = set()
         self._lock = threading.Lock()
-        self._pending: queue.Queue[tuple[str, str] | None] = queue.Queue(REGISTRATION_QUEUE_MAXSIZE)
+        self._pending: queue.Queue[tuple[str, str, str | None] | None] = queue.Queue(REGISTRATION_QUEUE_MAXSIZE)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         if settings.enabled:
@@ -132,11 +135,11 @@ class CameraBridgeRegistrar:
             )
             self._thread.start()
 
-    def register(self, device_id: str, uid: str) -> None:
+    def register(self, device_id: str, uid: str, feeder_ip: str | None = None) -> None:
         """Schedule idempotent registration after the UID is safely persisted."""
         if self._stop_event.is_set() or not self._settings.enabled or not is_camera_uid(uid):
             return
-        registration = (device_id, uid)
+        registration = (device_id, uid, feeder_ip)
         with self._lock:
             if registration in self._registered:
                 return
@@ -148,10 +151,10 @@ class CameraBridgeRegistrar:
                 self._registered.discard(registration)
             _LOGGER.warning("CAMERA BRIDGE REGISTER queue full device_id=%s", device_id)
 
-    def reconcile(self, mappings: Iterable[tuple[str, str]]) -> None:
+    def reconcile(self, mappings: Iterable[tuple[str, str, str | None]]) -> None:
         """Re-register persisted UID mappings after a relay restart."""
-        for device_id, uid in mappings:
-            self.register(device_id, uid)
+        for device_id, uid, feeder_ip in mappings:
+            self.register(device_id, uid, feeder_ip)
 
     def close(self) -> None:
         """Stop the optional registration worker without touching cameras."""
@@ -168,8 +171,8 @@ class CameraBridgeRegistrar:
                 continue
             if registration is None:
                 continue
-            device_id, uid = registration
-            if self._client.register(device_id, uid):
+            device_id, uid, feeder_ip = registration
+            if self._client.register(device_id, uid, feeder_ip):
                 _LOGGER.info("CAMERA BRIDGE REGISTER device_id=%s result=accepted", device_id)
                 continue
             with self._lock:

@@ -44,7 +44,7 @@ type Observer func(Event)
 
 // Connector is used by the bridge and replaced by fakes in unit tests.
 type Connector interface {
-	Connect(context.Context, string, Observer) (*Session, error)
+	Connect(context.Context, string, net.IP, Observer) (*Session, error)
 }
 
 // TransportFactory creates a transport per explicit connection attempt.
@@ -60,6 +60,7 @@ type DirectConnector struct {
 	DiscoveryTimeout  time.Duration
 	LoginTimeout      time.Duration
 	BootstrapTimeout  time.Duration
+	BroadcastFallback bool
 	DiscoveryTargeter func() ([]*net.UDPAddr, error)
 	Clock             func() time.Time
 }
@@ -71,6 +72,7 @@ func NewDirectConnector() *DirectConnector {
 		DiscoveryTimeout:  defaultDiscoveryTimeout,
 		LoginTimeout:      defaultLoginTimeout,
 		BootstrapTimeout:  defaultBootstrapTimeout,
+		BroadcastFallback: true,
 		DiscoveryTargeter: DiscoveryTargets,
 		Clock:             time.Now,
 	}
@@ -79,7 +81,7 @@ func NewDirectConnector() *DirectConnector {
 // Connect performs discovery, knock, and the verified V3.0.30 Session16
 // client-start pair. It returns an open session only after the feeder's 0x0408
 // ACK. The caller owns closing that session.
-func (connector *DirectConnector) Connect(ctx context.Context, uid string, observe Observer) (*Session, error) {
+func (connector *DirectConnector) Connect(ctx context.Context, uid string, feederIP net.IP, observe Observer) (*Session, error) {
 	if err := ValidateUID(uid); err != nil {
 		return nil, err
 	}
@@ -101,27 +103,16 @@ func (connector *DirectConnector) Connect(ctx context.Context, uid string, obser
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, fmt.Errorf("generate PLAF203 discovery nonce: %w", err)
 	}
-	targeter := connector.DiscoveryTargeter
-	if targeter == nil {
-		targeter = DiscoveryTargets
-	}
-	targets, err := targeter()
-	if err != nil {
-		return nil, err
-	}
 	timeout := connector.DiscoveryTimeout
 	if timeout <= 0 {
 		timeout = defaultDiscoveryTimeout
 	}
-	discoveryContext, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	emit(observe, Event{State: StateDiscovering})
-	address, err := Discover(discoveryContext, transport, uid, nonce, targets)
+	address, discoveryMode, err := connector.discover(ctx, transport, uid, nonce, feederIP, timeout, observe)
 	if err != nil {
 		return nil, err
 	}
 
-	emit(observe, Event{State: StateKnocking, Address: address})
+	emit(observe, Event{State: StateKnocking, Address: address, Step: discoveryMode})
 	knockReply, err := EncodeKnockReply(uid, nonce)
 	if err != nil {
 		return nil, err
@@ -197,6 +188,37 @@ func (connector *DirectConnector) Connect(ctx context.Context, uid string, obser
 		emit(observe, Event{State: StateStreaming, Address: address, Step: "bootstrap", Frame: frame})
 		return session, nil
 	}
+}
+
+func (connector *DirectConnector) discover(ctx context.Context, transport DatagramTransport, uid string, nonce [8]byte, feederIP net.IP, timeout time.Duration, observe Observer) (*net.UDPAddr, string, error) {
+	if ipv4 := feederIP.To4(); ipv4 != nil && !ipv4.IsUnspecified() {
+		target := (&net.UDPAddr{IP: ipv4, Port: LANPort}).String()
+		emit(observe, Event{State: StateDiscovering, Step: "unicast target=" + target})
+		unicastContext, cancel := context.WithTimeout(ctx, timeout)
+		address, err := DiscoverUnicast(unicastContext, transport, ipv4, uid, nonce)
+		cancel()
+		if err == nil {
+			return address, "unicast", nil
+		}
+		emit(observe, Event{State: StateDiscovering, Step: "unicast_timeout"})
+		if !connector.BroadcastFallback {
+			return nil, "unicast", err
+		}
+		emit(observe, Event{State: StateDiscovering, Step: "broadcast_fallback"})
+	}
+	targeter := connector.DiscoveryTargeter
+	if targeter == nil {
+		targeter = DiscoveryTargets
+	}
+	targets, err := targeter()
+	if err != nil {
+		return nil, "broadcast", err
+	}
+	emit(observe, Event{State: StateDiscovering, Step: "broadcast"})
+	broadcastContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	address, err := Discover(broadcastContext, transport, uid, nonce, targets)
+	return address, "broadcast", err
 }
 
 func (session *Session) startMediaReceiver() {

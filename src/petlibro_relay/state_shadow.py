@@ -99,6 +99,7 @@ _CREATE_CAMERA_UIDS_SQL = """
 CREATE TABLE IF NOT EXISTS camera_uids (
     device_id TEXT PRIMARY KEY,
     uid TEXT NOT NULL,
+    feeder_ip TEXT,
     updated_at REAL NOT NULL
 )
 """
@@ -128,6 +129,7 @@ class CameraUID:
 
     device_id: str
     uid: str
+    feeder_ip: str | None
     updated_at: float
 
 
@@ -155,6 +157,7 @@ class StateShadow:
                 _CREATE_CAMERA_UIDS_SQL,
             ):
                 self._connection.execute(statement)
+            self._ensure_camera_uid_ip_column()
 
     # -- writes ------------------------------------------------------------------
 
@@ -168,7 +171,7 @@ class StateShadow:
             (device_id, topic, payload, command, time.time()),
         )
 
-    def record_camera_uid(self, device_id: str, uid: str) -> bool:
+    def record_camera_uid(self, device_id: str, uid: str, feeder_ip: str | None = None) -> bool:
         """Persist a validated camera UID and return whether it changed.
 
         The UID remains out of dashboard snapshots and logs. It is stored only
@@ -179,19 +182,20 @@ class StateShadow:
         with self._lock:
             try:
                 previous = self._connection.execute(
-                    "SELECT uid FROM camera_uids WHERE device_id = ?", (device_id,)
+                    "SELECT uid, feeder_ip FROM camera_uids WHERE device_id = ?", (device_id,)
                 ).fetchone()
                 with self._connection:
                     self._connection.execute(
-                        "INSERT INTO camera_uids (device_id, uid, updated_at) VALUES (?, ?, ?) "
+                        "INSERT INTO camera_uids (device_id, uid, feeder_ip, updated_at) VALUES (?, ?, ?, ?) "
                         "ON CONFLICT(device_id) DO UPDATE SET uid = excluded.uid, "
+                        "feeder_ip = COALESCE(excluded.feeder_ip, camera_uids.feeder_ip), "
                         "updated_at = excluded.updated_at",
-                        (device_id, uid, now),
+                        (device_id, uid, feeder_ip, now),
                     )
             except sqlite3.Error:
                 _LOGGER.exception("Failed to record camera UID for %s", device_id)
                 raise
-        return previous is None or previous[0] != uid
+        return previous is None or previous[0] != uid or (feeder_ip is not None and previous[1] != feeder_ip)
 
     def update_reported(self, device_id: str, values: dict[str, Any]) -> None:
         """Record physical facts the device reported about itself."""
@@ -387,22 +391,27 @@ class StateShadow:
         """Return one stored camera UID for internal bridge registration only."""
         with self._lock:
             row = self._connection.execute(
-                "SELECT uid, updated_at FROM camera_uids WHERE device_id = ?", (device_id,)
+                "SELECT uid, feeder_ip, updated_at FROM camera_uids WHERE device_id = ?", (device_id,)
             ).fetchone()
         if row is None:
             return None
-        return CameraUID(device_id=device_id, uid=str(row[0]), updated_at=float(row[1]))
+        return CameraUID(device_id=device_id, uid=str(row[0]), feeder_ip=_optional_string(row[1]), updated_at=float(row[2]))
 
     def get_camera_uids(self) -> list[CameraUID]:
         """Return stored UIDs for relay-to-bridge startup reconciliation only."""
         with self._lock:
             rows = self._connection.execute(
-                "SELECT device_id, uid, updated_at FROM camera_uids ORDER BY device_id"
+                "SELECT device_id, uid, feeder_ip, updated_at FROM camera_uids ORDER BY device_id"
             ).fetchall()
         return [
-            CameraUID(device_id=str(device_id), uid=str(uid), updated_at=float(updated_at))
-            for device_id, uid, updated_at in rows
+            CameraUID(device_id=str(device_id), uid=str(uid), feeder_ip=_optional_string(feeder_ip), updated_at=float(updated_at))
+            for device_id, uid, feeder_ip, updated_at in rows
         ]
+
+    def _ensure_camera_uid_ip_column(self) -> None:
+        columns = {str(row[1]) for row in self._connection.execute("PRAGMA table_info(camera_uids)")}
+        if "feeder_ip" not in columns:
+            self._connection.execute("ALTER TABLE camera_uids ADD COLUMN feeder_ip TEXT")
 
     def _read_kv(self, table: str, device_id: str) -> dict[str, Any]:
         with self._lock:
@@ -536,3 +545,8 @@ def _decode_raw_payload(payload: bytes, command: str | None = None) -> Any:
     if command == "DEVICE_START_EVENT" and isinstance(decoded, dict) and "uuid" in decoded:
         return {**decoded, "uuid": "<redacted>"}
     return decoded
+
+
+def _optional_string(value: object) -> str | None:
+    """Return a database text value without converting NULL into a string."""
+    return str(value) if isinstance(value, str) else None

@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ import (
 func TestRegistryConnectionLifecycleIsSingleAttemptAndRetryable(t *testing.T) {
 	connector := &scriptedConnector{release: make(chan struct{})}
 	registry := NewRegistryWithConnector(connector)
-	if _, err := registry.Upsert(testDeviceID, testUID); err != nil {
+	if _, err := registry.Upsert(testDeviceID, testUID, "192.0.2.10"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -42,10 +43,10 @@ func TestRegistryConnectionLifecycleIsSingleAttemptAndRetryable(t *testing.T) {
 func TestRegistryDevicesConnectIndependently(t *testing.T) {
 	connector := &scriptedConnector{release: make(chan struct{})}
 	registry := NewRegistryWithConnector(connector)
-	if _, err := registry.Upsert("DEVICE_A", testUID); err != nil {
+	if _, err := registry.Upsert("DEVICE_A", testUID, "192.0.2.10"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.Upsert("DEVICE_B", "PLAF2030000000000002"); err != nil {
+	if _, err := registry.Upsert("DEVICE_B", "PLAF2030000000000002", "192.0.2.11"); err != nil {
 		t.Fatal(err)
 	}
 	if _, started, err := registry.Connect("DEVICE_A"); err != nil || !started {
@@ -55,8 +56,36 @@ func TestRegistryDevicesConnectIndependently(t *testing.T) {
 		t.Fatalf("B started=%t err=%v", started, err)
 	}
 	awaitCalls(t, connector, 2)
+	addresses := connector.IPs()
+	if len(addresses) != 2 || addresses[0] == addresses[1] {
+		t.Fatalf("connector received unexpected device addresses: %v", addresses)
+	}
 	registry.Disconnect("DEVICE_A")
 	registry.Disconnect("DEVICE_B")
+}
+
+func TestRegistryUpdatesKnownIPWithoutInterruptingAnIdleDevice(t *testing.T) {
+	connector := &scriptedConnector{release: make(chan struct{})}
+	registry := NewRegistryWithConnector(connector)
+	if _, err := registry.Upsert(testDeviceID, testUID, "192.0.2.10"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Upsert(testDeviceID, testUID, "192.0.2.11"); err != nil {
+		t.Fatal(err)
+	}
+	devices := registry.List()
+	if len(devices) != 1 || devices[0].IP != "192.0.2.11" || devices[0].ConnectionState != plaf203.StateIdle {
+		t.Fatalf("device update=%+v", devices)
+	}
+	if _, started, err := registry.Connect(testDeviceID); err != nil || !started {
+		t.Fatalf("connect started=%t err=%v", started, err)
+	}
+	awaitState(t, registry, plaf203.StateDiscovering)
+	addresses := connector.IPs()
+	if len(addresses) != 1 || addresses[0] != "192.0.2.11" {
+		t.Fatalf("connector received addresses=%v", addresses)
+	}
+	registry.Disconnect(testDeviceID)
 }
 
 func awaitCalls(t *testing.T, connector *scriptedConnector, want int) {
@@ -88,12 +117,14 @@ func awaitState(t *testing.T, registry *Registry, want plaf203.SessionState) {
 type scriptedConnector struct {
 	mu      sync.Mutex
 	calls   int
+	ips     []string
 	release chan struct{}
 }
 
-func (connector *scriptedConnector) Connect(ctx context.Context, uid string, observer plaf203.Observer) (*plaf203.Session, error) {
+func (connector *scriptedConnector) Connect(ctx context.Context, uid string, ip net.IP, observer plaf203.Observer) (*plaf203.Session, error) {
 	connector.mu.Lock()
 	connector.calls++
+	connector.ips = append(connector.ips, ip.String())
 	release := connector.release
 	connector.mu.Unlock()
 	observer(plaf203.Event{State: plaf203.StateDiscovering})
@@ -105,6 +136,12 @@ func (connector *scriptedConnector) Connect(ctx context.Context, uid string, obs
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func (connector *scriptedConnector) IPs() []string {
+	connector.mu.Lock()
+	defer connector.mu.Unlock()
+	return append([]string(nil), connector.ips...)
 }
 
 func (connector *scriptedConnector) CallCount() int {
@@ -128,7 +165,7 @@ func TestRegistryRejectsUnknownDeviceConnection(t *testing.T) {
 
 func TestRegistryCanRepresentAConfirmedFutureLoginWithoutFalseProductionSuccess(t *testing.T) {
 	registry := NewRegistryWithConnector(connectedConnector{})
-	if _, err := registry.Upsert(testDeviceID, testUID); err != nil {
+	if _, err := registry.Upsert(testDeviceID, testUID, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, started, err := registry.Connect(testDeviceID); err != nil || !started {
@@ -139,7 +176,7 @@ func TestRegistryCanRepresentAConfirmedFutureLoginWithoutFalseProductionSuccess(
 
 type connectedConnector struct{}
 
-func (connectedConnector) Connect(_ context.Context, _ string, observer plaf203.Observer) (*plaf203.Session, error) {
+func (connectedConnector) Connect(_ context.Context, _ string, _ net.IP, observer plaf203.Observer) (*plaf203.Session, error) {
 	observer(plaf203.Event{State: plaf203.StateDiscovering})
 	observer(plaf203.Event{State: plaf203.StateKnocking})
 	observer(plaf203.Event{State: plaf203.StateLoggingIn})

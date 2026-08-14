@@ -25,6 +25,8 @@ var (
 	ErrInvalidDeviceID = errors.New("device_id must contain only letters, digits, '_' or '-'")
 	// ErrInvalidUID rejects anything other than the exact PLAF203 UID shape observed in MQTT.
 	ErrInvalidUID = errors.New("uid must be exactly 20 printable ASCII characters")
+	// ErrInvalidIP rejects a non-IPv4 feeder address supplied by the relay.
+	ErrInvalidIP = errors.New("ip must be a valid IPv4 address")
 	// ErrDeviceNotFound rejects an explicit connection request for an unregistered device.
 	ErrDeviceNotFound = errors.New("device is not registered")
 )
@@ -34,6 +36,7 @@ var (
 type Device struct {
 	DeviceID         string               `json:"device_id"`
 	UIDLearned       bool                 `json:"uid_learned"`
+	IP               string               `json:"ip,omitempty"`
 	Stream           string               `json:"stream"`
 	StreamAvailable  bool                 `json:"stream_available"`
 	Reason           string               `json:"reason"`
@@ -51,6 +54,7 @@ type Device struct {
 type deviceRecord struct {
 	device        Device
 	uid           string
+	ip            net.IP
 	cancel        context.CancelFunc
 	session       *plaf203.Session
 	attemptID     uint64
@@ -68,7 +72,15 @@ type Registry struct {
 // NewRegistry creates an empty in-memory registry. Durable UID storage is owned
 // by the relay State Shadow; it re-registers devices after restart.
 func NewRegistry() *Registry {
-	return NewRegistryWithConnector(plaf203.NewDirectConnector())
+	return NewRegistryWithBroadcastFallback(true)
+}
+
+// NewRegistryWithBroadcastFallback configures the optional fallback used only
+// after a known-IP unicast discovery attempt fails.
+func NewRegistryWithBroadcastFallback(broadcastFallback bool) *Registry {
+	connector := plaf203.NewDirectConnector()
+	connector.BroadcastFallback = broadcastFallback
+	return NewRegistryWithConnector(connector)
 }
 
 // NewRegistryWithConnector allows protocol behavior to be isolated by fakes in tests.
@@ -79,13 +91,18 @@ func NewRegistryWithConnector(connector plaf203.Connector) *Registry {
 	}
 }
 
-// Upsert validates and records one UID. Repeating the same mapping is idempotent.
-func (r *Registry) Upsert(deviceID string, uid string) (Device, error) {
+// Upsert validates and records one UID plus its optional feeder IPv4 address.
+// Updating a known address never interrupts an active camera session.
+func (r *Registry) Upsert(deviceID string, uid string, ip string) (Device, error) {
 	if !validDeviceID(deviceID) {
 		return Device{}, ErrInvalidDeviceID
 	}
 	if !validUID(uid) {
 		return Device{}, ErrInvalidUID
+	}
+	parsedIP, err := parseIPv4(ip)
+	if err != nil {
+		return Device{}, err
 	}
 
 	// Keep the official wire-transform dependency compile-checked. The
@@ -108,6 +125,10 @@ func (r *Registry) Upsert(deviceID string, uid string) (Device, error) {
 		}
 	}
 	record.uid = uid
+	if parsedIP != nil {
+		record.ip = parsedIP
+		record.device.IP = parsedIP.String()
+	}
 	record.device.UIDLearned = true
 	record.device.UpdatedAt = now
 	r.devices[deviceID] = record
@@ -156,10 +177,11 @@ func (r *Registry) Connect(deviceID string) (Device, bool, error) {
 	r.devices[deviceID] = record
 	device := record.device
 	uid := record.uid
+	ip := append(net.IP(nil), record.ip...)
 	connector := r.connector
 	r.mu.Unlock()
 
-	go r.runConnect(attemptContext, connector, deviceID, uid, attemptID)
+	go r.runConnect(attemptContext, connector, deviceID, uid, ip, attemptID)
 	return device, true, nil
 }
 
@@ -215,8 +237,8 @@ func (r *Registry) List() []Device {
 	return devices
 }
 
-func (r *Registry) runConnect(ctx context.Context, connector plaf203.Connector, deviceID string, uid string, attemptID uint64) {
-	session, err := connector.Connect(ctx, uid, func(event plaf203.Event) {
+func (r *Registry) runConnect(ctx context.Context, connector plaf203.Connector, deviceID string, uid string, ip net.IP, attemptID uint64) {
+	session, err := connector.Connect(ctx, uid, ip, func(event plaf203.Event) {
 		r.transition(deviceID, attemptID, event)
 	})
 	if err == nil {
@@ -260,9 +282,22 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 
 	switch event.State {
 	case plaf203.StateDiscovering:
-		log.Printf("CAMERA DISCOVERY START device=%s", deviceID)
+		switch event.Step {
+		case "unicast_timeout":
+			log.Printf("CAMERA DISCOVERY UNICAST TIMEOUT device=%s", deviceID)
+		case "broadcast_fallback":
+			log.Printf("CAMERA DISCOVERY FALLBACK device=%s mode=broadcast", deviceID)
+		case "broadcast":
+			log.Printf("CAMERA DISCOVERY START device=%s mode=broadcast", deviceID)
+		default:
+			log.Printf("CAMERA DISCOVERY START device=%s mode=%s", deviceID, event.Step)
+		}
 	case plaf203.StateKnocking:
-		log.Printf("CAMERA DISCOVERY FOUND device=%s addr=%s", deviceID, safeAddress(event.Address))
+		mode := event.Step
+		if mode != "unicast" && mode != "broadcast" {
+			mode = "broadcast"
+		}
+		log.Printf("CAMERA DISCOVERY FOUND device=%s mode=%s peer=%s", deviceID, mode, safeAddress(event.Address))
 		log.Printf("CAMERA KNOCK START device=%s", deviceID)
 	case plaf203.StateLoggingIn:
 		if event.Step == "" {
@@ -342,4 +377,15 @@ func validUID(uid string) bool {
 	return strings.IndexFunc(uid, func(character rune) bool {
 		return character < 0x21 || character > 0x7e
 	}) == -1
+}
+
+func parseIPv4(value string) (net.IP, error) {
+	if value == "" {
+		return nil, nil
+	}
+	parsed := net.ParseIP(value)
+	if parsed == nil || parsed.To4() == nil {
+		return nil, ErrInvalidIP
+	}
+	return append(net.IP(nil), parsed.To4()...), nil
 }
