@@ -491,10 +491,13 @@ class Go2RtcStreamClient:
             stream_exists = self._stream_exists(stream_name)
             if stream_exists and stream_name in self._ensured_streams:
                 return True
-            source = self._source_url(device_id)
-            query = urlencode((("name", stream_name), ("src", source)))
-            method = "PATCH" if stream_exists else "PUT"
-            request = Request(f"{self._base_url()}{GO2RTC_STREAMS_PATH}?{query}", method=method)
+            if stream_exists:
+                self._delete_stream(stream_name)
+            query_fields = (("name", stream_name),) + tuple(
+                ("src", source) for source in self._source_urls(device_id)
+            )
+            query = urlencode(query_fields)
+            request = Request(f"{self._base_url()}{GO2RTC_STREAMS_PATH}?{query}", method="PUT")
             try:
                 with urlopen(request, timeout=self._settings.timeout_seconds):  # noqa: S310
                     pass
@@ -536,14 +539,37 @@ class Go2RtcStreamClient:
             return False
         return isinstance(streams, dict) and stream_name in streams
 
-    def _source_url(self, device_id: str) -> str:
+    def _delete_stream(self, stream_name: str) -> None:
+        """Remove a stale source set before atomically recreating all sources.
+
+        go2rtc's PATCH endpoint accepts one ``src`` only. A stream with more
+        than one source must therefore be recreated using PUT, whose repeated
+        ``src`` parameters are preserved as a complete source list.
+        """
+        query = urlencode({"src": stream_name})
+        request = Request(f"{self._base_url()}{GO2RTC_STREAMS_PATH}?{query}", method="DELETE")
+        try:
+            with urlopen(request, timeout=self._settings.timeout_seconds):  # noqa: S310
+                pass
+        except (HTTPError, URLError, OSError, TimeoutError):
+            pass
+
+    def _source_urls(self, device_id: str) -> tuple[str, str]:
+        """Return the shared RTSP source and its audio-only Opus companion.
+
+        The first source carries H.264. The second is go2rtc's documented
+        audio-only FFmpeg companion. Both are local RTSP clients of
+        camera-bridge and therefore share its one feeder TUTK session.
+        """
         rtsp_source = (
             f"rtsp://{self._settings.source_host}:{self._settings.source_port}/device/{device_id}"
         )
         # Browser WebRTC does not negotiate AAC. Let the local go2rtc FFmpeg
-        # sidecar copy verified H.264 and transcode only PLAF203 AAC-LC to Opus.
-        # This remains one RTSP client and therefore one feeder TUTK session.
-        return f"ffmpeg:{rtsp_source}#video=copy#audio=opus"
+        # companion transcode only PLAF203 AAC-LC to Opus. H.264 remains on
+        # the direct source, so no video transcoding changes the validated
+        # pipeline. Camera-bridge fans both local readers into one feeder
+        # TUTK session.
+        return rtsp_source, f"ffmpeg:{rtsp_source}#audio=opus"
 
     def _base_url(self) -> str:
         return f"http://{self._settings.host}:{self._settings.port}"

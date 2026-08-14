@@ -110,7 +110,7 @@ def test_existing_online_stream_is_exposed_as_a_device_scoped_player(
     assert status.reason is None
 
 
-def test_stream_registration_uses_only_device_scoped_internal_rtsp_source_with_audio_transcode(
+def test_stream_registration_uses_shared_rtsp_source_with_internal_audio_transcode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Dynamic registration cannot select an arbitrary go2rtc source URL."""
@@ -135,18 +135,22 @@ def test_stream_registration_uses_only_device_scoped_internal_rtsp_source_with_a
     assert client.ensure_stream(DEVICE_A) is True
     assert len(requests) == 3
     assert "name=plaf203_TESTDEVICE0000000001" in requests[1].full_url
+    assert "src=rtsp%3A%2F%2F127.0.0.1%3A8554%2Fdevice%2FTESTDEVICE0000000001" in requests[1].full_url
     assert (
         "src=ffmpeg%3Artsp%3A%2F%2F127.0.0.1%3A8554%2Fdevice%2FTESTDEVICE0000000001"
-        "%23video%3Dcopy%23audio%3Dopus"
+        "%23audio%3Dopus"
     ) in requests[1].full_url
 
 
-def test_existing_stream_is_patched_once_to_add_opus_audio(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A pre-audio stream is migrated without repeatedly resetting the source."""
+def test_existing_stream_is_patched_once_to_add_internal_opus_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-audio stream is migrated without repeatedly resetting the sources."""
     stream = stream_name_for_device(DEVICE_A)
     requests: list[Request] = []
     responses = iter(
         (
+            FakeHttpResponse({stream: {}}),
             FakeHttpResponse({stream: {}}),
             FakeHttpResponse({}),
             FakeHttpResponse({stream: {}}),
@@ -163,5 +167,10 @@ def test_existing_stream_is_patched_once_to_add_opus_audio(monkeypatch: pytest.M
 
     assert client.ensure_stream(DEVICE_A) is True
     assert client.ensure_stream(DEVICE_A) is True
-    assert [request.get_method() for request in requests] == ["GET", "PATCH", "GET", "GET"]
-    assert "audio%3Dopus" in requests[1].full_url
+    assert [request.get_method() for request in requests] == ["GET", "DELETE", "PUT", "GET", "GET"]
+    assert requests[1].full_url.endswith("?src=plaf203_TESTDEVICE0000000001")
+    assert "src=rtsp%3A%2F%2F127.0.0.1%3A8554%2Fdevice%2FTESTDEVICE0000000001" in requests[2].full_url
+    assert (
+        "src=ffmpeg%3Artsp%3A%2F%2F127.0.0.1%3A8554%2Fdevice%2FTESTDEVICE0000000001"
+        "%23audio%3Dopus"
+    ) in requests[2].full_url
