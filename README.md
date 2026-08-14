@@ -397,12 +397,11 @@ deliberate choice.
 The Compose stack includes a pinned `alexxit/go2rtc:1.9.14` sidecar for
 read-only camera status. It is internal-only and the relay calls only
 go2rtc's stream-list endpoint; no go2rtc administration is proxied. The
-PLAF203 source itself is intentionally **not configured**: go2rtc contains
-TUTK transport primitives but no confirmed PLAF203 AV dialect or source URL.
-The device Camera tab therefore shows diagnostics only, never a guessed live
-stream. See [docs/camera.md](docs/camera.md) for the researched protocol
-boundary, status environment variables, port rationale, and the evidence
-needed before a real player can be added.
+PLAF203 source is registered locally after its camera identity has been
+learned. The device Camera tab uses WebRTC through go2rtc for the verified
+live H.264 stream and keeps player controls local to the browser. See
+[docs/camera.md](docs/camera.md) for the protocol boundary, stream lifecycle,
+and the evidence still required for audio and profile switching.
 
 ## Observability dashboard and confirmed control
 

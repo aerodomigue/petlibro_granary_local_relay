@@ -193,6 +193,9 @@ does not contain an identifiable audio stream, and the incomplete channel-6
 fragments in the official capture do not establish a codec or an audio-start
 command. The bridge logs only rate-limited channel/size diagnostics for future
 offline identification and never labels an unconfirmed channel as AAC.
-The currently observed video is 640×360 H.264; the confirmed primary bootstrap
-payload does not by itself establish an HD/SD switch mapping, so the dashboard
-does not offer a quality control.
+The currently observed video is 640×360 H.264. The player uses a custom overlay
+for browser-local mute, volume, and fullscreen controls; it starts muted for
+autoplay compatibility. The existing PeerConnection also requests an audio
+transceiver so a confirmed future audio track will join the same player. The
+confirmed primary bootstrap payload does not establish an HD/SD switch mapping,
+so the visible SD/HD controls are disabled and cannot send a camera command.

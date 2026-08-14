@@ -536,13 +536,14 @@ def test_camera_player_survives_device_status_refreshes() -> None:
     """Camera polling preserves the active WebRTC video element and peer connection."""
     assert "player&&player.deviceId===deviceId&&byId('camera-player')" in DASHBOARD_HTML
     assert "runtime.deviceDetail=detail;updateCameraPlayerStatus(detail.camera);return" in DASHBOARD_HTML
-    assert "video.onloadeddata=()=>{if(runtime.cameraPlayer===player)setCameraPlayerState('Live','live')}" in DASHBOARD_HTML
+    assert "setCameraPlayerState('Live','live');showCameraControls(player)" in DASHBOARD_HTML
 
 
 def test_camera_player_closes_cleanly_and_retries_with_backoff() -> None:
     """Camera UI owns one peer connection and releases it when no longer visible."""
     for marker in (
         "CAMERA_HIDDEN_CLOSE_DELAY_MS=15000",
+        "CAMERA_CONTROL_HIDE_DELAY_MS=3000",
         "CAMERA_RETRY_DELAYS_MS=[1000,2000,5000,10000]",
         "stream.getTracks().forEach(track=>track.stop())",
         "window.addEventListener('pagehide',closeCameraPlayer)",
@@ -550,6 +551,25 @@ def test_camera_player_closes_cleanly_and_retries_with_backoff() -> None:
         "setCameraPlayerState('Starting stream…','waiting')",
     ):
         assert marker in DASHBOARD_HTML
+
+
+def test_camera_player_uses_a_custom_local_control_overlay() -> None:
+    """Camera controls stay in the player and never create a feeder write path."""
+    for marker in (
+        'id="camera-controls"',
+        'id="camera-mute"',
+        'id="camera-volume"',
+        'id="camera-quality"',
+        'Profile switch unavailable',
+        'id="camera-fullscreen"',
+        "CAMERA_VOLUME_STORAGE_KEY='petlibro-camera-volume'",
+        "root.requestFullscreen().catch(()=>{})",
+        "pc.addTransceiver('audio',{direction:'recvonly'})",
+        "camera-player.controls-visible",
+    ):
+        assert marker in DASHBOARD_HTML
+    assert '<video id="camera-video" autoplay playsinline muted controls' not in DASHBOARD_HTML
+    assert "/camera/quality" not in DASHBOARD_HTML
 
 
 def test_controls_and_schedule_use_conditional_human_friendly_components() -> None:
