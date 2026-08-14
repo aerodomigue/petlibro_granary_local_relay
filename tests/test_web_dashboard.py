@@ -65,13 +65,16 @@ class FakeCameraProvider:
     def status(self, device_id: str, product_id: str | None) -> CameraStatus:
         """Return a safe status scoped to the requested device."""
         return CameraStatus(
-            available=False,
+            available=True,
             configured=product_id == "PLAF203",
             online=device_id == DEVICE_A,
             stream=f"plaf203_{device_id}",
-            webrtc=False,
+            webrtc=True,
             go2rtc_reachable=True,
-            reason="plaf203_tutk_unsupported",
+            reason=None,
+            bridge_reachable=True,
+            bridge_registered=True,
+            player_available=True,
         )
 
 
@@ -202,6 +205,38 @@ def test_camera_status_is_device_scoped_and_excludes_sensitive_source_data(clien
     assert camera_b["online"] is False
     assert "source" not in camera_a
     assert "password" not in camera_a
+
+
+def test_camera_webrtc_proxy_is_device_scoped_and_accepts_only_sdp(
+    dashboard: tuple[DashboardContext, RingBufferLogHandler], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The player route cannot select a source, stream, or arbitrary payload."""
+    context, _ = dashboard
+    calls: list[tuple[str, bytes]] = []
+
+    def exchange(device_id: str, offer: bytes) -> bytes:
+        calls.append((device_id, offer))
+        return b"v=0\r\na=answer\r\n"
+
+    monkeypatch.setattr(context, "exchange_camera_webrtc", exchange)
+    client = TestClient(create_app(context))
+
+    response = client.post(
+        f"/api/devices/{DEVICE_A}/camera/webrtc",
+        content=b"v=0\r\na=offer\r\n",
+        headers={"Content-Type": "application/sdp"},
+    )
+
+    assert response.status_code == 201
+    assert response.headers["content-type"].startswith("application/sdp")
+    assert response.content == b"v=0\r\na=answer\r\n"
+    assert calls == [(DEVICE_A, b"v=0\r\na=offer\r\n")]
+    assert client.post(f"/api/devices/{DEVICE_A}/camera/webrtc", json={"src": "bad"}).status_code == 415
+    assert client.post(
+        "/api/devices/UNKNOWN/camera/webrtc",
+        content=b"v=0",
+        headers={"Content-Type": "application/sdp"},
+    ).status_code == 404
 
 
 def test_api_masks_credentials_and_sanitizes_raw_state(client: TestClient) -> None:
@@ -422,6 +457,7 @@ def test_dashboard_exposes_only_narrow_confirmed_control_write_routes(
         ("/api/devices/{device_id}/controls/sound", ("PATCH",)),
         ("/api/devices/{device_id}/controls/sound-detection", ("PATCH",)),
         ("/api/devices/{device_id}/controls/video", ("PATCH",)),
+        ("/api/devices/{device_id}/camera/webrtc", ("POST",)),
         ("/api/devices/{device_id}/schedule", ("POST",)),
         ("/api/devices/{device_id}/schedule/{plan_id}", ("DELETE",)),
         ("/api/devices/{device_id}/schedule/{plan_id}", ("PATCH",)),
@@ -483,7 +519,8 @@ def test_device_ui_has_typed_controls_schedule_camera_and_reused_views() -> None
         "logPanel('device-log',deviceId)",
         "go2rtc stream status",
         "go2rtc_reachable",
-        "No network traffic generated",
+        "WebRTC via local go2rtc",
+        "camera/webrtc",
         "renderLogLines('device-log',deviceId)",
         "schedule-edit",
         "schedulePayload",

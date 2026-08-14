@@ -1,11 +1,16 @@
-# PETLIBRO camera POC configuration.
-#
-# No PLAF203 source is configured intentionally. go2rtc v1.9.14 includes
-# TUTK transport primitives but no confirmed PLAF203 AV protocol/source.
-# Adding a guessed tutk:// source or dynamic cloud contract here would be
-# misleading and could expose credentials. See docs/camera.md.
+# PLAF203 H.264 is supplied by the local camera bridge as a deterministic,
+# device-scoped RTSP source. Streams are registered dynamically by the relay
+# and rebuilt after a go2rtc restart; source URLs never leave the local stack.
 
 api:
   listen: ":1984"
+
+# camera-bridge owns host port 8554. go2rtc only needs the RTSP client module
+# to pull that source, so no second RTSP listener is started here.
+rtsp:
+  listen: ""
+
+webrtc:
+  listen: ":8555"
 
 streams: {}

@@ -119,3 +119,29 @@ func TestMediaReceiversKeepDeviceSessionsIsolated(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionFansOutEveryFrameAndReplaysLatestKeyframe(t *testing.T) {
+	session := &Session{}
+	firstFrames := make([]*VideoFrame, 0)
+	firstUnsubscribe := session.SubscribeFrames(func(frame *VideoFrame) {
+		firstFrames = append(firstFrames, frame)
+	})
+	defer firstUnsubscribe()
+	keyframe := &VideoFrame{Codec: "h264", Keyframe: true, Data: []byte{0, 0, 0, 1, 0x65}}
+	session.publishFrame(keyframe)
+	if len(firstFrames) != 1 || firstFrames[0] != keyframe {
+		t.Fatalf("initial media fan-out=%+v", firstFrames)
+	}
+	lateFrames := make([]*VideoFrame, 0)
+	lateUnsubscribe := session.SubscribeFrames(func(frame *VideoFrame) {
+		lateFrames = append(lateFrames, frame)
+	})
+	defer lateUnsubscribe()
+	if len(lateFrames) != 1 || !lateFrames[0].Keyframe || string(lateFrames[0].Data) != string(keyframe.Data) {
+		t.Fatalf("latest keyframe replay=%+v", lateFrames)
+	}
+	session.publishFrame(&VideoFrame{Codec: "h264", Data: []byte{0, 0, 0, 1, 0x61}})
+	if len(firstFrames) != 2 || len(lateFrames) != 2 {
+		t.Fatalf("multi-consumer fan-out first=%d late=%d", len(firstFrames), len(lateFrames))
+	}
+}

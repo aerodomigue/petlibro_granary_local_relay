@@ -16,6 +16,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Protocol, cast
+from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -26,6 +27,7 @@ _LOGGER = logging.getLogger(__name__)
 
 PLAF203_PRODUCT_ID = "PLAF203"
 GO2RTC_STREAMS_PATH = "/api/streams"
+GO2RTC_WEBRTC_PATH = "/api/webrtc"
 CAMERA_BRIDGE_DEVICES_PATH = "/devices"
 CAMERA_BRIDGE_HEALTH_PATH = "/healthz"
 CACHE_SECONDS = 2.0
@@ -49,6 +51,8 @@ class CameraStatus:
     bridge_reachable: bool = False
     bridge_registered: bool = False
     uid_learned: bool = False
+    player_available: bool = False
+    media_consumers: int = 0
 
     def snapshot(self) -> dict[str, object]:
         """Return a JSON-ready status that contains no source or credential."""
@@ -77,6 +81,13 @@ class CameraBridgeReconciliationClient(CameraBridgeRegistrationClient, Protocol)
 
     def registrations(self) -> dict[str, str | None] | None:
         """Return device IDs and registered feeder IPs, or None when unavailable."""
+
+
+class Go2RtcStreamReconciliationClient(Protocol):
+    """Create and inspect deterministic go2rtc streams without exposing sources."""
+
+    def ensure_stream(self, device_id: str) -> bool:
+        """Ensure one device-scoped internal RTSP source exists."""
 
 
 class CameraBridgeClient:
@@ -332,6 +343,51 @@ class CameraBridgeReconciler:
         self._available = False
 
 
+class Go2RtcStreamReconciler:
+    """Restore deterministic go2rtc streams after either process restarts."""
+
+    def __init__(
+        self,
+        settings: Go2RtcSettings,
+        client: Go2RtcStreamReconciliationClient,
+        mappings_provider: Callable[[], Iterable[CameraBridgeMapping]],
+    ) -> None:
+        self._settings = settings
+        self._client = client
+        self._mappings_provider = mappings_provider
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        """Start sidecar convergence only when go2rtc is deliberately enabled."""
+        if not self._settings.enabled or self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="go2rtc-reconcile")
+        self._thread.start()
+
+    def close(self) -> None:
+        """Stop the optional reconciliation worker."""
+        if self._thread is None:
+            return
+        self._stop_event.set()
+        self._thread.join()
+
+    def reconcile_once(self) -> None:
+        """Ensure a go2rtc stream for each persisted, device-local camera UID."""
+        if not self._settings.enabled:
+            return
+        for device_id, _uid, _feeder_ip in self._mappings_provider():
+            if self._client.ensure_stream(device_id):
+                _LOGGER.debug("CAMERA GO2RTC REGISTERED device=%s", device_id)
+            else:
+                _LOGGER.debug("CAMERA GO2RTC RECONCILE FAILED device=%s", device_id)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            self.reconcile_once()
+            self._stop_event.wait(self._settings.reconcile_interval_seconds)
+
+
 class CameraStatusService:
     """Combine safe go2rtc and bridge readiness diagnostics for one camera."""
 
@@ -347,6 +403,7 @@ class CameraStatusService:
             status,
             bridge_reachable=bridge_reachable,
             bridge_registered=bridge_registered,
+            available=status.player_available and bridge_reachable and bridge_registered,
         )
 
 
@@ -359,12 +416,7 @@ class Go2RtcCameraClient:
         self._cache: dict[str, tuple[float, CameraStatus]] = {}
 
     def status(self, device_id: str, product_id: str | None) -> CameraStatus:
-        """Report a PLAF203 stream without returning its source URL.
-
-        A stream can exist because an operator configured go2rtc separately,
-        but this relay will not mark it playable: no PLAF203 TUTK AV dialect
-        is implemented or confirmed in go2rtc v1.9.14.
-        """
+        """Report a PLAF203 stream without returning its internal RTSP source."""
         stream_name = stream_name_for_device(device_id)
         if product_id != PLAF203_PRODUCT_ID:
             return CameraStatus(False, False, False, stream_name, False, False, "unsupported_product")
@@ -397,19 +449,88 @@ class Go2RtcCameraClient:
         streams = cast(dict[str, Any], payload) if isinstance(payload, dict) else {}
         stream = streams.get(stream_name)
         configured = isinstance(stream, dict)
-        online = configured and bool(cast(dict[str, Any], stream).get("producers"))
+        stream_data = cast(dict[str, Any], stream) if configured else {}
+        online = configured and bool(stream_data.get("producers"))
+        consumers = stream_data.get("consumers")
         return CameraStatus(
-            available=False,
+            available=configured,
             configured=configured,
             online=online,
             stream=stream_name,
-            webrtc=False,
+            webrtc=configured,
             go2rtc_reachable=True,
-            reason="plaf203_tutk_unsupported",
+            reason=None if configured else "stream_not_registered",
+            player_available=configured,
+            media_consumers=len(consumers) if isinstance(consumers, list) else 0,
         )
 
     def _streams_url(self) -> str:
         return f"http://{self._settings.host}:{self._settings.port}{GO2RTC_STREAMS_PATH}"
+
+
+class Go2RtcStreamClient:
+    """Restricted go2rtc API client for deterministic PLAF203 RTSP sources."""
+
+    def __init__(self, settings: Go2RtcSettings) -> None:
+        self._settings = settings
+
+    def ensure_stream(self, device_id: str) -> bool:
+        """Create the known RTSP source and verify it through the stream list.
+
+        go2rtc may return a configuration-persistence error when its config is
+        mounted read-only. The in-memory stream still exists in that case, so
+        verification through GET is the source of truth; the reconciler will
+        recreate it after a sidecar restart.
+        """
+        if not self._settings.enabled:
+            return False
+        stream_name = stream_name_for_device(device_id)
+        if self._stream_exists(stream_name):
+            return True
+        source = self._source_url(device_id)
+        query = urlencode((("name", stream_name), ("src", source)))
+        request = Request(f"{self._base_url()}{GO2RTC_STREAMS_PATH}?{query}", method="PUT")
+        try:
+            with urlopen(request, timeout=self._settings.timeout_seconds):  # noqa: S310
+                pass
+        except (HTTPError, URLError, OSError, TimeoutError):
+            pass
+        return self._stream_exists(stream_name)
+
+    def exchange_webrtc(self, device_id: str, offer: bytes) -> bytes:
+        """Proxy one SDP offer to the device's fixed go2rtc WHEP endpoint."""
+        if not self._settings.enabled or not self.ensure_stream(device_id):
+            raise RuntimeError("camera stream is unavailable")
+        _LOGGER.info("CAMERA PLAYER CONNECTING device=%s", device_id)
+        query = urlencode({"src": stream_name_for_device(device_id)})
+        request = Request(
+            f"{self._base_url()}{GO2RTC_WEBRTC_PATH}?{query}",
+            data=offer,
+            headers={"Content-Type": "application/sdp"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self._settings.timeout_seconds * 10) as response:  # noqa: S310
+                answer = cast(bytes, response.read())
+            _LOGGER.info("CAMERA PLAYER CONNECTED device=%s", device_id)
+            return answer
+        except (HTTPError, URLError, OSError, TimeoutError) as error:
+            raise RuntimeError("go2rtc WebRTC exchange failed") from error
+
+    def _stream_exists(self, stream_name: str) -> bool:
+        request = Request(f"{self._base_url()}{GO2RTC_STREAMS_PATH}", method="GET")
+        try:
+            with urlopen(request, timeout=self._settings.timeout_seconds) as response:  # noqa: S310
+                streams = json.load(response)
+        except (HTTPError, URLError, OSError, TimeoutError, json.JSONDecodeError):
+            return False
+        return isinstance(streams, dict) and stream_name in streams
+
+    def _source_url(self, device_id: str) -> str:
+        return f"rtsp://{self._settings.source_host}:{self._settings.source_port}/device/{device_id}"
+
+    def _base_url(self) -> str:
+        return f"http://{self._settings.host}:{self._settings.port}"
 
 
 def stream_name_for_device(device_id: str) -> str:

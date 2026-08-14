@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AlexxIT/go2rtc/pkg/rtsp"
 	"github.com/AlexxIT/go2rtc/pkg/tutk"
 	"github.com/aerodomigue/petlibro-camera-bridge/internal/plaf203"
 )
@@ -49,16 +50,19 @@ type Device struct {
 	FramesReceived   uint64               `json:"frames_received"`
 	BytesReceived    uint64               `json:"bytes_received"`
 	LastFrameAt      time.Time            `json:"last_frame_at,omitempty"`
+	MediaConsumers   int                  `json:"media_consumers"`
 }
 
 type deviceRecord struct {
-	device        Device
-	uid           string
-	ip            net.IP
-	cancel        context.CancelFunc
-	session       *plaf203.Session
-	attemptID     uint64
-	connectActive bool
+	device           Device
+	uid              string
+	ip               net.IP
+	cancel           context.CancelFunc
+	session          *plaf203.Session
+	media            *mediaPublisher
+	mediaUnsubscribe func()
+	attemptID        uint64
+	connectActive    bool
 }
 
 // Registry keeps device registrations isolated by device ID and owns one
@@ -123,6 +127,7 @@ func (r *Registry) Upsert(deviceID string, uid string, ip string) (Device, error
 			ConnectionState:  plaf203.StateIdle,
 			LastTransitionAt: now,
 		}
+		record.media = newMediaPublisher()
 	}
 	record.uid = uid
 	if parsedIP != nil {
@@ -147,6 +152,9 @@ func (r *Registry) Delete(deviceID string) bool {
 	}
 	if found && record.session != nil {
 		_ = record.session.Close()
+	}
+	if found && record.mediaUnsubscribe != nil {
+		record.mediaUnsubscribe()
 	}
 	return found
 }
@@ -199,12 +207,17 @@ func (r *Registry) Disconnect(deviceID string) bool {
 	record.connectActive = false
 	record.cancel = nil
 	record.session = nil
+	mediaUnsubscribe := record.mediaUnsubscribe
+	record.mediaUnsubscribe = nil
 	record.device.ConnectionState = plaf203.StateIdle
 	record.device.LastError = ""
 	record.device.LastTransitionAt = time.Now().UTC()
 	record.device.UpdatedAt = record.device.LastTransitionAt
 	r.devices[deviceID] = record
 	r.mu.Unlock()
+	if mediaUnsubscribe != nil {
+		mediaUnsubscribe()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -259,10 +272,48 @@ func (r *Registry) connected(deviceID string, attemptID uint64, session *plaf203
 		return
 	}
 	record.session = session
+	if record.media != nil && session != nil {
+		record.mediaUnsubscribe = session.SubscribeFrames(record.media.publish)
+	}
 	record.cancel = nil
 	record.device.LastError = ""
 	r.devices[deviceID] = record
 	r.mu.Unlock()
+}
+
+func (r *Registry) addMediaConsumer(deviceID string, consumer *rtsp.Conn) (func(), error) {
+	_, _, connectErr := r.Connect(deviceID)
+	if connectErr != nil {
+		return nil, connectErr
+	}
+	r.mu.Lock()
+	record, found := r.devices[deviceID]
+	if !found || record.media == nil {
+		r.mu.Unlock()
+		return nil, ErrDeviceNotFound
+	}
+	if err := record.media.attach(consumer); err != nil {
+		r.mu.Unlock()
+		return nil, err
+	}
+	record.device.MediaConsumers++
+	record.device.UpdatedAt = time.Now().UTC()
+	r.devices[deviceID] = record
+	r.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.mu.Lock()
+			record, found := r.devices[deviceID]
+			if found && record.device.MediaConsumers > 0 {
+				record.device.MediaConsumers--
+				record.device.UpdatedAt = time.Now().UTC()
+				r.devices[deviceID] = record
+			}
+			r.mu.Unlock()
+			log.Printf("CAMERA MEDIA CLIENT DISCONNECTED device=%s", deviceID)
+		})
+	}, nil
 }
 
 func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.Event) {
@@ -275,6 +326,10 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 	now := time.Now().UTC()
 	record.device.ConnectionState = event.State
 	record.device.LastError = ""
+	if event.State == plaf203.StateStreaming {
+		record.device.StreamAvailable = true
+		record.device.Reason = ""
+	}
 	record.device.LastTransitionAt = now
 	record.device.UpdatedAt = now
 	r.devices[deviceID] = record
@@ -389,6 +444,8 @@ func (r *Registry) fail(deviceID string, attemptID uint64, connectionError error
 	record.connectActive = false
 	record.cancel = nil
 	record.device.ConnectionState = plaf203.StateFailed
+	record.device.StreamAvailable = false
+	record.device.Reason = "camera_session_failed"
 	record.device.LastError = connectionError.Error()
 	record.device.LastTransitionAt = now
 	record.device.UpdatedAt = now

@@ -3,20 +3,22 @@
 The Compose stack includes an internal `camera-bridge` and a pinned
 `alexxit/go2rtc:1.9.14` sidecar. The relay learns a 20-character camera UID
 from a feeder-originated `DEVICE_START_EVENT`, persists it in the State Shadow,
-and asynchronously registers it to `camera-bridge`. The dashboard exposes only
+and asynchronously registers it to `camera-bridge`. The dashboard exposes
 safe readiness state at `GET /api/devices/{device_id}/camera`; it never returns
-the UID, source URL, token, password, or a writable media API.
+the UID, RTSP source URL, token, password, or a generic media API.
 
-## Current status: verified bootstrap and H.264 observation; no media output
+## Current status: direct H.264 → RTSP → go2rtc → WebRTC
 
-There is deliberately no `plaf203_<device_id>` source in
-`go2rtc/go2rtc.yaml`. The `camera-bridge` API is limited to `GET /healthz`,
+The `camera-bridge` API is limited to `GET /healthz`,
 `GET /devices`, `PUT /devices/{device_id}`, `POST /devices/{device_id}/connect`,
 `POST /devices/{device_id}/disconnect`, and `DELETE /devices/{device_id}`.
-It records a UID mapping and reports `plaf203_h264_observation_only`. The
-bridge can keep an explicitly requested direct LAN session open long enough to
-recognize bounded H.264 access units, but no camera media source, RTSP,
-WebRTC, player, decoder, or transcoder is created.
+It serves a device-scoped, internal RTSP endpoint at
+`rtsp://127.0.0.1:8554/device/<device_id>`. The relay registers the matching
+`plaf203_<device_id>` source dynamically in official go2rtc and recreates it
+after a sidecar restart. The browser exchanges SDP only with the relay at
+`POST /api/devices/{device_id}/camera/webrtc`; it never receives an internal
+source URL. H.264 is packetized and forwarded unchanged: no decoder, FFmpeg,
+or transcoder is started.
 
 The bridge now implements the bounded, explicit connection preamble exposed by
 `POST /devices/{device_id}/connect` and cancelled by
@@ -126,19 +128,23 @@ go run ./tools/plaf203-pcap -pcap /path/to/camera-open.pcap \
 
 ## Docker networking and status
 
-The sidecar API remains internal to Compose at `http://go2rtc:1984`; port
-1984 is not mapped to the host. `8555/tcp` and `8555/udp` are also not mapped
-because this POC has no source or browser player. A future WebRTC player would
-need explicitly designed ICE/network exposure; it must not be opened merely
-to show status.
+`camera-bridge` and official go2rtc use `network_mode: host`: the PLAF203
+direct-LAN UDP peer and browser WebRTC ICE candidates must both use the VM's
+real LAN addresses. `camera-bridge` owns RTSP port `8554`; go2rtc disables its
+own RTSP listener and pulls `127.0.0.1:8554` instead. The dashboard still
+proxies WHEP signaling through the relay. Keep this stack LAN-only; do not
+expose the VM or go2rtc API to the Internet.
 
 Enable the separate internal status and registration clients only when desired:
 
 ```dotenv
 PETLIBRO_GO2RTC_ENABLED=true
-PETLIBRO_GO2RTC_HOST=go2rtc
+PETLIBRO_GO2RTC_HOST=host.docker.internal
 PETLIBRO_GO2RTC_PORT=1984
 PETLIBRO_GO2RTC_TIMEOUT_SECONDS=1
+PETLIBRO_GO2RTC_SOURCE_HOST=127.0.0.1
+PETLIBRO_GO2RTC_SOURCE_PORT=8554
+PETLIBRO_GO2RTC_RECONCILE_INTERVAL_SECONDS=5
 PETLIBRO_CAMERA_BRIDGE_ENABLED=true
 # Use this instead of HOST/PORT when camera-bridge uses host networking.
 PETLIBRO_CAMERA_BRIDGE_URL=http://host.docker.internal:8081
@@ -163,12 +169,15 @@ health checks, registry reads, and registrations; it takes precedence over the
 legacy `HOST` and `PORT` pair.
 
 The API returns only safe state: `available`, `configured`, `online`,
-`stream`, `webrtc`, `go2rtc_reachable`, `bridge_reachable`,
-`bridge_registered`, `uid_learned`, and an explanatory `reason`. It never
-returns a source URL, UID, token, password, or cloud contract.
+`stream`, `webrtc`, `player_available`, `media_consumers`,
+`go2rtc_reachable`, `bridge_reachable`, `bridge_registered`, `uid_learned`,
+and an explanatory `reason`. It never returns a source URL, UID, token,
+password, or cloud contract.
 
 For a configured device, the deterministic stream name is
-`plaf203_<device_id>`. It supports the future multi-device mapping but is not
-an instruction to invent a source. The next evidence required before any
-consumer is a repeatable capture validating format-reply semantics, frame
-continuity, audio framing, and an explicit device-specific output design.
+`plaf203_<device_id>`. One go2rtc producer pulls one bridge RTSP session; any
+number of dashboard WebRTC consumers share it, so opening a second browser
+does not open a second feeder session. The current bridge keeps that verified
+session alive after consumers disconnect; lazy teardown can be added later
+without changing the RTSP or WebRTC contracts. Audio remains intentionally out
+of scope until an AAC payload is captured and validated.

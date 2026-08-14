@@ -219,6 +219,7 @@ func (connector *DirectConnector) Connect(ctx context.Context, uid string, feede
 			return nil, fmt.Errorf("bootstrap PLAF203 media: %w", bootstrapErr)
 		}
 		session.startMediaReceiver()
+		session.publishFrame(frame)
 		session.noteMediaEvent(clock())
 		keepTransport = true
 		emit(observe, Event{State: StateStreaming, Address: address, Step: "bootstrap", Frame: frame})
@@ -278,7 +279,11 @@ func (session *Session) startMediaReceiver() {
 				return
 			}
 			frame, parseErr := session.media.HandlePacket(tutk.ReverseTransCodePartial(nil, packet), session.ID, session.clock())
-			if parseErr != nil || frame == nil || !session.noteMediaEvent(session.clock()) {
+			if parseErr != nil || frame == nil {
+				continue
+			}
+			session.publishFrame(frame)
+			if !session.noteMediaEvent(session.clock()) {
 				continue
 			}
 			emit(session.observer, Event{State: StateStreaming, Address: session.Address, Step: "media_stats", Frame: frame})

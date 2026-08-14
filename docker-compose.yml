@@ -25,21 +25,25 @@ services:
       - mosquitto-data:/mosquitto/data
       - mosquitto-log:/mosquitto/log
 
-  # Internal-only registry for relay-learned PLAF203 camera UIDs. It never
-  # opens a TUTK session until the device-specific AV protocol is implemented.
+  # The PLAF203 camera answers TUTK discovery from a dynamic UDP source port,
+  # so this bridge must share the VM network namespace. It serves the verified
+  # H.264 stream only on the host-local RTSP endpoint :8554.
   camera-bridge:
     build:
       context: ./camera-bridge
     container_name: petlibro-relay-camera-bridge
     restart: unless-stopped
+    network_mode: host
     environment:
       PETLIBRO_CAMERA_DISCOVERY_BROADCAST_FALLBACK: ${PETLIBRO_CAMERA_DISCOVERY_BROADCAST_FALLBACK:-true}
 
-  # Internal-only media sidecar. No unverified PLAF203 source is configured.
+  # Official go2rtc consumes the bridge's local RTSP source and exposes WebRTC.
+  # Host networking gives browser ICE candidates the VM's reachable LAN address.
   go2rtc:
     image: alexxit/go2rtc:1.9.14
     container_name: petlibro-relay-go2rtc
     restart: unless-stopped
+    network_mode: host
     volumes:
       - ./go2rtc/go2rtc.yaml:/config/go2rtc.yaml:ro
 
@@ -53,6 +57,12 @@ services:
       - go2rtc
     env_file:
       - .env
+    environment:
+      # Both camera sidecars use the VM host network; keep every endpoint
+      # configurable through the relay container environment.
+      PETLIBRO_CAMERA_BRIDGE_URL: ${PETLIBRO_CAMERA_BRIDGE_URL:-http://host.docker.internal:8081}
+      PETLIBRO_GO2RTC_HOST: ${PETLIBRO_GO2RTC_HOST:-host.docker.internal}
+      PETLIBRO_GO2RTC_SOURCE_HOST: ${PETLIBRO_GO2RTC_SOURCE_HOST:-127.0.0.1}
     # The DNS override that points the feeder at this relay rewrites
     # mqtt.us.petlibro.com to this host - and this container has to resolve
     # that same name to reach the REAL cloud. Resolving it through the LAN
@@ -62,6 +72,8 @@ services:
     dns:
       - ${PETLIBRO_UPSTREAM_DNS_PRIMARY:-1.1.1.1}
       - ${PETLIBRO_UPSTREAM_DNS_SECONDARY:-9.9.9.9}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${PETLIBRO_HOST_PORT:-1883}:${PETLIBRO_CAPTURE_PROXY_PORT:-1883}"
       # Read-only LAN dashboard. It is disabled by default inside the relay;

@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from ..camera import CameraStatusProvider, Go2RtcCameraClient
+from ..camera import CameraStatusProvider, Go2RtcCameraClient, Go2RtcStreamClient
 from ..config import RelayConfig
 from ..device_context import LOCAL_TO_UPSTREAM, UPSTREAM_TO_LOCAL
 from ..device_manager import DeviceManager
@@ -53,6 +53,7 @@ class DashboardContext:
         self._presence = presence
         self._sound_switch_control = sound_switch_control
         self._camera = camera or Go2RtcCameraClient(config.go2rtc)
+        self._camera_streams = Go2RtcStreamClient(config.go2rtc)
 
     @property
     def logs(self) -> RingBufferLogHandler:
@@ -168,6 +169,10 @@ class DashboardContext:
             **status.snapshot(),
             "uid_learned": self._shadow.get_camera_uid(device_id) is not None,
         }
+
+    def exchange_camera_webrtc(self, device_id: str, offer: bytes) -> bytes:
+        """Proxy one validated device SDP offer without accepting arbitrary streams."""
+        return self._camera_streams.exchange_webrtc(device_id, offer)
 
     def queues(self, device_id: str, limit: int) -> dict[str, Any]:
         """Return bounded metadata for one device's two durable directions."""

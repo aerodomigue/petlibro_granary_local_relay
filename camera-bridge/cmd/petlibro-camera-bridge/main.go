@@ -13,6 +13,7 @@ import (
 
 const (
 	defaultListenAddress = ":8081"
+	defaultMediaAddress  = ":8554"
 	readHeaderTimeout    = 5 * time.Second
 )
 
@@ -22,15 +23,29 @@ func main() {
 		listenAddress = defaultListenAddress
 	}
 
+	registry := bridge.NewRegistryWithBroadcastFallback(broadcastFallback())
+	mediaServer, err := bridge.StartMediaServer(mediaListenAddress(), registry)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = mediaServer.Close() }()
 	server := &http.Server{
 		Addr:              listenAddress,
-		Handler:           bridge.NewHandler(bridge.NewRegistryWithBroadcastFallback(broadcastFallback())),
+		Handler:           bridge.NewHandler(registry),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 	log.Printf("camera bridge listening on %s", listenAddress)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+func mediaListenAddress() string {
+	listenAddress := os.Getenv("PETLIBRO_CAMERA_MEDIA_RTSP_LISTEN_ADDR")
+	if listenAddress == "" {
+		return defaultMediaAddress
+	}
+	return listenAddress
 }
 
 func broadcastFallback() bool {

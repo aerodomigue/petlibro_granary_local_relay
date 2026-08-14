@@ -40,6 +40,9 @@ DEFAULT_GO2RTC_ENABLED = False
 DEFAULT_GO2RTC_HOST = "go2rtc"
 DEFAULT_GO2RTC_PORT = 1984
 DEFAULT_GO2RTC_TIMEOUT_SECONDS = 1.0
+DEFAULT_GO2RTC_SOURCE_HOST = "127.0.0.1"
+DEFAULT_GO2RTC_SOURCE_PORT = 8554
+DEFAULT_GO2RTC_RECONCILE_INTERVAL_SECONDS = 5.0
 DEFAULT_CAMERA_BRIDGE_ENABLED = False
 DEFAULT_CAMERA_BRIDGE_HOST = "camera-bridge"
 DEFAULT_CAMERA_BRIDGE_PORT = 8081
@@ -56,12 +59,15 @@ UNSAFE_UPSTREAM_CONFIGURATION_MESSAGE = (
 
 @dataclass(frozen=True, slots=True)
 class Go2RtcSettings:
-    """Read-only connection settings for the optional go2rtc sidecar."""
+    """Internal connection and RTSP-source settings for go2rtc."""
 
     enabled: bool = DEFAULT_GO2RTC_ENABLED
     host: str = DEFAULT_GO2RTC_HOST
     port: int = DEFAULT_GO2RTC_PORT
     timeout_seconds: float = DEFAULT_GO2RTC_TIMEOUT_SECONDS
+    source_host: str = DEFAULT_GO2RTC_SOURCE_HOST
+    source_port: int = DEFAULT_GO2RTC_SOURCE_PORT
+    reconcile_interval_seconds: float = DEFAULT_GO2RTC_RECONCILE_INTERVAL_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +200,16 @@ class RelayConfig:
                 timeout_seconds=float(
                     os.environ.get("PETLIBRO_GO2RTC_TIMEOUT_SECONDS", DEFAULT_GO2RTC_TIMEOUT_SECONDS)
                 ),
+                source_host=os.environ.get("PETLIBRO_GO2RTC_SOURCE_HOST", DEFAULT_GO2RTC_SOURCE_HOST),
+                source_port=int(
+                    os.environ.get("PETLIBRO_GO2RTC_SOURCE_PORT", DEFAULT_GO2RTC_SOURCE_PORT)
+                ),
+                reconcile_interval_seconds=float(
+                    os.environ.get(
+                        "PETLIBRO_GO2RTC_RECONCILE_INTERVAL_SECONDS",
+                        DEFAULT_GO2RTC_RECONCILE_INTERVAL_SECONDS,
+                    )
+                ),
             ),
             camera_bridge=CameraBridgeSettings(
                 enabled=_env_flag("PETLIBRO_CAMERA_BRIDGE_ENABLED", DEFAULT_CAMERA_BRIDGE_ENABLED),
@@ -252,6 +268,10 @@ class RelayConfig:
             raise ValueError("go2rtc port must be between 1 and 65535")
         if self.go2rtc.timeout_seconds <= 0:
             raise ValueError("go2rtc timeout must be greater than zero")
+        if self.go2rtc.source_port <= 0 or self.go2rtc.source_port > 65535:
+            raise ValueError("go2rtc source port must be between 1 and 65535")
+        if self.go2rtc.reconcile_interval_seconds < MINIMUM_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS:
+            raise ValueError("go2rtc reconciliation interval must be at least 1 second")
         if self.camera_bridge.port <= 0 or self.camera_bridge.port > 65535:
             raise ValueError("camera bridge port must be between 1 and 65535")
         if self.camera_bridge.timeout_seconds <= 0:

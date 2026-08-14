@@ -1,4 +1,4 @@
-"""Unit coverage for the read-only go2rtc camera-status POC."""
+"""Unit coverage for the device-scoped go2rtc camera integration."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from urllib.error import URLError
 
 import pytest
 
-from petlibro_relay.camera import Go2RtcCameraClient, stream_name_for_device
+from petlibro_relay.camera import Go2RtcCameraClient, Go2RtcStreamClient, stream_name_for_device
 from petlibro_relay.config import Go2RtcSettings
 
 DEVICE_A = "TESTDEVICE0000000001"
@@ -74,7 +74,7 @@ def test_unreachable_go2rtc_is_reported_without_leaking_connection_details(
 
 
 def test_absent_stream_reports_reachable_but_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An empty go2rtc stream list is not a usable PLAF203 source."""
+    """An empty go2rtc stream list reports a recoverable registration gap."""
     monkeypatch.setattr(
         "petlibro_relay.camera.urlopen", lambda *_args, **_kwargs: FakeHttpResponse({})
     )
@@ -86,13 +86,13 @@ def test_absent_stream_reports_reachable_but_unconfigured(monkeypatch: pytest.Mo
     assert status.online is False
     assert status.available is False
     assert status.webrtc is False
-    assert status.reason == "plaf203_tutk_unsupported"
+    assert status.reason == "stream_not_registered"
 
 
-def test_existing_online_stream_is_visible_but_not_exposed_as_a_player(
+def test_existing_online_stream_is_exposed_as_a_device_scoped_player(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A manual stream is observable without treating its source as supported."""
+    """A verified PLAF203 stream is safe to expose through the relay WHEP proxy."""
     stream = stream_name_for_device(DEVICE_A)
     monkeypatch.setattr(
         "petlibro_relay.camera.urlopen",
@@ -103,6 +103,35 @@ def test_existing_online_stream_is_visible_but_not_exposed_as_a_player(
 
     assert status.configured is True
     assert status.online is True
-    assert status.available is False
-    assert status.webrtc is False
-    assert status.reason == "plaf203_tutk_unsupported"
+    assert status.available is True
+    assert status.webrtc is True
+    assert status.player_available is True
+    assert status.reason is None
+
+
+def test_stream_registration_uses_only_device_scoped_internal_rtsp_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dynamic registration cannot select an arbitrary go2rtc source URL."""
+    requests: list[object] = []
+    responses = iter(
+        (
+            FakeHttpResponse({}),
+            FakeHttpResponse({}),
+            FakeHttpResponse({stream_name_for_device(DEVICE_A): {}}),
+        )
+    )
+
+    def request(*args: object, **_kwargs: object) -> FakeHttpResponse:
+        requests.append(args[0])
+        return next(responses)
+
+    monkeypatch.setattr("petlibro_relay.camera.urlopen", request)
+    client = Go2RtcStreamClient(
+        Go2RtcSettings(enabled=True, host="go2rtc", source_host="127.0.0.1", source_port=8554)
+    )
+
+    assert client.ensure_stream(DEVICE_A) is True
+    assert len(requests) == 3
+    assert "name=plaf203_TESTDEVICE0000000001" in requests[1].full_url
+    assert "src=rtsp%3A%2F%2F127.0.0.1%3A8554%2Fdevice%2FTESTDEVICE0000000001" in requests[1].full_url

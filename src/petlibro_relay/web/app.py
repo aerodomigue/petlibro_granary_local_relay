@@ -12,8 +12,8 @@ import re
 from collections.abc import Callable, Iterator
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..sound_switch_control import (
@@ -29,6 +29,7 @@ from .static import DASHBOARD_HTML
 
 DEFAULT_LOG_LIMIT = 500
 MAX_PAGE_SIZE = 500
+MAX_CAMERA_WEBRTC_OFFER_BYTES = 256_000
 SSE_WAIT_SECONDS = 15.0
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -268,6 +269,23 @@ def create_app(context: DashboardContext) -> FastAPI:
         if not DEVICE_ID_PATTERN.fullmatch(device_id) or context.device_detail(device_id, 1) is None:
             raise HTTPException(status_code=404, detail="Unknown device")
         return context.camera(device_id)
+
+    @app.post("/api/devices/{device_id}/camera/webrtc", response_class=Response)
+    async def camera_webrtc(device_id: str, request: Request) -> Response:
+        """Proxy one device-scoped WHEP offer without exposing go2rtc to the UI."""
+        if not DEVICE_ID_PATTERN.fullmatch(device_id) or context.device_detail(device_id, 1) is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        content_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
+        if content_type != "application/sdp":
+            raise HTTPException(status_code=415, detail="WebRTC offer must use application/sdp")
+        offer = await request.body()
+        if not offer or len(offer) > MAX_CAMERA_WEBRTC_OFFER_BYTES:
+            raise HTTPException(status_code=400, detail="Invalid WebRTC offer")
+        try:
+            answer = context.exchange_camera_webrtc(device_id, offer)
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail="Camera stream is unavailable") from error
+        return Response(content=answer, status_code=201, media_type="application/sdp")
 
     @app.patch("/api/devices/{device_id}/controls/sound")
     def set_device_sound(device_id: str, request: SoundRequest) -> dict[str, object]:

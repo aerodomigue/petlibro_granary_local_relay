@@ -83,11 +83,19 @@ type Session struct {
 	observer       Observer
 	sendMu         sync.Mutex
 	mediaMu        sync.Mutex
+	frameMu        sync.Mutex
+	frameCallbacks map[uint64]FrameCallback
+	latestKeyframe *VideoFrame
+	nextFrameID    uint64
 	cancelReceive  context.CancelFunc
 	lastMediaEvent time.Time
 	closeOnce      sync.Once
 	closeErr       error
 }
+
+// FrameCallback receives one complete H.264 access unit. Implementations must
+// return quickly; the callback runs on the camera receive goroutine.
+type FrameCallback func(*VideoFrame)
 
 // Close releases the authenticated transport. It is safe to call repeatedly.
 func (session *Session) Close() error {
@@ -111,6 +119,63 @@ func (session *Session) MediaStats() MediaStats {
 		return MediaStats{}
 	}
 	return session.media.Snapshot()
+}
+
+// SubscribeFrames attaches a media sink to this session and returns an
+// idempotent unsubscribe function. A newly attached sink receives the last
+// complete keyframe immediately, so a consumer can decode without waiting for
+// the next IDR interval.
+func (session *Session) SubscribeFrames(callback FrameCallback) func() {
+	if session == nil || callback == nil {
+		return func() {}
+	}
+	session.frameMu.Lock()
+	if session.frameCallbacks == nil {
+		session.frameCallbacks = make(map[uint64]FrameCallback)
+	}
+	session.nextFrameID++
+	callbackID := session.nextFrameID
+	session.frameCallbacks[callbackID] = callback
+	keyframe := cloneVideoFrame(session.latestKeyframe)
+	session.frameMu.Unlock()
+	if keyframe != nil {
+		callback(keyframe)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			session.frameMu.Lock()
+			delete(session.frameCallbacks, callbackID)
+			session.frameMu.Unlock()
+		})
+	}
+}
+
+func (session *Session) publishFrame(frame *VideoFrame) {
+	if frame == nil {
+		return
+	}
+	session.frameMu.Lock()
+	if frame.Keyframe {
+		session.latestKeyframe = cloneVideoFrame(frame)
+	}
+	callbacks := make([]FrameCallback, 0, len(session.frameCallbacks))
+	for _, callback := range session.frameCallbacks {
+		callbacks = append(callbacks, callback)
+	}
+	session.frameMu.Unlock()
+	for _, callback := range callbacks {
+		callback(frame)
+	}
+}
+
+func cloneVideoFrame(frame *VideoFrame) *VideoFrame {
+	if frame == nil {
+		return nil
+	}
+	clone := *frame
+	clone.Data = append([]byte(nil), frame.Data...)
+	return &clone
 }
 
 // Encode serializes a full PLAF203 V3.0.30 Session16 client-start request.
