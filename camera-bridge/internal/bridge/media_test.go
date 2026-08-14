@@ -6,9 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/AlexxIT/go2rtc/pkg/rtsp"
 	"github.com/AlexxIT/go2rtc/pkg/tcp"
 	"github.com/aerodomigue/petlibro-camera-bridge/internal/plaf203"
+	"github.com/pion/rtp"
 )
 
 func TestDeviceIDFromMediaPathOnlyAcceptsOneDeviceScopedRTSPPath(t *testing.T) {
@@ -25,6 +27,10 @@ func TestDeviceIDFromMediaPathOnlyAcceptsOneDeviceScopedRTSPPath(t *testing.T) {
 
 func TestMediaPublisherConvertsVerifiedAnnexBFrameToAVCCWithoutReencoding(t *testing.T) {
 	publisher := newMediaPublisher()
+	packets := make(chan *rtp.Packet, 1)
+	publisher.track.AppendChild(&core.Node{Input: func(packet *rtp.Packet) {
+		packets <- packet
+	}})
 	frame := &plaf203.VideoFrame{
 		Codec:    "h264",
 		Keyframe: true,
@@ -38,6 +44,14 @@ func TestMediaPublisherConvertsVerifiedAnnexBFrameToAVCCWithoutReencoding(t *tes
 	const expectedAVCCBytes = 8
 	if publisher.track.Bytes != expectedAVCCBytes {
 		t.Fatalf("bytes=%d want=%d", publisher.track.Bytes, expectedAVCCBytes)
+	}
+	packet := <-packets
+	if packet.Version != 0 {
+		t.Fatalf("packet version=%d want=0 for go2rtc AVCC packetization", packet.Version)
+	}
+	wantPayload := []byte{0, 0, 0, 4, 0x67, 0x42, 0, 0x29}
+	if string(packet.Payload) != string(wantPayload) {
+		t.Fatalf("packet payload=%x want=%x", packet.Payload, wantPayload)
 	}
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()

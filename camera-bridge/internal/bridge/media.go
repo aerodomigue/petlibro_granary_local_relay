@@ -169,7 +169,9 @@ func (publisher *mediaPublisher) publish(frame *plaf203.VideoFrame) {
 	timestamp := uint32(time.Since(publisher.startedAt) * mediaClockRate / mediaTimestampDivisor)
 	publisher.mu.Unlock()
 	publisher.track.WriteRTP(&rtp.Packet{
-		Header:  rtp.Header{Version: 2, Marker: true, Timestamp: timestamp},
+		// Version zero marks AVCC for go2rtc's internal H264 packetizer. It
+		// converts this payload into standards-compliant RTP before WebRTC.
+		Header:  rtp.Header{Marker: true, Timestamp: timestamp},
 		Payload: avcc,
 	})
 }
