@@ -120,11 +120,11 @@ the observed MQTT contract is cloud-derived and dynamic. Whether media itself
 uses direct LAN P2P (**B**) or a TUTK relay (**C**) is not determined from
 these sources. Direct LAN RTSP is not documented. The direct-LAN capture
 confirms H.264 video framing after bootstrap. Official traffic also confirms
-AAC-LC ADTS audio. go2rtc keeps the bridge RTSP producer for H.264 and uses
-a second, audio-only local RTSP consumer to transcode AAC to Opus for browser
-WebRTC compatibility. Both local readers share the bridge's one feeder TUTK
-session. The confirmed `AUDIOSTART` / `AUDIOSTOP` controls carry types
-`0x0300` / `0x0301` and eight zero-valued ctrl-data bytes.
+AAC-LC ADTS audio handling is implemented in camera-bridge, including the
+confirmed `AUDIOSTART` / `AUDIOSTOP` controls (`0x0300` / `0x0301`, each with
+eight zero-valued ctrl-data bytes). AAC-to-Opus is deliberately not registered
+with go2rtc until live AAC is observed end-to-end: an unavailable audio source
+must never block the verified direct H.264 WebRTC path.
 
 For offline analysis only, the camera bridge includes a PCAP summary tool. It
 prints Session16 sequence/opcode details, bootstrap control payload prefixes,

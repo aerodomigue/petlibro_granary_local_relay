@@ -110,7 +110,7 @@ def test_existing_online_stream_is_exposed_as_a_device_scoped_player(
     assert status.reason is None
 
 
-def test_stream_registration_uses_shared_rtsp_source_with_internal_audio_transcode(
+def test_stream_registration_uses_only_device_scoped_direct_rtsp_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Dynamic registration cannot select an arbitrary go2rtc source URL."""
@@ -136,16 +136,13 @@ def test_stream_registration_uses_shared_rtsp_source_with_internal_audio_transco
     assert len(requests) == 3
     assert "name=plaf203_TESTDEVICE0000000001" in requests[1].full_url
     assert "src=rtsp%3A%2F%2F127.0.0.1%3A8554%2Fdevice%2FTESTDEVICE0000000001" in requests[1].full_url
-    assert (
-        "src=ffmpeg%3Artsp%3A%2F%2F127.0.0.1%3A8554%2Fdevice%2FTESTDEVICE0000000001"
-        "%23audio%3Dopus"
-    ) in requests[1].full_url
+    assert "audio%3Dopus" not in requests[1].full_url
 
 
-def test_existing_stream_is_patched_once_to_add_internal_opus_audio(
+def test_existing_stream_is_recreated_once_with_direct_video_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pre-audio stream is migrated without repeatedly resetting the sources."""
+    """A pre-audio stream is migrated once without repeated resets."""
     stream = stream_name_for_device(DEVICE_A)
     requests: list[Request] = []
     responses = iter(
@@ -170,7 +167,4 @@ def test_existing_stream_is_patched_once_to_add_internal_opus_audio(
     assert [request.get_method() for request in requests] == ["GET", "DELETE", "PUT", "GET", "GET"]
     assert requests[1].full_url.endswith("?src=plaf203_TESTDEVICE0000000001")
     assert "src=rtsp%3A%2F%2F127.0.0.1%3A8554%2Fdevice%2FTESTDEVICE0000000001" in requests[2].full_url
-    assert (
-        "src=ffmpeg%3Artsp%3A%2F%2F127.0.0.1%3A8554%2Fdevice%2FTESTDEVICE0000000001"
-        "%23audio%3Dopus"
-    ) in requests[2].full_url
+    assert "audio%3Dopus" not in requests[2].full_url

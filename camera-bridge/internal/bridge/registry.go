@@ -319,7 +319,9 @@ func (r *Registry) addMediaConsumer(deviceID string, consumer *rtsp.Conn) (func(
 	record.device.UpdatedAt = time.Now().UTC()
 	r.devices[deviceID] = record
 	session := record.session
+	consumerCount := record.device.MediaConsumers
 	r.mu.Unlock()
+	log.Printf("CAMERA VIDEO PRODUCER READY device=%s media_consumers=%d", deviceID, consumerCount)
 	if session != nil {
 		if err := session.StartAudio(); err != nil {
 			log.Printf("CAMERA AUDIO START FAILED device=%s error=%v", deviceID, err)

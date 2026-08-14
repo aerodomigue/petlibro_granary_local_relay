@@ -493,9 +493,7 @@ class Go2RtcStreamClient:
                 return True
             if stream_exists:
                 self._delete_stream(stream_name)
-            query_fields = (("name", stream_name),) + tuple(
-                ("src", source) for source in self._source_urls(device_id)
-            )
+            query_fields = (("name", stream_name), ("src", self._source_url(device_id)))
             query = urlencode(query_fields)
             request = Request(f"{self._base_url()}{GO2RTC_STREAMS_PATH}?{query}", method="PUT")
             try:
@@ -506,6 +504,7 @@ class Go2RtcStreamClient:
             stream_exists = self._stream_exists(stream_name)
             if stream_exists:
                 self._ensured_streams.add(stream_name)
+                _LOGGER.info("GO2RTC VIDEO PRODUCER READY device=%s", device_id)
             else:
                 self._ensured_streams.discard(stream_name)
             return stream_exists
@@ -525,7 +524,7 @@ class Go2RtcStreamClient:
         try:
             with urlopen(request, timeout=self._settings.timeout_seconds * 10) as response:  # noqa: S310
                 answer = cast(bytes, response.read())
-            _LOGGER.info("CAMERA PLAYER CONNECTED device=%s", device_id)
+            _LOGGER.info("WEBRTC CONNECTED device=%s", device_id)
             return answer
         except (HTTPError, URLError, OSError, TimeoutError) as error:
             raise RuntimeError("go2rtc WebRTC exchange failed") from error
@@ -554,22 +553,17 @@ class Go2RtcStreamClient:
         except (HTTPError, URLError, OSError, TimeoutError):
             pass
 
-    def _source_urls(self, device_id: str) -> tuple[str, str]:
-        """Return the shared RTSP source and its audio-only Opus companion.
+    def _source_url(self, device_id: str) -> str:
+        """Return the validated direct H.264 RTSP source.
 
-        The first source carries H.264. The second is go2rtc's documented
-        audio-only FFmpeg companion. Both are local RTSP clients of
-        camera-bridge and therefore share its one feeder TUTK session.
+        The optional AAC-to-Opus producer is intentionally not registered
+        until live AAC has been observed end-to-end. A source that blocks
+        waiting for audio must never prevent the established video WHEP path
+        from negotiating.
         """
-        rtsp_source = (
+        return (
             f"rtsp://{self._settings.source_host}:{self._settings.source_port}/device/{device_id}"
         )
-        # Browser WebRTC does not negotiate AAC. Let the local go2rtc FFmpeg
-        # companion transcode only PLAF203 AAC-LC to Opus. H.264 remains on
-        # the direct source, so no video transcoding changes the validated
-        # pipeline. Camera-bridge fans both local readers into one feeder
-        # TUTK session.
-        return rtsp_source, f"ffmpeg:{rtsp_source}#audio=opus"
 
     def _base_url(self) -> str:
         return f"http://{self._settings.host}:{self._settings.port}"
