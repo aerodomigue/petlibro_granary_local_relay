@@ -6,7 +6,12 @@ import pytest
 
 from conftest import RelayConfigFactory
 
-from petlibro_relay.config import RelayConfig, UNSAFE_UPSTREAM_CONFIGURATION_MESSAGE
+from petlibro_relay.config import (
+    MINIMUM_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS,
+    CameraBridgeSettings,
+    RelayConfig,
+    UNSAFE_UPSTREAM_CONFIGURATION_MESSAGE,
+)
 
 
 def test_upstream_service_payload_diagnostic_defaults_to_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -21,6 +26,27 @@ def test_device_start_event_diagnostic_defaults_to_disabled(monkeypatch: pytest.
     monkeypatch.delenv("PETLIBRO_LOG_DEVICE_START_EVENT", raising=False)
 
     assert RelayConfig.from_env().log_device_start_event is False
+
+
+def test_camera_bridge_reconcile_interval_is_bounded_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A too-small configured reconciliation cadence cannot create a busy loop."""
+    monkeypatch.setenv("PETLIBRO_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS", "0.1")
+
+    assert RelayConfig.from_env().camera_bridge.reconcile_interval_seconds == (
+        MINIMUM_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS
+    )
+
+
+def test_invalid_direct_camera_bridge_reconcile_interval_fails_startup(
+    make_config: RelayConfigFactory,
+) -> None:
+    """Programmatic configurations preserve the same minimum interval guard."""
+    config = make_config(camera_bridge=CameraBridgeSettings(enabled=True, reconcile_interval_seconds=0.5))
+
+    with pytest.raises(ValueError, match="reconciliation interval"):
+        config.validate_startup_configuration()
 
 
 @pytest.mark.parametrize("upstream_host", ["127.0.0.1", "localhost", "::1"])

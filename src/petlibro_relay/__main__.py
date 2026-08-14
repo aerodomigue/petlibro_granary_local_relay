@@ -8,7 +8,7 @@ import threading
 from types import FrameType
 
 from .config import RelayConfig
-from .camera import CameraBridgeClient, CameraBridgeRegistrar, CameraStatusService
+from .camera import CameraBridgeClient, CameraBridgeReconciler, CameraBridgeRegistrar, CameraStatusService
 from .credential_capture_proxy import CredentialCaptureProxy, DeviceSessionListener
 from .device_manager import DeviceManager
 from .device_presence import DevicePresenceTracker
@@ -139,11 +139,13 @@ def main() -> None:
 
     state_cache = StateCache(config.state_cache_path)
     shadow = StateShadow(config.state_shadow_db_path)
-    camera_registrar = CameraBridgeRegistrar(
-        config.camera_bridge, CameraBridgeClient(config.camera_bridge)
-    )
-    camera_registrar.reconcile(
-        (entry.device_id, entry.uid, entry.feeder_ip) for entry in shadow.get_camera_uids()
+    camera_bridge_client = CameraBridgeClient(config.camera_bridge)
+    camera_registrar = CameraBridgeRegistrar(config.camera_bridge, camera_bridge_client)
+    camera_reconciler = CameraBridgeReconciler(
+        config.camera_bridge,
+        camera_bridge_client,
+        camera_registrar,
+        lambda: ((entry.device_id, entry.uid, entry.feeder_ip) for entry in shadow.get_camera_uids()),
     )
     queue = MessageQueue(config.queue_db_path, config.max_queue_size)
     telemetry = RelayTelemetry()
@@ -213,6 +215,7 @@ def main() -> None:
 
     bridge_holder.bridge = bridge
     try:
+        camera_reconciler.start()
         # Every already-enrolled device comes up here; anything learned later
         # is started by DeviceEnroller as soon as it connects.
         devices.start()
@@ -230,6 +233,7 @@ def main() -> None:
             dashboard_server.stop()
         queue.close()
         registry.close()
+        camera_reconciler.close()
         camera_registrar.close()
         shadow.close()
         _LOGGER.info("Relay stopped")

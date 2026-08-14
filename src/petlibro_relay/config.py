@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -42,6 +43,8 @@ DEFAULT_CAMERA_BRIDGE_ENABLED = False
 DEFAULT_CAMERA_BRIDGE_HOST = "camera-bridge"
 DEFAULT_CAMERA_BRIDGE_PORT = 8081
 DEFAULT_CAMERA_BRIDGE_TIMEOUT_SECONDS = 1.0
+DEFAULT_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS = 5.0
+MINIMUM_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS = 1.0
 
 _LOOPBACK_UPSTREAM_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "0.0.0.0", "::"})
 UNSAFE_UPSTREAM_CONFIGURATION_MESSAGE = (
@@ -68,6 +71,7 @@ class CameraBridgeSettings:
     host: str = DEFAULT_CAMERA_BRIDGE_HOST
     port: int = DEFAULT_CAMERA_BRIDGE_PORT
     timeout_seconds: float = DEFAULT_CAMERA_BRIDGE_TIMEOUT_SECONDS
+    reconcile_interval_seconds: float = DEFAULT_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +205,7 @@ class RelayConfig:
                         DEFAULT_CAMERA_BRIDGE_TIMEOUT_SECONDS,
                     )
                 ),
+                reconcile_interval_seconds=_camera_bridge_reconcile_interval_from_env(),
             ),
         )
 
@@ -248,6 +253,25 @@ class RelayConfig:
             raise ValueError("camera bridge port must be between 1 and 65535")
         if self.camera_bridge.timeout_seconds <= 0:
             raise ValueError("camera bridge timeout must be greater than zero")
+        if (
+            not math.isfinite(self.camera_bridge.reconcile_interval_seconds)
+            or self.camera_bridge.reconcile_interval_seconds < MINIMUM_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS
+        ):
+            raise ValueError(
+                "camera bridge reconciliation interval must be at least "
+                f"{MINIMUM_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS} second"
+            )
+
+
+def _camera_bridge_reconcile_interval_from_env() -> float:
+    """Load the bounded camera-bridge reconciliation cadence."""
+    configured = float(
+        os.environ.get(
+            "PETLIBRO_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS",
+            DEFAULT_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS,
+        )
+    )
+    return max(MINIMUM_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS, configured)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:

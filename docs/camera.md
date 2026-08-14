@@ -144,6 +144,7 @@ PETLIBRO_CAMERA_BRIDGE_ENABLED=true
 PETLIBRO_CAMERA_BRIDGE_HOST=camera-bridge
 PETLIBRO_CAMERA_BRIDGE_PORT=8081
 PETLIBRO_CAMERA_BRIDGE_TIMEOUT_SECONDS=1
+PETLIBRO_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS=5
 PETLIBRO_CAMERA_DISCOVERY_BROADCAST_FALLBACK=true
 ```
 
@@ -152,6 +153,10 @@ is used only when no feeder IPv4 is known, or after a unicast discovery timeout
 when this fallback remains enabled. A successful unicast sends no broadcast.
 An IP update is an idempotent bridge registration and does not interrupt an
 active camera session; a later explicit connection uses the updated address.
+The relay also reconciles its persisted camera mappings against the bridge
+registry every five seconds by default. This is optional with the bridge,
+uses no camera UID from the bridge API, and makes a restarted sidecar converge
+without requiring the feeder to reconnect.
 
 The API returns only safe state: `available`, `configured`, `online`,
 `stream`, `webrtc`, `go2rtc_reachable`, `bridge_reachable`,
