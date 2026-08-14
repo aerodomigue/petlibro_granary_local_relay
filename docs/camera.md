@@ -54,9 +54,9 @@ confirmed in the local capture:
 5. The bridge enters `bootstrapping` and repeats the captured client-start
    pair, sends the observed Session16 heartbeat, `SET_STREAM_CTRL` (`0x0024`,
    HD payload), and `GET_FORMAT` (`0x032A`). It sends the observed
-   acknowledgement shape immediately after `GET_FORMAT`, then accepts only the
-   two bounded control replies on channels `0x1000`/`0x7000` before sending
-   `IPCAM_START` (`0x01ff`).
+   acknowledgement shape immediately after `GET_FORMAT`, then waits for the
+   matching `SET_STREAM_CTRL` reply (`0x0025`) on `0x1000` and `GET_FORMAT`
+   reply (`0x032b`) on `0x7000` before sending `IPCAM_START` (`0x01ff`).
 6. The bridge enters `streaming` **only** after a valid feeder Session16 media
    fragment reassembles into H.264 with an Annex-B NAL start code. The
    V3.0.30 capture confirms SPS/PPS/IDR and non-IDR video; it does not confirm

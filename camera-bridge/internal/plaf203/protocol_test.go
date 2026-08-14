@@ -268,9 +268,13 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 		copy(sessionID[:], decoded[20:28])
 		switch controlType {
 		case controlGetFormat:
-			transport.addResponse(tutk.TransCodePartial(nil, testControlReply(sessionID, controlChannelStream, 0)), address)
-			transport.addResponse(tutk.TransCodePartial(nil, testControlReply(sessionID, controlChannelSystem, 1)), address)
+			transport.addResponse(tutk.TransCodePartial(nil, testControlReply(sessionID, controlChannelStream, 0, 0x0040)), address)
+			transport.addResponse(tutk.TransCodePartial(nil, testControlReply(sessionID, controlChannelStream, 0, controlSetStreamReply)), address)
+			transport.addResponse(tutk.TransCodePartial(nil, testControlReply(sessionID, controlChannelSystem, 1, controlGetFormatReply)), address)
 		case controlStartVideo:
+			if received := transport.ReceiveCount(); received != 5 {
+				t.Fatalf("IPCAM_START sent after %d received packets, want discovery, LOGIN, and all three control replies", received)
+			}
 			transport.addResponse(tutk.TransCodePartial(nil, testVideoFragment(sessionID, 0x4000, 2, 0, false, 0, []byte{0, 0, 0, 1, 0x67, 1})), address)
 			transport.addResponse(tutk.TransCodePartial(nil, testVideoFragment(sessionID, 0x4001, 2, 1, true, 0, append([]byte{0, 0, 0, 1, 0x65, 2}, testMediaTrailer(42)...))), address)
 		}
@@ -384,9 +388,10 @@ func assertControlPacket(t *testing.T, packet []byte, wantChannel uint16, wantTy
 	}
 }
 
-func testControlReply(sessionID [8]byte, channel uint16, subsequence uint16) []byte {
-	body := encodeControlData(0, channel, 0, make([]byte, 8))
+func testControlReply(sessionID [8]byte, channel uint16, subsequence uint16, controlType uint32) []byte {
+	body := encodeControlData(0, channel, 0, make([]byte, 4))
 	binary.LittleEndian.PutUint16(body[18:20], subsequence)
+	binary.LittleEndian.PutUint32(body[controlInnerLength:], controlType)
 	return encodeDeviceSessionPacket(sessionID, body)
 }
 
@@ -508,6 +513,7 @@ type fakeTransport struct {
 	responses  []fakeDatagram
 	onSend     func([]byte, *net.UDPAddr)
 	closeCalls int
+	receives   int
 }
 
 func (transport *fakeTransport) SendTo(packet []byte, address *net.UDPAddr) error {
@@ -527,12 +533,19 @@ func (transport *fakeTransport) Receive(ctx context.Context) ([]byte, *net.UDPAd
 	if len(transport.responses) > 0 {
 		response := transport.responses[0]
 		transport.responses = transport.responses[1:]
+		transport.receives++
 		transport.mu.Unlock()
 		return response.packet, response.address, nil
 	}
 	transport.mu.Unlock()
 	<-ctx.Done()
 	return nil, nil, ctx.Err()
+}
+
+func (transport *fakeTransport) ReceiveCount() int {
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	return transport.receives
 }
 
 func (transport *fakeTransport) LocalAddress() *net.UDPAddr {

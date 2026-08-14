@@ -16,7 +16,7 @@ func TestBootstrapDiagnosticsClassifiesAndDeduplicatesReceiveEvents(t *testing.T
 		events = append(events, event)
 	})
 
-	packet := tutk.TransCodePartial(nil, testControlReply(sessionID, controlChannelSystem, 1))
+	packet := tutk.TransCodePartial(nil, testControlReply(sessionID, controlChannelSystem, 1, controlGetFormatReply))
 	for range 2 {
 		decoded, details := diagnostics.observe(packet, peer)
 		if details.classification != "control_reply" || len(decoded) != len(packet) {
@@ -44,7 +44,7 @@ func TestBootstrapDiagnosticsClassifiesAndDeduplicatesReceiveEvents(t *testing.T
 func TestInspectBootstrapPacketExplainsSessionMismatch(t *testing.T) {
 	expectedSessionID := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
 	wrongSessionID := [8]byte{8, 7, 6, 5, 4, 3, 2, 1}
-	packet := testControlReply(wrongSessionID, controlChannelStream, 0)
+	packet := testControlReply(wrongSessionID, controlChannelStream, 0, controlSetStreamReply)
 	details := inspectBootstrapPacket(packet, &net.UDPAddr{IP: net.ParseIP("192.0.2.20"), Port: 41135}, expectedSessionID)
 	if details.classification != "session_id_mismatch" || details.opcode != deviceSessionOpcode || details.sequence != 0 {
 		t.Fatalf("details=%+v", details)

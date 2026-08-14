@@ -93,6 +93,11 @@ func (diagnostics *bootstrapDiagnostics) ignore(details bootstrapPacketDetails, 
 	diagnostics.emitOnce("ignore/"+details.typeKey()+"/"+reason, details.event("ignore", reason))
 }
 
+// media records the first observed media fragment shape without retaining its payload.
+func (diagnostics *bootstrapDiagnostics) media(details bootstrapPacketDetails) {
+	diagnostics.emitOnce("media/"+details.typeKey(), details.event("media_rx", ""))
+}
+
 // emitTimeout reports aggregate activity without exposing payload contents.
 func (diagnostics *bootstrapDiagnostics) emitTimeout() {
 	emit(diagnostics.observer, Event{

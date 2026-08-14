@@ -17,8 +17,11 @@ const (
 	controlChannelStream     = 0x1000
 	controlChannelSystem     = 0x7000
 	controlSetStream         = 0x0024
+	controlSetStreamReply    = controlSetStream + 1
 	controlGetFormat         = 0x032A
+	controlGetFormatReply    = controlGetFormat + 1
 	controlStartVideo        = 0x01FF
+	controlStartVideoReply   = controlStartVideo + 1
 	bootstrapAckMarker       = 0x09
 	bootstrapHeartbeatMarker = 0x0A
 	formatControlIndex       = 1
@@ -55,6 +58,12 @@ func (session *Session) bootstrap(ctx context.Context) (_ *VideoFrame, returnErr
 	if err := session.waitForControlReplies(ctx, diagnostics); err != nil {
 		return nil, err
 	}
+	emit(session.observer, Event{
+		State:       StateBootstrapping,
+		Address:     cloneUDPAddress(session.Address),
+		Step:        "stream_start_tx",
+		ControlType: controlStartVideo,
+	})
 	if err := session.sendControl(controlChannelSystem, 2, controlStartVideo, nil); err != nil {
 		return nil, err
 	}
@@ -93,9 +102,11 @@ func (session *Session) sendControl(channel uint16, index uint32, controlType ui
 func (session *Session) waitForControlReplies(ctx context.Context, diagnostics *bootstrapDiagnostics) error {
 	replyContext, cancel := context.WithTimeout(ctx, bootstrapReplyTimeout)
 	defer cancel()
-	const requiredReplies = 2
-	replies := 0
-	for replies < requiredReplies {
+	expectedReplies := map[controlReplyKey]struct{}{
+		{channel: controlChannelStream, controlType: controlSetStreamReply}: {},
+		{channel: controlChannelSystem, controlType: controlGetFormatReply}: {},
+	}
+	for len(expectedReplies) > 0 {
 		packet, peer, err := session.transport.Receive(replyContext)
 		if err != nil {
 			return fmt.Errorf("receive PLAF203 bootstrap control reply: %w", err)
@@ -106,11 +117,17 @@ func (session *Session) waitForControlReplies(ctx context.Context, diagnostics *
 			diagnostics.ignore(details, details.classification)
 			continue
 		}
-		if !isControlReply(inner) {
+		reply, valid := parseControlReply(inner)
+		if !valid {
 			diagnostics.ignore(details, "not_control_reply")
 			continue
 		}
-		replies++
+		key := controlReplyKey{channel: reply.channel, controlType: reply.controlType}
+		if _, expected := expectedReplies[key]; !expected {
+			diagnostics.ignore(details, "unexpected_control_reply")
+			continue
+		}
+		delete(expectedReplies, key)
 	}
 	return nil
 }
@@ -122,6 +139,17 @@ func (session *Session) waitForVideo(ctx context.Context, diagnostics *bootstrap
 			return nil, fmt.Errorf("receive PLAF203 bootstrap media: %w", err)
 		}
 		decoded, details := diagnostics.observe(packet, peer)
+		if inner, decodeErr := decodeDeviceSession(decoded, session.ID); decodeErr == nil {
+			if reply, valid := parseControlReply(inner); valid && reply.channel == controlChannelSystem && reply.controlType == controlStartVideoReply {
+				emit(session.observer, Event{
+					State:       StateBootstrapping,
+					Address:     cloneUDPAddress(peer),
+					Step:        "stream_start_ack",
+					ControlType: reply.controlType,
+				})
+				continue
+			}
+		}
 		frame, parseErr := session.media.HandlePacket(decoded, session.ID, session.clock())
 		if parseErr != nil {
 			diagnostics.ignore(details, "media_parse_error")
@@ -129,12 +157,14 @@ func (session *Session) waitForVideo(ctx context.Context, diagnostics *bootstrap
 		}
 		if frame == nil {
 			if details.classification == "media_fragment" {
+				diagnostics.media(details)
 				diagnostics.ignore(details, "media_fragment_incomplete")
 			} else {
 				diagnostics.ignore(details, details.classification)
 			}
 			continue
 		}
+		diagnostics.media(details)
 		return frame, nil
 	}
 }
@@ -222,10 +252,21 @@ func encodeBootstrapAck(counter uint16, subsequence uint16, tick uint16) []byte 
 	return body
 }
 
-func isControlReply(inner []byte) bool {
+type controlReplyKey struct {
+	channel     uint16
+	controlType uint32
+}
+
+func parseControlReply(inner []byte) (controlReplyKey, bool) {
 	if len(inner) < controlInnerLength || inner[0] != 0x0C || inner[2] != loginCommandVersion {
-		return false
+		return controlReplyKey{}, false
 	}
 	channel := binary.LittleEndian.Uint16(inner[16:18])
-	return channel == controlChannelStream || channel == controlChannelSystem
+	if channel != controlChannelStream && channel != controlChannelSystem {
+		return controlReplyKey{}, false
+	}
+	if len(inner) < controlInnerLength+4 {
+		return controlReplyKey{}, false
+	}
+	return controlReplyKey{channel: channel, controlType: binary.LittleEndian.Uint32(inner[controlInnerLength:])}, true
 }
