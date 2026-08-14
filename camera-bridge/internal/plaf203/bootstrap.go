@@ -27,7 +27,9 @@ const (
 	controlStartAudio         = 0x0300
 	controlStopAudio          = 0x0301
 	streamStartArgumentSize   = 8
-	audioControlArgumentSize  = 4
+	// Official PLAF203 captures show eight zero-valued ctrl_data bytes for
+	// both AUDIOSTART (0x0300) and AUDIOSTOP (0x0301).
+	audioControlArgumentSize  = 8
 	keepaliveResponseOpcode   = 0x0428
 	keepaliveRequestOpcode    = 0x0427
 	keepaliveResponseSubtype  = 0x0012

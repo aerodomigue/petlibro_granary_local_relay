@@ -123,7 +123,8 @@ confirms H.264 video framing after bootstrap. Official traffic also confirms
 AAC-LC ADTS audio. go2rtc keeps the bridge RTSP producer for H.264 and uses
 a second, audio-only local RTSP consumer to transcode AAC to Opus for browser
 WebRTC compatibility. Both local readers share the bridge's one feeder TUTK
-session.
+session. The confirmed `AUDIOSTART` / `AUDIOSTOP` controls carry types
+`0x0300` / `0x0301` and eight zero-valued ctrl-data bytes.
 
 For offline analysis only, the camera bridge includes a PCAP summary tool. It
 prints Session16 sequence/opcode details, bootstrap control payload prefixes,

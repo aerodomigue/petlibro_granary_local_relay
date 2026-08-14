@@ -169,6 +169,9 @@ func TestSessionAudioControlsUseConfirmedSystemChannel(t *testing.T) {
 	stop := tutk.ReverseTransCodePartial(nil, transport.sent[1])
 	assertControlPacket(t, start, controlChannelSystem, controlStartAudio, make([]byte, audioControlArgumentSize))
 	assertControlPacket(t, stop, controlChannelSystem, controlStopAudio, make([]byte, audioControlArgumentSize))
+	if len(start) != 76 || len(stop) != 76 {
+		t.Fatalf("audio control packet sizes start=%d stop=%d want=76", len(start), len(stop))
+	}
 }
 
 func TestMediaReceiversKeepDeviceSessionsIsolated(t *testing.T) {
