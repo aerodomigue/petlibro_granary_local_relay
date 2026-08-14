@@ -121,6 +121,56 @@ func TestMediaReceiverObservesUnknownMediaWithoutInventingAnAudioCodec(t *testin
 	}
 }
 
+func TestMediaReceiverAssemblesConfirmedPLAF203AACADTS(t *testing.T) {
+	sessionID := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+	receiver := NewMediaReceiver()
+	packet := testVideoFragment(sessionID, 0xC294, 1, 16, true, 2_802, append(testAACADTSFrame(), testMediaTrailer(31_076_264)...))
+	inner := packet[sessionHeaderLength:]
+	inner[16] = aacChannel
+	inner[17] = 0x01
+	frame, err := receiver.HandleAudioPacket(packet, sessionID, time.Unix(1_786_544_102, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil || frame.Codec != aacCodec || frame.SampleRate != aacSampleRate || frame.Channels != aacChannelCount || frame.Samples != aacAccessUnitSamples || frame.Timestamp != 31_076_264 {
+		t.Fatalf("audio frame=%+v", frame)
+	}
+	if len(frame.Data) != 10 || frame.Data[0] != 0xFF || frame.Data[1] != 0xF1 {
+		t.Fatalf("unexpected ADTS payload=%x", frame.Data)
+	}
+	stats := receiver.Snapshot()
+	if stats.AudioCodec != aacCodec || stats.AudioFramesReceived != 1 || stats.AudioBytesReceived != uint64(len(frame.Data)) {
+		t.Fatalf("audio stats=%+v", stats)
+	}
+}
+
+func TestSessionAudioControlsUseConfirmedSystemChannel(t *testing.T) {
+	transport := &fakeTransport{}
+	session := &Session{
+		ID:        [8]byte{1, 2, 3, 4, 5, 6, 7, 8},
+		Address:   &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 41135},
+		transport: transport,
+		clock:     time.Now,
+		session25: newSession25State(),
+	}
+	if err := session.StartAudio(); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.StartAudio(); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.StopAudio(); err != nil {
+		t.Fatal(err)
+	}
+	if len(transport.sent) != 2 {
+		t.Fatalf("controls sent=%d want=2", len(transport.sent))
+	}
+	start := tutk.ReverseTransCodePartial(nil, transport.sent[0])
+	stop := tutk.ReverseTransCodePartial(nil, transport.sent[1])
+	assertControlPacket(t, start, controlChannelSystem, controlStartAudio, make([]byte, audioControlArgumentSize))
+	assertControlPacket(t, stop, controlChannelSystem, controlStopAudio, make([]byte, audioControlArgumentSize))
+}
+
 func TestMediaReceiversKeepDeviceSessionsIsolated(t *testing.T) {
 	firstID := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
 	secondID := [8]byte{8, 7, 6, 5, 4, 3, 2, 1}
@@ -167,6 +217,32 @@ func TestSessionFansOutEveryFrameAndReplaysLatestKeyframe(t *testing.T) {
 	if len(firstFrames) != 2 || len(lateFrames) != 2 {
 		t.Fatalf("multi-consumer fan-out first=%d late=%d", len(firstFrames), len(lateFrames))
 	}
+}
+
+func TestSessionFansOutAudioWithoutBufferedReplay(t *testing.T) {
+	session := &Session{}
+	frames := make([]*AudioFrame, 0)
+	unsubscribe := session.SubscribeAudio(func(frame *AudioFrame) {
+		frames = append(frames, frame)
+	})
+	defer unsubscribe()
+	session.publishAudio(&AudioFrame{Codec: aacCodec, Data: testAACADTSFrame()})
+	if len(frames) != 1 || frames[0].Codec != aacCodec {
+		t.Fatalf("audio fan-out=%+v", frames)
+	}
+	lateFrames := make([]*AudioFrame, 0)
+	lateUnsubscribe := session.SubscribeAudio(func(frame *AudioFrame) {
+		lateFrames = append(lateFrames, frame)
+	})
+	defer lateUnsubscribe()
+	if len(lateFrames) != 0 {
+		t.Fatalf("audio must not replay a buffered frame=%+v", lateFrames)
+	}
+}
+
+func testAACADTSFrame() []byte {
+	frame := []byte{0xFF, 0xF1, 0x50, 0x40, 0x01, 0x5F, 0xFC, 0x11, 0x22, 0x33}
+	return frame
 }
 
 func TestStreamingReceiverAcknowledgesCountersAndForwardsFrames(t *testing.T) {

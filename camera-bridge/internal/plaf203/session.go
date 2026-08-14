@@ -310,26 +310,37 @@ func (session *Session) startMediaReceiver() {
 			if parseErr != nil {
 				continue
 			}
-			if frame == nil {
-				if observation, observationErr := session.media.ObserveNonVideoPacket(decoded, session.ID); observationErr == nil && observation != nil && session.noteUnknownMediaEvent(session.clock()) {
-					emit(session.observer, Event{
-						State:          StateStreaming,
-						Address:        session.Address,
-						Step:           "media_unknown",
-						PacketLength:   len(packet),
-						BodyLength:     observation.PayloadLength,
-						SessionChannel: observation.ChannelID,
-						FrameNumber:    observation.FrameNumber,
-					})
+			if frame != nil {
+				session.noteSession25Media(decoded)
+				session.publishFrame(frame)
+				if session.noteMediaEvent(session.clock()) {
+					emit(session.observer, Event{State: StateStreaming, Address: session.Address, Step: "media_stats", Frame: frame})
 				}
 				continue
 			}
-			session.noteSession25Media(decoded)
-			session.publishFrame(frame)
-			if !session.noteMediaEvent(session.clock()) {
+			audioFrame, audioErr := session.media.HandleAudioPacket(decoded, session.ID, session.clock())
+			if audioErr != nil {
 				continue
 			}
-			emit(session.observer, Event{State: StateStreaming, Address: session.Address, Step: "media_stats", Frame: frame})
+			if audioFrame != nil {
+				session.noteSession25Media(decoded)
+				session.publishAudio(audioFrame)
+				if session.noteAudioEvent(session.clock()) {
+					emit(session.observer, Event{State: StateStreaming, Address: session.Address, Step: "audio_media", SessionChannel: 0x0103, BodyLength: len(audioFrame.Data)})
+				}
+				continue
+			}
+			if observation, observationErr := session.media.ObserveNonVideoPacket(decoded, session.ID); observationErr == nil && observation != nil && session.noteUnknownMediaEvent(session.clock()) {
+				emit(session.observer, Event{
+					State:          StateStreaming,
+					Address:        session.Address,
+					Step:           "media_unknown",
+					PacketLength:   len(packet),
+					BodyLength:     observation.PayloadLength,
+					SessionChannel: observation.ChannelID,
+					FrameNumber:    observation.FrameNumber,
+				})
+			}
 		}
 	}()
 }
@@ -351,6 +362,16 @@ func (session *Session) noteMediaEvent(now time.Time) bool {
 		return false
 	}
 	session.lastMediaEvent = now
+	return true
+}
+
+func (session *Session) noteAudioEvent(now time.Time) bool {
+	session.mediaMu.Lock()
+	defer session.mediaMu.Unlock()
+	if now.Sub(session.lastAudioEvent) < mediaStatsLogInterval {
+		return false
+	}
+	session.lastAudioEvent = now
 	return true
 }
 

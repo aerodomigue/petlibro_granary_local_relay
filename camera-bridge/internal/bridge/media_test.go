@@ -28,7 +28,7 @@ func TestDeviceIDFromMediaPathOnlyAcceptsOneDeviceScopedRTSPPath(t *testing.T) {
 func TestMediaPublisherConvertsVerifiedAnnexBFrameToAVCCWithoutReencoding(t *testing.T) {
 	publisher := newMediaPublisher()
 	packets := make(chan *rtp.Packet, 1)
-	publisher.track.AppendChild(&core.Node{Input: func(packet *rtp.Packet) {
+	publisher.videoTrack.AppendChild(&core.Node{Input: func(packet *rtp.Packet) {
 		packets <- packet
 	}})
 	frame := &plaf203.VideoFrame{
@@ -38,12 +38,12 @@ func TestMediaPublisherConvertsVerifiedAnnexBFrameToAVCCWithoutReencoding(t *tes
 	}
 	publisher.publish(frame)
 
-	if publisher.track.Packets != 1 {
-		t.Fatalf("packets=%d want=1", publisher.track.Packets)
+	if publisher.videoTrack.Packets != 1 {
+		t.Fatalf("packets=%d want=1", publisher.videoTrack.Packets)
 	}
 	const expectedAVCCBytes = 8
-	if publisher.track.Bytes != expectedAVCCBytes {
-		t.Fatalf("bytes=%d want=%d", publisher.track.Bytes, expectedAVCCBytes)
+	if publisher.videoTrack.Bytes != expectedAVCCBytes {
+		t.Fatalf("bytes=%d want=%d", publisher.videoTrack.Bytes, expectedAVCCBytes)
 	}
 	packet := <-packets
 	if packet.Version != 0 {
@@ -57,6 +57,26 @@ func TestMediaPublisherConvertsVerifiedAnnexBFrameToAVCCWithoutReencoding(t *tes
 	defer publisher.mu.Unlock()
 	if publisher.latestFrame == nil || string(publisher.latestFrame.Data) != string(frame.Data) {
 		t.Fatal("latest H264 keyframe was not retained for a later RTSP consumer")
+	}
+}
+
+func TestMediaPublisherPublishesConfirmedAACWithoutVideoTranscoding(t *testing.T) {
+	publisher := newMediaPublisher()
+	packets := make(chan *rtp.Packet, 1)
+	publisher.audioTrack.AppendChild(&core.Node{Input: func(packet *rtp.Packet) {
+		packets <- packet
+	}})
+	adts := []byte{0xFF, 0xF1, 0x50, 0x40, 0x01, 0x01, 0x10, 0x42}
+	publisher.publishAudio(&plaf203.AudioFrame{Codec: "aac-lc", SampleRate: 44_100, Channels: 1, Samples: 1_024, Data: adts})
+	if publisher.audioTrack.Packets != 1 {
+		t.Fatalf("packets=%d want=1", publisher.audioTrack.Packets)
+	}
+	packet := <-packets
+	if packet.Version != 0 || string(packet.Payload) != string(adts[7:]) {
+		t.Fatalf("raw AAC packet=%+v", packet)
+	}
+	if publisher.audioCodec.ClockRate != 44_100 || publisher.audioCodec.Channels != 1 {
+		t.Fatalf("audio codec=%+v", publisher.audioCodec)
 	}
 }
 
@@ -129,11 +149,13 @@ func TestGo2RtcRTSPClientKeepsMediaSessionOpen(t *testing.T) {
 	if err = client.Describe(); err != nil {
 		t.Fatal(err)
 	}
-	if len(client.Medias) != 1 {
-		t.Fatalf("media count=%d want=1", len(client.Medias))
+	if len(client.Medias) != 2 {
+		t.Fatalf("media count=%d want=2", len(client.Medias))
 	}
-	if _, err = client.SetupMedia(client.Medias[0]); err != nil {
-		t.Fatal(err)
+	for _, media := range client.Medias {
+		if _, err = client.SetupMedia(media); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err = client.Play(); err != nil {
 		t.Fatal(err)

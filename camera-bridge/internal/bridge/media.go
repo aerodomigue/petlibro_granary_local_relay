@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AlexxIT/go2rtc/pkg/aac"
 	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/AlexxIT/go2rtc/pkg/h264/annexb"
 	"github.com/AlexxIT/go2rtc/pkg/rtsp"
@@ -23,6 +24,7 @@ const (
 	defaultMediaListen    = ":8554"
 	mediaClockRate        = 90_000
 	mediaTimestampDivisor = time.Second
+	confirmedAACADTS      = "\xff\xf1\x50\x40\x10\x61\x10"
 )
 
 // MediaServer serves device-scoped RTSP paths to the internal go2rtc
@@ -127,30 +129,45 @@ func deviceIDFromMediaPath(path string) (string, bool) {
 }
 
 type mediaPublisher struct {
-	track       *core.Receiver
-	media       *core.Media
-	codec       *core.Codec
+	videoTrack  *core.Receiver
+	videoMedia  *core.Media
+	videoCodec  *core.Codec
+	audioTrack  *core.Receiver
+	audioMedia  *core.Media
+	audioCodec  *core.Codec
 	startedAt   time.Time
 	latestFrame *plaf203.VideoFrame
 	mu          sync.Mutex
 }
 
 func newMediaPublisher() *mediaPublisher {
-	codec := &core.Codec{
+	videoCodec := &core.Codec{
 		Name:        core.CodecH264,
 		ClockRate:   mediaClockRate,
 		PayloadType: core.PayloadTypeRAW,
 	}
-	media := &core.Media{
+	videoMedia := &core.Media{
 		Kind:      core.KindVideo,
 		Direction: core.DirectionRecvonly,
-		Codecs:    []*core.Codec{codec},
+		Codecs:    []*core.Codec{videoCodec},
+	}
+	audioCodec := aac.ADTSToCodec([]byte(confirmedAACADTS))
+	if audioCodec == nil {
+		panic("confirmed PLAF203 AAC ADTS header is invalid")
+	}
+	audioMedia := &core.Media{
+		Kind:      core.KindAudio,
+		Direction: core.DirectionRecvonly,
+		Codecs:    []*core.Codec{audioCodec},
 	}
 	return &mediaPublisher{
-		track:     core.NewReceiver(media, codec),
-		media:     media,
-		codec:     codec,
-		startedAt: time.Now(),
+		videoTrack: core.NewReceiver(videoMedia, videoCodec),
+		videoMedia: videoMedia,
+		videoCodec: videoCodec,
+		audioTrack: core.NewReceiver(audioMedia, audioCodec),
+		audioMedia: audioMedia,
+		audioCodec: audioCodec,
+		startedAt:  time.Now(),
 	}
 }
 
@@ -168,7 +185,7 @@ func (publisher *mediaPublisher) publish(frame *plaf203.VideoFrame) {
 	}
 	timestamp := uint32(time.Since(publisher.startedAt) * mediaClockRate / mediaTimestampDivisor)
 	publisher.mu.Unlock()
-	publisher.track.WriteRTP(&rtp.Packet{
+	publisher.videoTrack.WriteRTP(&rtp.Packet{
 		// Version zero marks AVCC for go2rtc's internal H264 packetizer. It
 		// converts this payload into standards-compliant RTP before WebRTC.
 		Header:  rtp.Header{Marker: true, Timestamp: timestamp},
@@ -176,11 +193,26 @@ func (publisher *mediaPublisher) publish(frame *plaf203.VideoFrame) {
 	})
 }
 
+func (publisher *mediaPublisher) publishAudio(frame *plaf203.AudioFrame) {
+	if publisher == nil || frame == nil || len(frame.Data) <= aac.ADTSHeaderSize {
+		return
+	}
+	publisher.audioTrack.WriteRTP(&rtp.Packet{
+		// Version zero marks one raw AAC access unit. The RTSP consumer applies
+		// RFC 3640 packetization and preserves the 1024-sample AAC cadence.
+		Header:  rtp.Header{Marker: true},
+		Payload: append([]byte(nil), frame.Data[aac.ADTSHeaderSize:]...),
+	})
+}
+
 func (publisher *mediaPublisher) attach(consumer *rtsp.Conn) error {
 	if publisher == nil || consumer == nil {
 		return errors.New("camera media consumer is unavailable")
 	}
-	if err := consumer.AddTrack(publisher.media, publisher.codec, publisher.track); err != nil {
+	if err := consumer.AddTrack(publisher.videoMedia, publisher.videoCodec, publisher.videoTrack); err != nil {
+		return err
+	}
+	if err := consumer.AddTrack(publisher.audioMedia, publisher.audioCodec, publisher.audioTrack); err != nil {
 		return err
 	}
 	publisher.mu.Lock()

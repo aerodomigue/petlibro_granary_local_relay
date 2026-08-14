@@ -6,6 +6,7 @@ import io
 import json
 from typing import Any
 from urllib.error import URLError
+from urllib.request import Request
 
 import pytest
 
@@ -109,7 +110,7 @@ def test_existing_online_stream_is_exposed_as_a_device_scoped_player(
     assert status.reason is None
 
 
-def test_stream_registration_uses_only_device_scoped_internal_rtsp_source(
+def test_stream_registration_uses_only_device_scoped_internal_rtsp_source_with_audio_transcode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Dynamic registration cannot select an arbitrary go2rtc source URL."""
@@ -134,4 +135,33 @@ def test_stream_registration_uses_only_device_scoped_internal_rtsp_source(
     assert client.ensure_stream(DEVICE_A) is True
     assert len(requests) == 3
     assert "name=plaf203_TESTDEVICE0000000001" in requests[1].full_url
-    assert "src=rtsp%3A%2F%2F127.0.0.1%3A8554%2Fdevice%2FTESTDEVICE0000000001" in requests[1].full_url
+    assert (
+        "src=ffmpeg%3Artsp%3A%2F%2F127.0.0.1%3A8554%2Fdevice%2FTESTDEVICE0000000001"
+        "%23video%3Dcopy%23audio%3Dopus"
+    ) in requests[1].full_url
+
+
+def test_existing_stream_is_patched_once_to_add_opus_audio(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pre-audio stream is migrated without repeatedly resetting the source."""
+    stream = stream_name_for_device(DEVICE_A)
+    requests: list[Request] = []
+    responses = iter(
+        (
+            FakeHttpResponse({stream: {}}),
+            FakeHttpResponse({}),
+            FakeHttpResponse({stream: {}}),
+            FakeHttpResponse({stream: {}}),
+        )
+    )
+
+    def request(request_value: Request, *_args: object, **_kwargs: object) -> FakeHttpResponse:
+        requests.append(request_value)
+        return next(responses)
+
+    monkeypatch.setattr("petlibro_relay.camera.urlopen", request)
+    client = Go2RtcStreamClient(Go2RtcSettings(enabled=True, host="go2rtc"))
+
+    assert client.ensure_stream(DEVICE_A) is True
+    assert client.ensure_stream(DEVICE_A) is True
+    assert [request.get_method() for request in requests] == ["GET", "PATCH", "GET", "GET"]
+    assert "audio%3Dopus" in requests[1].full_url

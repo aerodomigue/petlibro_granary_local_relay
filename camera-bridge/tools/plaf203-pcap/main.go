@@ -211,8 +211,11 @@ func sessionSummary(decoded []byte, opcode uint16) string {
 		summary += fmt.Sprintf(" channel=0x%04x sub=0x%04x fragments=%d index=%d payload=%d frame=%d", channelID, binary.LittleEndian.Uint16(inner[18:20]), inner[20], binary.LittleEndian.Uint16(inner[22:24]), payloadLength, binary.LittleEndian.Uint32(inner[28:32]))
 		if payloadLength > 0 && mediaHeaderSize+int(payloadLength) <= len(inner) {
 			payload := inner[mediaHeaderSize : mediaHeaderSize+payloadLength]
-			if opcode == sessionOpcodeRecv {
+			if controlType, controlData, isControl := sessionControl(payload); isControl {
+				summary += fmt.Sprintf(" control=0x%04x control_data=%s", controlType, hex.EncodeToString(controlData))
+			} else if opcode == sessionOpcodeRecv {
 				summary += h264Summary(payload)
+				summary += adtsSummary(payload)
 			} else {
 				summary += fmt.Sprintf(" payload_prefix=%s", hex.EncodeToString(payload[:min(len(payload), 12)]))
 			}
@@ -222,6 +225,20 @@ func sessionSummary(decoded []byte, opcode uint16) string {
 		summary += " login_ack"
 	}
 	return summary
+}
+
+func sessionControl(payload []byte) (uint32, []byte, bool) {
+	const controlTypeLength = 4
+	if len(payload) < controlTypeLength {
+		return 0, nil, false
+	}
+	controlType := binary.LittleEndian.Uint32(payload[:controlTypeLength])
+	// PLAF203 camera IOCtrl identifiers are compact values. Requiring a known
+	// range avoids presenting arbitrary H.264 payload bytes as controls.
+	if controlType == 0 || controlType > 0x0FFF {
+		return 0, nil, false
+	}
+	return controlType, payload[controlTypeLength:], true
 }
 
 func min(left int, right int) int {
@@ -236,6 +253,19 @@ func h264Summary(payload []byte) string {
 		if payload[index] == 0 && payload[index+1] == 0 && payload[index+2] == 0 && payload[index+3] == 1 {
 			nalType := payload[index+4] & 0x1F
 			return fmt.Sprintf(" h264_nal=%d", nalType)
+		}
+	}
+	return ""
+}
+
+func adtsSummary(payload []byte) string {
+	for index := 0; index+7 <= len(payload); index++ {
+		if payload[index] != 0xFF || payload[index+1]&0xF6 != 0xF0 {
+			continue
+		}
+		frameLength := int(payload[index+3]&0x03)<<11 | int(payload[index+4])<<3 | int(payload[index+5]>>5)
+		if frameLength >= 7 && index+frameLength <= len(payload) {
+			return fmt.Sprintf(" aac_adts_offset=%d", index)
 		}
 	}
 	return ""

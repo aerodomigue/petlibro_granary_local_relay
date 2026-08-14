@@ -64,6 +64,7 @@ type deviceRecord struct {
 	session           *plaf203.Session
 	media             *mediaPublisher
 	mediaUnsubscribe  func()
+	audioUnsubscribe  func()
 	idleTimer         *time.Timer
 	reconnectTimer    *time.Timer
 	reconnectAttempts uint
@@ -183,6 +184,9 @@ func (r *Registry) Delete(deviceID string) bool {
 	if found && record.mediaUnsubscribe != nil {
 		record.mediaUnsubscribe()
 	}
+	if found && record.audioUnsubscribe != nil {
+		record.audioUnsubscribe()
+	}
 	return found
 }
 
@@ -281,11 +285,18 @@ func (r *Registry) connected(deviceID string, attemptID uint64, session *plaf203
 	record.session = session
 	if record.media != nil && session != nil {
 		record.mediaUnsubscribe = session.SubscribeFrames(record.media.publish)
+		record.audioUnsubscribe = session.SubscribeAudio(record.media.publishAudio)
 	}
+	startAudio := session != nil && record.device.MediaConsumers > 0
 	record.cancel = nil
 	record.device.LastError = ""
 	r.devices[deviceID] = record
 	r.mu.Unlock()
+	if startAudio {
+		if err := session.StartAudio(); err != nil {
+			log.Printf("CAMERA AUDIO START FAILED device=%s error=%v", deviceID, err)
+		}
+	}
 }
 
 func (r *Registry) addMediaConsumer(deviceID string, consumer *rtsp.Conn) (func(), error) {
@@ -307,7 +318,13 @@ func (r *Registry) addMediaConsumer(deviceID string, consumer *rtsp.Conn) (func(
 	record.device.MediaConsumers++
 	record.device.UpdatedAt = time.Now().UTC()
 	r.devices[deviceID] = record
+	session := record.session
 	r.mu.Unlock()
+	if session != nil {
+		if err := session.StartAudio(); err != nil {
+			log.Printf("CAMERA AUDIO START FAILED device=%s error=%v", deviceID, err)
+		}
+	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -319,15 +336,22 @@ func (r *Registry) addMediaConsumer(deviceID string, consumer *rtsp.Conn) (func(
 func (r *Registry) releaseMediaConsumer(deviceID string) {
 	r.mu.Lock()
 	record, found := r.devices[deviceID]
+	var session *plaf203.Session
 	if found && record.device.MediaConsumers > 0 {
 		record.device.MediaConsumers--
 		record.device.UpdatedAt = time.Now().UTC()
 		if record.device.MediaConsumers == 0 {
+			session = record.session
 			r.scheduleIdleDisconnectLocked(deviceID, &record)
 		}
 		r.devices[deviceID] = record
 	}
 	r.mu.Unlock()
+	if session != nil {
+		if err := session.StopAudio(); err != nil {
+			log.Printf("CAMERA AUDIO STOP FAILED device=%s error=%v", deviceID, err)
+		}
+	}
 	log.Printf("CAMERA MEDIA CLIENT DISCONNECTED device=%s", deviceID)
 }
 
@@ -461,18 +485,31 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 		if event.Step == "media_unknown" {
 			log.Printf("DEBUG CAMERA MEDIA UNKNOWN device=%s channel=0x%04x bytes=%d frame=%d", deviceID, event.SessionChannel, event.BodyLength, event.FrameNumber)
 		}
+		if event.Step == "audio_start_tx" {
+			log.Printf("CAMERA AUDIO START TX device=%s channel=0x%04x control_type=0x%04x", deviceID, 0x7000, event.ControlType)
+		}
+		if event.Step == "audio_stop_tx" {
+			log.Printf("CAMERA AUDIO STOP TX device=%s channel=0x%04x control_type=0x%04x", deviceID, 0x7000, event.ControlType)
+		}
+		if event.Step == "audio_media" {
+			log.Printf("CAMERA AUDIO MEDIA RX device=%s codec=aac-lc bytes=%d timestamped=true", deviceID, event.BodyLength)
+		}
 	}
 }
 
 type sessionResources struct {
-	cancel      context.CancelFunc
-	session     *plaf203.Session
-	unsubscribe func()
+	cancel           context.CancelFunc
+	session          *plaf203.Session
+	unsubscribe      func()
+	audioUnsubscribe func()
 }
 
 func (resources sessionResources) close() {
 	if resources.unsubscribe != nil {
 		resources.unsubscribe()
+	}
+	if resources.audioUnsubscribe != nil {
+		resources.audioUnsubscribe()
 	}
 	if resources.cancel != nil {
 		resources.cancel()
@@ -492,9 +529,10 @@ func (r *Registry) disconnectLocked(deviceID string, record deviceRecord, state 
 		record.reconnectTimer = nil
 	}
 	resources := sessionResources{
-		cancel:      record.cancel,
-		session:     record.session,
-		unsubscribe: record.mediaUnsubscribe,
+		cancel:           record.cancel,
+		session:          record.session,
+		unsubscribe:      record.mediaUnsubscribe,
+		audioUnsubscribe: record.audioUnsubscribe,
 	}
 	now := time.Now().UTC()
 	record.attemptID++
@@ -502,6 +540,7 @@ func (r *Registry) disconnectLocked(deviceID string, record deviceRecord, state 
 	record.cancel = nil
 	record.session = nil
 	record.mediaUnsubscribe = nil
+	record.audioUnsubscribe = nil
 	record.device.ConnectionState = state
 	record.device.StreamAvailable = false
 	record.device.LastError = lastError

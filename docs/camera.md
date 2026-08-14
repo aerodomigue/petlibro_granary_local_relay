@@ -66,8 +66,8 @@ confirmed in the local capture:
    reply (`0x032b`) on `0x7000` before sending `IPCAM_START` (`0x01ff`).
 6. The bridge enters `streaming` **only** after a valid feeder Session16 media
    fragment reassembles into H.264 with an Annex-B NAL start code. The
-   V3.0.30 capture confirms SPS/PPS/IDR and non-IDR video; it does not confirm
-   AAC, so audio is intentionally not parsed or claimed.
+   V3.0.30 capture confirms SPS/PPS/IDR and non-IDR video. A later official
+   capture confirms AAC-LC ADTS at 44.1 kHz mono on media channel `0x0103`.
 
 `POST /devices/{device_id}/disconnect` closes that authenticated transport.
 `PETLIBRO_CAMERA_IDLE_TIMEOUT_SECONDS` controls the last-consumer grace period
@@ -119,8 +119,9 @@ Therefore, PLAF203 currently falls in category **D** for video credentials:
 the observed MQTT contract is cloud-derived and dynamic. Whether media itself
 uses direct LAN P2P (**B**) or a TUTK relay (**C**) is not determined from
 these sources. Direct LAN RTSP is not documented. The direct-LAN capture
-confirms H.264 video framing after bootstrap; audio remains unconfirmed and no
-transcoding is configured.
+confirms H.264 video framing after bootstrap. Official traffic also confirms
+AAC-LC ADTS audio; the local go2rtc FFmpeg source copies H.264 and transcodes
+only AAC to Opus for browser WebRTC compatibility.
 
 For offline analysis only, the camera bridge includes a PCAP summary tool. It
 prints Session16 sequence/opcode details, bootstrap control payload prefixes,
@@ -188,14 +189,16 @@ does not open a second feeder session. When the last go2rtc RTSP consumer
 disappears, the bridge stops the feeder session after the configurable idle
 grace. The dashboard closes its `RTCPeerConnection` on page navigation and
 after 15 seconds in a hidden tab; its reconnect delays are 1, 2, 5, then 10
-seconds. Audio remains intentionally out of scope: the current live capture
-does not contain an identifiable audio stream, and the incomplete channel-6
-fragments in the official capture do not establish a codec or an audio-start
-command. The bridge logs only rate-limited channel/size diagnostics for future
-offline identification and never labels an unconfirmed channel as AAC.
+seconds. When the first consumer starts, the bridge sends the captured
+`AUDIOSTART` IOCtrl (`0x0300`) on channel `0x7000`; it sends `AUDIOSTOP`
+(`0x0301`) once the final consumer leaves or the session closes. Audio remains
+inside the same feeder session and is reassembled as AAC-LC ADTS (44.1 kHz,
+mono) before go2rtc transcodes it to Opus for the existing browser WebRTC
+PeerConnection. The bridge keeps the native media timestamp in diagnostics;
+RTP audio timing follows the AAC 1024-sample access-unit cadence.
 The currently observed video is 640×360 H.264. The player uses a custom overlay
 for browser-local mute, volume, and fullscreen controls; it starts muted for
-autoplay compatibility. The existing PeerConnection also requests an audio
-transceiver so a confirmed future audio track will join the same player. The
-confirmed primary bootstrap payload does not establish an HD/SD switch mapping,
-so the visible SD/HD controls are disabled and cannot send a camera command.
+autoplay compatibility. The existing PeerConnection requests video and audio
+on the same connection. Multiple observed `0x0024` profile payloads do not yet
+establish an HD/SD switch mapping or a confirmed resolution change, so the
+visible SD/HD controls are disabled and cannot send a camera command.

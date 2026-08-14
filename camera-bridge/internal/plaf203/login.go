@@ -87,8 +87,13 @@ type Session struct {
 	frameCallbacks        map[uint64]FrameCallback
 	latestKeyframe        *VideoFrame
 	nextFrameID           uint64
+	audioMu               sync.Mutex
+	audioCallbacks        map[uint64]AudioCallback
+	nextAudioID           uint64
+	audioEnabled          bool
 	cancelReceive         context.CancelFunc
 	lastMediaEvent        time.Time
+	lastAudioEvent        time.Time
 	lastUnknownMediaEvent time.Time
 	closeOnce             sync.Once
 	closeErr              error
@@ -98,12 +103,17 @@ type Session struct {
 // return quickly; the callback runs on the camera receive goroutine.
 type FrameCallback func(*VideoFrame)
 
+// AudioCallback receives one complete AAC-LC ADTS access unit. Implementations
+// must return quickly; the callback runs on the camera receive goroutine.
+type AudioCallback func(*AudioFrame)
+
 // Close releases the authenticated transport. It is safe to call repeatedly.
 func (session *Session) Close() error {
 	if session == nil {
 		return nil
 	}
 	session.closeOnce.Do(func() {
+		_ = session.StopAudio()
 		if session.cancelReceive != nil {
 			session.cancelReceive()
 		}
@@ -112,6 +122,51 @@ func (session *Session) Close() error {
 		}
 	})
 	return session.closeErr
+}
+
+// StartAudio enables the confirmed PLAF203 AAC media channel. It is idempotent
+// and never opens a second feeder session.
+func (session *Session) StartAudio() error {
+	if session == nil {
+		return errors.New("PLAF203 session is unavailable")
+	}
+	session.audioMu.Lock()
+	defer session.audioMu.Unlock()
+	if session.audioEnabled {
+		return nil
+	}
+	if session.transport == nil || session.Address == nil {
+		return errors.New("PLAF203 audio transport is unavailable")
+	}
+	if err := session.sendControl(controlChannelSystem, 0, controlStartAudio, make([]byte, audioControlArgumentSize)); err != nil {
+		return fmt.Errorf("send PLAF203 AUDIOSTART: %w", err)
+	}
+	session.audioEnabled = true
+	emit(session.observer, Event{State: StateStreaming, Address: cloneUDPAddress(session.Address), Step: "audio_start_tx", ControlType: controlStartAudio})
+	return nil
+}
+
+// StopAudio disables the confirmed PLAF203 AAC media channel. It is idempotent
+// and is called when the final local media consumer leaves or the session closes.
+func (session *Session) StopAudio() error {
+	if session == nil {
+		return nil
+	}
+	session.audioMu.Lock()
+	defer session.audioMu.Unlock()
+	if !session.audioEnabled {
+		return nil
+	}
+	if session.transport == nil || session.Address == nil {
+		session.audioEnabled = false
+		return nil
+	}
+	if err := session.sendControl(controlChannelSystem, 0, controlStopAudio, make([]byte, audioControlArgumentSize)); err != nil {
+		return fmt.Errorf("send PLAF203 AUDIOSTOP: %w", err)
+	}
+	session.audioEnabled = false
+	emit(session.observer, Event{State: StateStreaming, Address: cloneUDPAddress(session.Address), Step: "audio_stop_tx", ControlType: controlStopAudio})
+	return nil
 }
 
 // MediaStats returns safe, aggregate media diagnostics for this session.
@@ -165,6 +220,45 @@ func (session *Session) publishFrame(frame *VideoFrame) {
 		callbacks = append(callbacks, callback)
 	}
 	session.frameMu.Unlock()
+	for _, callback := range callbacks {
+		callback(frame)
+	}
+}
+
+// SubscribeAudio attaches an AAC media sink and returns an idempotent
+// unsubscribe function. Audio is live-only; buffered replay would desync it.
+func (session *Session) SubscribeAudio(callback AudioCallback) func() {
+	if session == nil || callback == nil {
+		return func() {}
+	}
+	session.audioMu.Lock()
+	if session.audioCallbacks == nil {
+		session.audioCallbacks = make(map[uint64]AudioCallback)
+	}
+	session.nextAudioID++
+	callbackID := session.nextAudioID
+	session.audioCallbacks[callbackID] = callback
+	session.audioMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			session.audioMu.Lock()
+			delete(session.audioCallbacks, callbackID)
+			session.audioMu.Unlock()
+		})
+	}
+}
+
+func (session *Session) publishAudio(frame *AudioFrame) {
+	if frame == nil {
+		return
+	}
+	session.audioMu.Lock()
+	callbacks := make([]AudioCallback, 0, len(session.audioCallbacks))
+	for _, callback := range session.audioCallbacks {
+		callbacks = append(callbacks, callback)
+	}
+	session.audioMu.Unlock()
 	for _, callback := range callbacks {
 		callback(frame)
 	}

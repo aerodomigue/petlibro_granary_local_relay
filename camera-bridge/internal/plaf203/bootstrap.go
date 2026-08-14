@@ -24,7 +24,10 @@ const (
 	controlGetFormatReply     = controlGetFormat + 1
 	controlStartVideo         = 0x01FF
 	controlStartVideoReply    = controlStartVideo + 1
+	controlStartAudio         = 0x0300
+	controlStopAudio          = 0x0301
 	streamStartArgumentSize   = 8
+	audioControlArgumentSize  = 4
 	keepaliveResponseOpcode   = 0x0428
 	keepaliveRequestOpcode    = 0x0427
 	keepaliveResponseSubtype  = 0x0012
@@ -140,7 +143,10 @@ func (session *Session) sendControl(channel uint16, index uint32, controlType ui
 	payload := make([]byte, 4+len(controlData))
 	binary.LittleEndian.PutUint32(payload, controlType)
 	copy(payload[4:], controlData)
-	if err := session.sendBody(encodeControlData(session.nextSession25ControlCounter(), channel, index, payload)); err != nil {
+	session.sendMu.Lock()
+	defer session.sendMu.Unlock()
+	body := encodeControlData(session.session25.nextOutboundCommand(), channel, index, payload)
+	if err := session.sendBodyLocked(body); err != nil {
 		return fmt.Errorf("send PLAF203 bootstrap control type=0x%04x: %w", controlType, err)
 	}
 	return nil
@@ -267,8 +273,11 @@ func (session *Session) replySession25Counters(inner []byte, peer *net.UDPAddr, 
 }
 
 func (session *Session) sendSession25Counters(diagnostics *bootstrapDiagnostics) error {
+	session.sendMu.Lock()
 	body, counters := session.session25.nextCounters(uint16(session.clock().UnixMilli()))
-	if err := session.sendBody(body); err != nil {
+	err := session.sendBodyLocked(body)
+	session.sendMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("send PLAF203 Session25 counters: %w", err)
 	}
 	diagnostics.emitLimited("session25_counters_tx", 4, session25Event("session25_counters_tx", session.Address, counters, session.session25))
@@ -280,7 +289,9 @@ func (session *Session) noteSession25Media(packet []byte) {
 	if err != nil || len(inner) < controlInnerLength || inner[0] != 0x0C || inner[2] != loginCommandVersion {
 		return
 	}
+	session.sendMu.Lock()
 	session.session25.noteReceivedMedia(binary.LittleEndian.Uint16(inner[18:20]))
+	session.sendMu.Unlock()
 }
 
 func session25Event(step string, address *net.UDPAddr, counters session25Counters, state session25State) Event {
@@ -381,7 +392,15 @@ func encodeSessionHeartbeatAck(inner []byte) ([]byte, bool) {
 }
 
 func (session *Session) sendBody(body []byte) error {
-	packet := encodeClientSessionPacket(session.ID, session.nextSequence(), body)
+	session.sendMu.Lock()
+	defer session.sendMu.Unlock()
+	return session.sendBodyLocked(body)
+}
+
+func (session *Session) sendBodyLocked(body []byte) error {
+	sequence := session.sequence
+	session.sequence++
+	packet := encodeClientSessionPacket(session.ID, sequence, body)
 	return session.sendPacket(packet)
 }
 

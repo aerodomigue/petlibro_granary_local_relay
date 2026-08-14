@@ -473,6 +473,8 @@ class Go2RtcStreamClient:
 
     def __init__(self, settings: Go2RtcSettings) -> None:
         self._settings = settings
+        self._ensured_streams: set[str] = set()
+        self._lock = threading.Lock()
 
     def ensure_stream(self, device_id: str) -> bool:
         """Create the known RTSP source and verify it through the stream list.
@@ -485,17 +487,25 @@ class Go2RtcStreamClient:
         if not self._settings.enabled:
             return False
         stream_name = stream_name_for_device(device_id)
-        if self._stream_exists(stream_name):
-            return True
-        source = self._source_url(device_id)
-        query = urlencode((("name", stream_name), ("src", source)))
-        request = Request(f"{self._base_url()}{GO2RTC_STREAMS_PATH}?{query}", method="PUT")
-        try:
-            with urlopen(request, timeout=self._settings.timeout_seconds):  # noqa: S310
+        with self._lock:
+            stream_exists = self._stream_exists(stream_name)
+            if stream_exists and stream_name in self._ensured_streams:
+                return True
+            source = self._source_url(device_id)
+            query = urlencode((("name", stream_name), ("src", source)))
+            method = "PATCH" if stream_exists else "PUT"
+            request = Request(f"{self._base_url()}{GO2RTC_STREAMS_PATH}?{query}", method=method)
+            try:
+                with urlopen(request, timeout=self._settings.timeout_seconds):  # noqa: S310
+                    pass
+            except (HTTPError, URLError, OSError, TimeoutError):
                 pass
-        except (HTTPError, URLError, OSError, TimeoutError):
-            pass
-        return self._stream_exists(stream_name)
+            stream_exists = self._stream_exists(stream_name)
+            if stream_exists:
+                self._ensured_streams.add(stream_name)
+            else:
+                self._ensured_streams.discard(stream_name)
+            return stream_exists
 
     def exchange_webrtc(self, device_id: str, offer: bytes) -> bytes:
         """Proxy one SDP offer to the device's fixed go2rtc WHEP endpoint."""
@@ -527,7 +537,13 @@ class Go2RtcStreamClient:
         return isinstance(streams, dict) and stream_name in streams
 
     def _source_url(self, device_id: str) -> str:
-        return f"rtsp://{self._settings.source_host}:{self._settings.source_port}/device/{device_id}"
+        rtsp_source = (
+            f"rtsp://{self._settings.source_host}:{self._settings.source_port}/device/{device_id}"
+        )
+        # Browser WebRTC does not negotiate AAC. Let the local go2rtc FFmpeg
+        # sidecar copy verified H.264 and transcode only PLAF203 AAC-LC to Opus.
+        # This remains one RTSP client and therefore one feeder TUTK session.
+        return f"ffmpeg:{rtsp_source}#video=copy#audio=opus"
 
     def _base_url(self) -> str:
         return f"http://{self._settings.host}:{self._settings.port}"

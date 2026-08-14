@@ -2,6 +2,7 @@ package plaf203
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -16,6 +17,12 @@ const (
 	h264CodecMarker             = 0x4E
 	h264MainChannel       uint8 = 0x05
 	h264SubChannel        uint8 = 0x07
+	aacChannel            uint8 = 0x03
+	aacCodec                    = "aac-lc"
+	aacSampleRate               = 44_100
+	aacChannelCount             = 1
+	aacAccessUnitSamples        = 1_024
+	adtsHeaderLength            = 7
 )
 
 // VideoFrame is a fully assembled H.264 access unit. It intentionally does
@@ -27,14 +34,28 @@ type VideoFrame struct {
 	Data      []byte
 }
 
+// AudioFrame is a fully assembled AAC-LC ADTS access unit. The data includes
+// its ADTS header so the downstream RTSP publisher can derive the codec safely.
+type AudioFrame struct {
+	Codec      string
+	SampleRate int
+	Channels   int
+	Samples    int
+	Timestamp  uint64
+	Data       []byte
+}
+
 // MediaStats is safe diagnostic state for the bridge API. It never exposes
 // frame payloads.
 type MediaStats struct {
-	VideoCodec     string
-	AudioCodec     string
-	FramesReceived uint64
-	BytesReceived  uint64
-	LastFrameAt    time.Time
+	VideoCodec          string
+	AudioCodec          string
+	FramesReceived      uint64
+	BytesReceived       uint64
+	LastFrameAt         time.Time
+	AudioFramesReceived uint64
+	AudioBytesReceived  uint64
+	LastAudioAt         time.Time
 }
 
 // MediaObservation describes a non-video media packet without retaining its
@@ -53,6 +74,16 @@ type mediaAssembly struct {
 	startedAt         time.Time
 	data              []byte
 	seenSubsequences  map[uint16]struct{}
+}
+
+type mediaFragment struct {
+	channelID     uint16
+	channel       uint8
+	fragmentCount uint8
+	payload       []byte
+	subsequence   uint16
+	frameNumber   uint32
+	isEndFragment bool
 }
 
 // MediaReceiver parses the V3.0.30 video fragment layout observed after the
@@ -75,16 +106,99 @@ func NewMediaReceiver() *MediaReceiver {
 // HandlePacket parses one decrypted feeder Session16 packet. It returns nil
 // for valid non-media traffic and rejects malformed media safely.
 func (receiver *MediaReceiver) HandlePacket(packet []byte, expectedSessionID [8]byte, now time.Time) (*VideoFrame, error) {
+	fragment, err := decodeMediaFragment(packet, expectedSessionID)
+	if err != nil {
+		return nil, err
+	}
+	if fragment == nil || (fragment.channel != h264MainChannel && fragment.channel != h264SubChannel) {
+		return nil, nil
+	}
+	frameData, complete, err := receiver.assemble(fragment, now)
+	if err != nil || !complete {
+		return nil, err
+	}
+	frameData, timestamp := stripMediaMetadata(frameData)
+	if !containsH264NAL(frameData) {
+		return nil, fmt.Errorf("PLAF203 media frame does not contain an H.264 NAL")
+	}
+	frame := &VideoFrame{
+		Codec:     "h264",
+		Timestamp: timestamp,
+		Keyframe:  containsH264IDR(frameData),
+		Data:      frameData,
+	}
+	receiver.mu.Lock()
+	receiver.stats.VideoCodec = frame.Codec
+	receiver.stats.FramesReceived++
+	receiver.stats.BytesReceived += uint64(len(frame.Data))
+	receiver.stats.LastFrameAt = now.UTC()
+	receiver.mu.Unlock()
+	return frame, nil
+}
+
+// HandleAudioPacket parses one confirmed PLAF203 AAC-LC ADTS media frame.
+// Audio uses channel 0x0103 and exactly one ADTS access unit plus 16 bytes of
+// trailing media metadata in the official V3.0.30 capture.
+func (receiver *MediaReceiver) HandleAudioPacket(packet []byte, expectedSessionID [8]byte, now time.Time) (*AudioFrame, error) {
+	fragment, err := decodeMediaFragment(packet, expectedSessionID)
+	if err != nil {
+		return nil, err
+	}
+	if fragment == nil || fragment.channel != aacChannel {
+		return nil, nil
+	}
+	frameData, complete, err := receiver.assemble(fragment, now)
+	if err != nil || !complete {
+		return nil, err
+	}
+	accessUnit, timestamp, err := parsePLAF203ADTS(frameData)
+	if err != nil {
+		return nil, err
+	}
+	frame := &AudioFrame{
+		Codec:      aacCodec,
+		SampleRate: aacSampleRate,
+		Channels:   aacChannelCount,
+		Samples:    aacAccessUnitSamples,
+		Timestamp:  timestamp,
+		Data:       accessUnit,
+	}
+	receiver.mu.Lock()
+	receiver.stats.AudioCodec = frame.Codec
+	receiver.stats.AudioFramesReceived++
+	receiver.stats.AudioBytesReceived += uint64(len(frame.Data))
+	receiver.stats.LastAudioAt = now.UTC()
+	receiver.mu.Unlock()
+	return frame, nil
+}
+
+// ObserveNonVideoPacket extracts safe metadata for a Session16 media packet
+// that is not one of the two H.264 channels. It deliberately does not infer an
+// audio codec from a channel number or retain any camera payload.
+func (receiver *MediaReceiver) ObserveNonVideoPacket(packet []byte, expectedSessionID [8]byte) (*MediaObservation, error) {
+	fragment, err := decodeMediaFragment(packet, expectedSessionID)
+	if err != nil {
+		return nil, err
+	}
+	if fragment == nil {
+		return nil, nil
+	}
+	if fragment.channel == h264MainChannel || fragment.channel == h264SubChannel || fragment.channel == aacChannel {
+		return nil, nil
+	}
+	return &MediaObservation{
+		ChannelID:     fragment.channelID,
+		PayloadLength: len(fragment.payload),
+		FrameNumber:   fragment.frameNumber,
+	}, nil
+}
+
+func decodeMediaFragment(packet []byte, expectedSessionID [8]byte) (*mediaFragment, error) {
 	inner, err := decodeDeviceSession(packet, expectedSessionID)
 	if err != nil {
 		return nil, err
 	}
 	if len(inner) < mediaHeaderLength || inner[0] != 0x0C || inner[2] != loginCommandVersion {
-		return nil, nil
-	}
-	channelID := binary.LittleEndian.Uint16(inner[16:18])
-	channel := uint8(channelID)
-	if channel != h264MainChannel && channel != h264SubChannel {
 		return nil, nil
 	}
 	fragmentCount := inner[20]
@@ -95,95 +209,74 @@ func (receiver *MediaReceiver) HandlePacket(packet []byte, expectedSessionID [8]
 	if payloadLength == 0 || mediaHeaderLength+payloadLength > len(inner) {
 		return nil, fmt.Errorf("invalid PLAF203 media payload length %d", payloadLength)
 	}
-	payload := append([]byte(nil), inner[mediaHeaderLength:mediaHeaderLength+payloadLength]...)
-	subsequence := binary.LittleEndian.Uint16(inner[18:20])
-	frameNumber := binary.LittleEndian.Uint32(inner[28:32])
-	// V3.0.30 marks the terminal fragment with the low flag bit while retaining
-	// additional flags (observed as 0x05), and sets the high channel byte.
-	// Checking equality to 0x01 drops real terminal fragments such as 0x0c05
-	// on channel 0x0105 before their SPS/PPS/IDR access unit can assemble.
-	isEndFragment := inner[1]&0x01 != 0 && channelID&0x0100 != 0
+	channelID := binary.LittleEndian.Uint16(inner[16:18])
+	return &mediaFragment{
+		channelID:     channelID,
+		channel:       uint8(channelID),
+		fragmentCount: fragmentCount,
+		payload:       append([]byte(nil), inner[mediaHeaderLength:mediaHeaderLength+payloadLength]...),
+		subsequence:   binary.LittleEndian.Uint16(inner[18:20]),
+		frameNumber:   binary.LittleEndian.Uint32(inner[28:32]),
+		isEndFragment: inner[1]&0x01 != 0 && channelID&0x0100 != 0,
+	}, nil
+}
 
+func (receiver *MediaReceiver) assemble(fragment *mediaFragment, now time.Time) ([]byte, bool, error) {
 	receiver.mu.Lock()
 	defer receiver.mu.Unlock()
 	receiver.expireLocked(now)
-	if receiver.isDuplicateLocked(channel, subsequence) {
-		return nil, nil
+	if receiver.isDuplicateLocked(fragment.channel, fragment.subsequence) {
+		return nil, false, nil
 	}
-	assembly := receiver.assemblies[channel]
-	if assembly == nil || assembly.frameNumber != frameNumber {
+	assembly := receiver.assemblies[fragment.channel]
+	if assembly == nil || assembly.frameNumber != fragment.frameNumber {
 		assembly = &mediaAssembly{
-			frameNumber:       frameNumber,
-			expectedFragments: fragmentCount,
-			lastSubsequence:   subsequence,
+			frameNumber:       fragment.frameNumber,
+			expectedFragments: fragment.fragmentCount,
+			lastSubsequence:   fragment.subsequence,
 			startedAt:         now,
 			seenSubsequences:  make(map[uint16]struct{}),
 		}
-		receiver.assemblies[channel] = assembly
+		receiver.assemblies[fragment.channel] = assembly
 	}
-	if assembly.expectedFragments != fragmentCount || len(assembly.data)+len(payload) > maxMediaFrameBytes {
-		delete(receiver.assemblies, channel)
-		return nil, fmt.Errorf("inconsistent PLAF203 media frame channel=%d frame=%d", channel, frameNumber)
+	if assembly.expectedFragments != fragment.fragmentCount || len(assembly.data)+len(fragment.payload) > maxMediaFrameBytes {
+		delete(receiver.assemblies, fragment.channel)
+		return nil, false, fmt.Errorf("inconsistent PLAF203 media frame channel=%d frame=%d", fragment.channel, fragment.frameNumber)
 	}
-	if _, found := assembly.seenSubsequences[subsequence]; found {
-		return nil, nil
+	if _, found := assembly.seenSubsequences[fragment.subsequence]; found {
+		return nil, false, nil
 	}
-	assembly.seenSubsequences[subsequence] = struct{}{}
-	assembly.data = append(assembly.data, payload...)
+	assembly.seenSubsequences[fragment.subsequence] = struct{}{}
+	assembly.data = append(assembly.data, fragment.payload...)
 	assembly.receivedFragments++
-	assembly.lastSubsequence = subsequence
-
-	isComplete := fragmentCount == 1 || isEndFragment
-	if !isComplete {
-		return nil, nil
+	assembly.lastSubsequence = fragment.subsequence
+	if fragment.fragmentCount != 1 && !fragment.isEndFragment {
+		return nil, false, nil
 	}
-	defer delete(receiver.assemblies, channel)
+	defer delete(receiver.assemblies, fragment.channel)
 	if assembly.receivedFragments != assembly.expectedFragments {
-		return nil, fmt.Errorf("incomplete PLAF203 media frame channel=%d frame=%d got=%d want=%d", channel, frameNumber, assembly.receivedFragments, assembly.expectedFragments)
+		return nil, false, fmt.Errorf("incomplete PLAF203 media frame channel=%d frame=%d got=%d want=%d", fragment.channel, fragment.frameNumber, assembly.receivedFragments, assembly.expectedFragments)
 	}
-	frameData, timestamp := stripMediaMetadata(assembly.data)
-	if !containsH264NAL(frameData) {
-		return nil, fmt.Errorf("PLAF203 media frame does not contain an H.264 NAL")
-	}
-	frame := &VideoFrame{
-		Codec:     "h264",
-		Timestamp: timestamp,
-		Keyframe:  containsH264IDR(frameData),
-		Data:      frameData,
-	}
-	receiver.lastSubsequence[channel] = subsequence
-	receiver.stats.VideoCodec = frame.Codec
-	receiver.stats.FramesReceived++
-	receiver.stats.BytesReceived += uint64(len(frame.Data))
-	receiver.stats.LastFrameAt = now.UTC()
-	return frame, nil
+	receiver.lastSubsequence[fragment.channel] = fragment.subsequence
+	return append([]byte(nil), assembly.data...), true, nil
 }
 
-// ObserveNonVideoPacket extracts safe metadata for a Session16 media packet
-// that is not one of the two H.264 channels. It deliberately does not infer an
-// audio codec from a channel number or retain any camera payload.
-func (receiver *MediaReceiver) ObserveNonVideoPacket(packet []byte, expectedSessionID [8]byte) (*MediaObservation, error) {
-	inner, err := decodeDeviceSession(packet, expectedSessionID)
-	if err != nil {
-		return nil, err
+func parsePLAF203ADTS(data []byte) ([]byte, uint64, error) {
+	if len(data) < adtsHeaderLength+mediaMetadataLength || data[0] != 0xFF || data[1]&0xF6 != 0xF0 || data[1]&0x01 == 0 {
+		return nil, 0, errors.New("invalid PLAF203 AAC ADTS header")
 	}
-	if len(inner) < mediaHeaderLength || inner[0] != 0x0C || inner[2] != loginCommandVersion {
-		return nil, nil
+	profile := (data[2] >> 6) & 0x03
+	sampleRateIndex := (data[2] >> 2) & 0x0F
+	channels := ((data[2] & 0x01) << 2) | (data[3] >> 6)
+	if profile != 1 || sampleRateIndex != 4 || channels != aacChannelCount {
+		return nil, 0, fmt.Errorf("unsupported PLAF203 AAC ADTS config profile=%d sample_rate_index=%d channels=%d", profile, sampleRateIndex, channels)
 	}
-	channelID := binary.LittleEndian.Uint16(inner[16:18])
-	channel := uint8(channelID)
-	if channel == h264MainChannel || channel == h264SubChannel {
-		return nil, nil
+	frameLength := int(data[3]&0x03)<<11 | int(data[4])<<3 | int(data[5]>>5)
+	if frameLength < adtsHeaderLength || len(data) != frameLength+mediaMetadataLength {
+		return nil, 0, fmt.Errorf("invalid PLAF203 AAC frame length frame=%d payload=%d", frameLength, len(data))
 	}
-	payloadLength := int(binary.LittleEndian.Uint16(inner[24:26]))
-	if payloadLength == 0 || mediaHeaderLength+payloadLength > len(inner) {
-		return nil, fmt.Errorf("invalid PLAF203 non-video media payload length %d", payloadLength)
-	}
-	return &MediaObservation{
-		ChannelID:     channelID,
-		PayloadLength: payloadLength,
-		FrameNumber:   binary.LittleEndian.Uint32(inner[28:32]),
-	}, nil
+	timestamp := uint64(binary.LittleEndian.Uint32(data[len(data)-4:]))
+	return append([]byte(nil), data[:frameLength]...), timestamp, nil
 }
 
 // Snapshot returns immutable diagnostic counters for one session.
