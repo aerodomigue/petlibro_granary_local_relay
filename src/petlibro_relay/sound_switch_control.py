@@ -154,6 +154,16 @@ class _PendingControl:
     code: object | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduleResyncResult:
+    """A feeder-confirmed persisted schedule resynchronization."""
+
+    device_id: str
+    plans_total: int
+    cloud_plans: int
+    local_plans: int
+
+
 LocalControlPublisher = Callable[[str, str, bytes], bool]
 
 
@@ -282,6 +292,41 @@ class DeviceControlController:
             raise ControlStateUnavailableError("Schedule plan is not known")
         return self._submit_schedule(device_id, remaining, "schedule:delete")
 
+    def resync_persisted_schedules(self, device_id: str) -> ScheduleResyncResult | None:
+        """Restore all known schedules to a just-reconnected feeder.
+
+        This deliberately reads only ``schedule_plans``.  An empty table is
+        unknown state, not proof that the feeder should receive an empty
+        snapshot, so no MQTT publication occurs in that case.
+        """
+        plans = self._persisted_schedule_plans(device_id)
+        if not plans:
+            _LOGGER.info("SCHEDULE RESYNC SKIP device=%s reason=no_persisted_plans", device_id)
+            return None
+        cloud_plans = sum(int(plan["planId"]) > 0 for plan in plans)
+        local_plans = sum(int(plan["planId"]) < 0 for plan in plans)
+        started_at = self._clock()
+        _LOGGER.info(
+            "SCHEDULE RESYNC TX device=%s plans_total=%d cloud=%d local=%d reason=device_online",
+            device_id,
+            len(plans),
+            cloud_plans,
+            local_plans,
+        )
+        self._submit(
+            device_id,
+            protocol.Command.FEEDING_PLAN_SERVICE,
+            "schedule:resync",
+            {"plans": plans},
+            {"cmd": protocol.Command.FEEDING_PLAN_SERVICE, "ts": _timestamp_ms(), "plans": plans},
+        )
+        _LOGGER.info(
+            "SCHEDULE RESYNC ACK device=%s latency_ms=%d",
+            device_id,
+            int((self._clock() - started_at) * MILLISECONDS_PER_SECOND),
+        )
+        return ScheduleResyncResult(device_id, len(plans), cloud_plans, local_plans)
+
     def observe_device_message(
         self, device_id: str, topic: str, payload: bytes
     ) -> LocalControlAckRoute:
@@ -390,6 +435,14 @@ class DeviceControlController:
             return [dict(entry.plan) for entry in stored]
         fallback = self._shadow.get_feeding_plans(device_id)
         return [dict(plan) for plan in fallback.plans] if fallback else []
+
+    def _persisted_schedule_plans(self, device_id: str) -> list[dict[str, Any]]:
+        """Return the known local and cloud schedule rows for resynchronization."""
+        return [
+            dict(entry.plan)
+            for entry in self._shadow.get_schedule_plans(device_id)
+            if isinstance(entry.plan.get("planId"), int) and int(entry.plan["planId"]) != 0
+        ]
 
     def _increment(self, counter: str) -> None:
         with self._lock:

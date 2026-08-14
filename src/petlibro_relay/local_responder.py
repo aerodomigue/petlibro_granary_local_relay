@@ -165,7 +165,7 @@ class LocalResponder:
             # Only a full plan definition is worth keeping: the device's own
             # "/post" carries plan ids with no schedule, and storing that would
             # overwrite the real plans with useless stubs.
-            if isinstance(plans, list) and all(_is_complete_plan(p) for p in plans) and plans:
+            if isinstance(plans, list) and all(_is_complete_plan(p) for p in plans):
                 self._shadow.update_feeding_plans(device_id, plans, body.get("msgId"))
                 self._shadow.update_cloud_schedule_plans(device_id, plans)
         elif command in (

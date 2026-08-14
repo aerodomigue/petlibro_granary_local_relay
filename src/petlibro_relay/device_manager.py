@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 
 from .config import RelayConfig
 from .device_context import DeviceContext
@@ -86,6 +87,7 @@ class DeviceManager:
         self._supervisor_interval_seconds = supervisor_interval_seconds
         self._lock = threading.Lock()
         self._contexts: dict[str, DeviceContext] = {}
+        self._device_online_callback: Callable[[str, int], None] | None = None
         self._started = False
         self._stop_event = threading.Event()
         self._supervisor = threading.Thread(
@@ -133,6 +135,11 @@ class DeviceManager:
                 return
         for context in self.list_devices():
             if self._presence.is_online(context.device_id):
+                record = self._presence.record(context.device_id)
+                if record is not None and record.connected:
+                    callback = self._device_online_callback
+                    if callback is not None:
+                        callback(context.device_id, record.connection_generation)
                 if context.start_upstream():
                     _LOGGER.info(
                         "Device %s is present locally - resuming its PETLIBRO session",
@@ -145,6 +152,15 @@ class DeviceManager:
                     context.device_id,
                     self._presence.grace_seconds,
                 )
+
+    def set_device_online_callback(self, callback: Callable[[str, int], None]) -> None:
+        """Attach one non-blocking observer of real local MQTT connections.
+
+        The manager invokes it while reconciling an actively connected feeder.
+        Callers receive the presence generation and must be idempotent because
+        this method runs on every supervisor pass.
+        """
+        self._device_online_callback = callback
 
     def _supervise(self) -> None:
         """Reconcile sessions against presence until shutdown."""

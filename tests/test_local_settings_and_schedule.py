@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from test_sound_switch_control import DEVICE_A, ControlHarness, control_environment
 
 from petlibro_relay.sound_switch_control import (
+    ControlAckTimeoutError,
     _next_local_plan_id,
     _populate_duration_fields,
     _populate_time_fields,
@@ -64,6 +65,33 @@ def test_schedule_create_allocates_negative_ids_and_persists(
     assert len(shadow.get_schedule_plans(DEVICE_A)) == 2
 
 
+def test_schedule_resync_skips_an_unknown_empty_schedule(
+    control_environment: tuple[TestClient, ControlHarness, StateShadow, object, object],
+) -> None:
+    """A reconnect never publishes an empty schedule without persisted knowledge."""
+    _, harness, _, _, _ = control_environment
+    assert harness.controller is not None
+
+    assert harness.controller.resync_persisted_schedules(DEVICE_A) is None
+    assert harness.published == []
+
+
+def test_schedule_resync_timeout_leaves_persisted_plans_unchanged(
+    control_environment: tuple[TestClient, ControlHarness, StateShadow, object, object],
+) -> None:
+    """A failed feeder ACK does not mutate the persisted cloud/local snapshot."""
+    _, harness, shadow, _, _ = control_environment
+    assert harness.controller is not None
+    plan = _schedule_plan(-1, "08:00")
+    shadow.replace_local_schedule_plans(DEVICE_A, [plan])
+    harness.ack_code = None
+
+    with pytest.raises(ControlAckTimeoutError):
+        harness.controller.resync_persisted_schedules(DEVICE_A)
+
+    assert [entry.plan for entry in shadow.get_schedule_plans(DEVICE_A)] == [plan]
+
+
 def test_schedule_edit_delete_never_and_collision_validation(
     control_environment: tuple[TestClient, ControlHarness, object, object, object],
 ) -> None:
@@ -113,6 +141,50 @@ def test_schedule_storage_is_persistent_and_namespaced_by_device(tmp_path: Path)
     assert reopened.get_schedule_plans(DEVICE_A)[0].plan == plan_a
     assert reopened.get_schedule_plans("OTHERDEVICE000000001")[0].plan == plan_b
     reopened.close()
+
+
+def test_cloud_schedule_snapshot_replaces_only_positive_plan_ids(tmp_path: Path) -> None:
+    """A PETLIBRO snapshot replaces cloud plans without touching local negative IDs."""
+    shadow = StateShadow(str(tmp_path / "shadow.sqlite3"))
+    local_plans = [_schedule_plan(-1, "08:00"), _schedule_plan(-2, "18:00")]
+    old_cloud_plans = [_schedule_plan(10, "07:30"), _schedule_plan(11, "16:30")]
+    shadow.replace_local_schedule_plans(DEVICE_A, local_plans + old_cloud_plans)
+
+    shadow.update_cloud_schedule_plans(DEVICE_A, [_schedule_plan(20, "12:00"), _schedule_plan(21, "20:00")])
+
+    stored = shadow.get_schedule_plans(DEVICE_A)
+    assert {entry.plan["planId"] for entry in stored} == {-2, -1, 20, 21}
+    assert {entry.plan["planId"]: entry.source for entry in stored} == {
+        -2: "local", -1: "local", 20: "cloud", 21: "cloud"
+    }
+    shadow.close()
+
+
+def test_empty_cloud_schedule_snapshot_removes_only_cloud_plans(tmp_path: Path) -> None:
+    """An explicit empty cloud snapshot never turns into deletion of local schedules."""
+    shadow = StateShadow(str(tmp_path / "shadow.sqlite3"))
+    shadow.replace_local_schedule_plans(
+        DEVICE_A, [_schedule_plan(-1, "08:00"), _schedule_plan(10, "07:30")]
+    )
+
+    shadow.update_cloud_schedule_plans(DEVICE_A, [])
+
+    stored = shadow.get_schedule_plans(DEVICE_A)
+    assert [(entry.plan["planId"], entry.source) for entry in stored] == [(-1, "local")]
+    shadow.close()
+
+
+def _schedule_plan(plan_id: int, execution_time: str) -> dict[str, object]:
+    """Build a complete persisted plan for source-isolation tests."""
+    return {
+        "planId": plan_id,
+        "executionTime": execution_time,
+        "grainNum": 1,
+        "enableAudio": False,
+        "audioTimes": 1,
+        "repeatDay": [1],
+        "syncTime": 1_786_659_757_000,
+    }
 
 
 def test_shadow_merges_partial_cloud_deltas_without_erasing_local_confirmation(

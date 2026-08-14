@@ -18,6 +18,7 @@ from .mqtt_bridge import MqttBridge, prime_local_subscription
 from .observability.telemetry import RelayTelemetry
 from .state_cache import StateCache
 from .state_shadow import StateShadow
+from .schedule_resync import ScheduleResyncCoordinator
 from .sound_switch_control import SoundSwitchController
 from .web.context import DashboardContext
 from .web.server import DashboardServer
@@ -157,6 +158,8 @@ def main() -> None:
         bridge.publish_sound_switch,
         timezone_name=config.local_responder.device_timezone,
     )
+    schedule_resync = ScheduleResyncCoordinator(sound_switch_control, presence)
+    devices.set_device_online_callback(schedule_resync.device_online)
     bridge.set_sound_switch_controller(sound_switch_control)
     dashboard_context = DashboardContext(
         config,
@@ -203,6 +206,7 @@ def main() -> None:
         # only then the databases everything else was reading.
         capture_proxy.stop()
         bridge.stop()
+        schedule_resync.stop()
         devices.stop()
         if dashboard_server is not None:
             dashboard_server.stop()

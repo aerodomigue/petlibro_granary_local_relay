@@ -24,7 +24,11 @@ from petlibro_relay.observability.log_buffer import RingBufferLogHandler
 from petlibro_relay.observability.telemetry import RelayTelemetry
 from petlibro_relay.state_cache import StateCache
 from petlibro_relay.state_shadow import StateShadow
-from petlibro_relay.sound_switch_control import ControlAckTimeoutError, SoundSwitchController
+from petlibro_relay.sound_switch_control import (
+    ControlAckTimeoutError,
+    ScheduleResyncResult,
+    SoundSwitchController,
+)
 from petlibro_relay.web.app import create_app
 from petlibro_relay.web.context import DashboardContext
 
@@ -498,37 +502,44 @@ def test_local_attr_set_ack_resolves_then_forwards_once_when_online(
     assert queue.count(DEVICE_A, LOCAL_TO_UPSTREAM) == 0
 
 
-def test_local_schedule_ack_is_never_forwarded_upstream(
+def test_schedule_resync_ack_is_never_forwarded_upstream(
     control_environment: tuple[TestClient, ControlHarness, StateShadow, MessageQueue, DeviceManager],
     make_config: RelayConfigFactory,
 ) -> None:
-    """A local-only schedule ACK completes its transaction without entering cloud flow."""
-    _, harness, _, queue, devices = control_environment
+    """A reconnect resync uses the same local-only ACK boundary as schedule edits."""
+    _, harness, shadow, queue, devices = control_environment
     assert harness.controller is not None
     bridge = MqttBridge(make_config(), devices, queue, RelayTelemetry())
     local_client = RecordingMqttClient()
     bridge._local_client = local_client  # type: ignore[assignment]
     bridge.set_sound_switch_controller(harness.controller)
     harness.controller._publish_local_control = bridge.publish_sound_switch
-    result: dict[str, object] = {}
-    plan = {
+    local_plan = {
+        "planId": -1,
         "executionTime": "08:00",
         "grainNum": 1,
         "enableAudio": False,
         "audioTimes": 1,
         "repeatDay": [1, 2, 3, 4, 5, 6, 7],
+        "syncTime": 1_786_659_757_000,
     }
+    cloud_plan = {**local_plan, "planId": 42, "executionTime": "18:00"}
+    never_plan = {**local_plan, "planId": -2, "executionTime": "12:00", "repeatDay": []}
+    shadow.replace_local_schedule_plans(DEVICE_A, [local_plan, never_plan, cloud_plan])
+    result: list[ScheduleResyncResult | None] = []
 
-    def submit_schedule() -> None:
-        """Run the schedule write while the test injects its feeder response."""
-        result.update(harness.controller.create_schedule(DEVICE_A, plan))
+    def resync_schedule() -> None:
+        """Run the reconnect restoration while the test injects its feeder ACK."""
+        result.append(harness.controller.resync_persisted_schedules(DEVICE_A))
 
-    worker = threading.Thread(target=submit_schedule)
+    worker = threading.Thread(target=resync_schedule)
     worker.start()
     assert local_client.published_event.wait(1.0)
     _, control_payload = local_client.published[0]
     request = json.loads(control_payload)
     assert request["cmd"] == "FEEDING_PLAN_SERVICE"
+    assert {plan["planId"] for plan in request["plans"]} == {-2, -1, 42}
+    assert next(plan for plan in request["plans"] if plan["planId"] == -2)["repeatDay"] == []
     ack_payload = json.dumps(
         {"cmd": "FEEDING_PLAN_SERVICE", "msgId": request["msgId"], "code": 0}
     ).encode()
@@ -544,7 +555,12 @@ def test_local_schedule_ack_is_never_forwarded_upstream(
     worker.join(timeout=1.0)
 
     assert not worker.is_alive()
-    assert result["success"] is True
+    assert result
+    outcome = result[0]
+    assert outcome is not None
+    assert outcome.plans_total == 3
+    assert outcome.cloud_plans == 1
+    assert outcome.local_plans == 2
     assert queue.count(DEVICE_A, LOCAL_TO_UPSTREAM) == 0
 
 

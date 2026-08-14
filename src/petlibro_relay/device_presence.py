@@ -44,6 +44,7 @@ class PresenceRecord:
     last_opened_at: float | None
     last_closed_at: float | None
     peer_address: str | None
+    connection_generation: int
 
 
 class DevicePresenceTracker:
@@ -82,6 +83,7 @@ class DevicePresenceTracker:
                 last_closed_at=existing.last_closed_at if existing is not None else None,
                 peer_address=peer_address
                 or (existing.peer_address if existing is not None else None),
+                connection_generation=(existing.connection_generation if existing is not None else 0) + 1,
             )
 
     def session_closed(self, device_id: str) -> None:
@@ -94,6 +96,7 @@ class DevicePresenceTracker:
                 last_opened_at=existing.last_opened_at if existing is not None else None,
                 last_closed_at=self._clock(),
                 peer_address=existing.peer_address if existing is not None else None,
+                connection_generation=existing.connection_generation if existing is not None else 0,
             )
 
     def state(self, device_id: str) -> LocalPresence:

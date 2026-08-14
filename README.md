@@ -479,8 +479,14 @@ Schedule writes use `FEEDING_PLAN_SERVICE` with the complete known snapshot.
 Plans created locally receive persistent negative IDs (`-1`, `-2`, …) per
 device, so they cannot collide with PETLIBRO's positive cloud IDs. They apply
 directly to the feeder, but PETLIBRO Cloud does not create them and the
-official app may not display them. `cloudVideoRecordSwitch` is retained in the
-shadow but deliberately has no writable route.
+official app may not display them. On every stable local MQTT reconnect, the
+relay restores one complete persisted snapshot to the feeder: current cloud
+plans with positive IDs plus local plans with negative IDs. A newer PETLIBRO
+snapshot replaces only the positive entries; it never removes a local plan.
+If no persisted plans are known, the relay sends nothing, rather than risking
+an accidental empty schedule. A locally edited positive cloud plan can be
+replaced by PETLIBRO's next cloud snapshot. `cloudVideoRecordSwitch` is
+retained in the shadow but deliberately has no writable route.
 Logs are retained in a process-local ring buffer (5,000 entries), sanitized
 before API/SSE exposure; passwords, secrets, tokens and full MQTT usernames
 are never rendered. Keep the port LAN-only: diagnostics still contain device

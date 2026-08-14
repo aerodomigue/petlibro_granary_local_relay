@@ -171,6 +171,24 @@ def test_device_plan_stub_never_overwrites_the_real_plans(responder: LocalRespon
     assert decode(action.response_payload)["plans"] == CLOUD_PLANS
 
 
+def test_explicit_empty_cloud_snapshot_removes_only_cloud_schedule_plans(
+    responder: LocalResponder, shadow: StateShadow
+) -> None:
+    """Cloud deletion is authoritative for positive IDs but preserves local negative IDs."""
+    local_plan = {**CLOUD_PLANS[0], "planId": -1}
+    shadow.replace_local_schedule_plans(DEVICE_ID, [local_plan, *CLOUD_PLANS])
+    empty_snapshot = json.dumps(
+        {"cmd": "FEEDING_PLAN_SERVICE", "msgId": "empty", "plans": []}
+    ).encode()
+
+    responder.observe_cloud_message(DEVICE_ID, SERVICE_SUB, empty_snapshot)
+
+    schedules = shadow.get_schedule_plans(DEVICE_ID)
+    assert [(entry.plan["planId"], entry.source) for entry in schedules] == [(-1, "local")]
+    cached = shadow.get_feeding_plans(DEVICE_ID)
+    assert cached is not None and cached.plans == []
+
+
 def test_config_served_from_cache(responder: LocalResponder) -> None:
     """Config cache: settings pushed by the cloud come back when it is unreachable."""
     responder.observe_cloud_message(DEVICE_ID, SERVICE_SUB, CLOUD_SETTINGS_PUSH)

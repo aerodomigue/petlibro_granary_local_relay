@@ -193,20 +193,20 @@ class StateShadow:
         """
         now = time.time()
         valid_plans = [plan for plan in plans if isinstance(plan.get("planId"), int)]
-        cloud_ids = [int(plan["planId"]) for plan in valid_plans if int(plan["planId"]) >= 0]
+        cloud_ids = [int(plan["planId"]) for plan in valid_plans if int(plan["planId"]) > 0]
         with self._lock:
             try:
                 with self._connection:
                     if cloud_ids:
                         placeholders = ",".join("?" for _ in cloud_ids)
                         self._connection.execute(
-                            "DELETE FROM schedule_plans WHERE device_id = ? AND source = 'cloud' "
+                            "DELETE FROM schedule_plans WHERE device_id = ? AND plan_id > 0 "
                             f"AND plan_id NOT IN ({placeholders})",  # noqa: S608 - generated placeholders
                             (device_id, *cloud_ids),
                         )
                     else:
                         self._connection.execute(
-                            "DELETE FROM schedule_plans WHERE device_id = ? AND source = 'cloud'",
+                            "DELETE FROM schedule_plans WHERE device_id = ? AND plan_id > 0",
                             (device_id,),
                         )
                     self._connection.executemany(
@@ -218,7 +218,7 @@ class StateShadow:
                         [
                             (device_id, int(plan["planId"]), json.dumps(plan), now)
                             for plan in valid_plans
-                            if int(plan["planId"]) >= 0
+                            if int(plan["planId"]) > 0
                         ],
                     )
             except sqlite3.Error:
@@ -226,24 +226,39 @@ class StateShadow:
                 raise
 
     def replace_local_schedule_plans(self, device_id: str, plans: list[dict[str, Any]]) -> None:
-        """Persist the local schedule projection after a feeder-confirmed edit."""
+        """Persist a feeder-confirmed local schedule snapshot.
+
+        A local edit is applied as one complete snapshot to the feeder.  Its
+        ownership is nevertheless derived from the plan ID, rather than from
+        the actor that made the edit: negative IDs remain local and positive
+        IDs remain cloud-owned.  A later cloud snapshot can therefore replace
+        only the positive entries without resurrecting or deleting local ones.
+        """
         now = time.time()
-        local_plans = [plan for plan in plans if isinstance(plan.get("planId"), int)]
+        persisted_plans = [
+            plan
+            for plan in plans
+            if isinstance(plan.get("planId"), int) and int(plan["planId"]) != 0
+        ]
         with self._lock:
             try:
                 with self._connection:
-                    self._connection.execute(
-                        "DELETE FROM schedule_plans WHERE device_id = ? AND source = 'local'", (device_id,)
-                    )
+                    self._connection.execute("DELETE FROM schedule_plans WHERE device_id = ?", (device_id,))
                     self._connection.executemany(
                         "INSERT INTO schedule_plans (device_id, plan_id, plan_json, source, updated_at) "
-                        "VALUES (?, ?, ?, 'local', ?) "
+                        "VALUES (?, ?, ?, ?, ?) "
                         "ON CONFLICT(device_id, plan_id) DO UPDATE SET "
                         "plan_json = excluded.plan_json, source = excluded.source, "
                         "updated_at = excluded.updated_at",
                         [
-                            (device_id, int(plan["planId"]), json.dumps(plan), now)
-                            for plan in local_plans
+                            (
+                                device_id,
+                                int(plan["planId"]),
+                                json.dumps(plan),
+                                "local" if int(plan["planId"]) < 0 else "cloud",
+                                now,
+                            )
+                            for plan in persisted_plans
                         ],
                     )
             except sqlite3.Error:
