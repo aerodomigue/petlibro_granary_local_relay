@@ -15,6 +15,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, time as LocalTime
+from enum import Enum, auto
 from typing import Any, Final
 from zoneinfo import ZoneInfo
 
@@ -131,6 +132,14 @@ class ControlAckRejectedError(ControlError):
     def __init__(self, control_name: str, code: object) -> None:
         super().__init__(f"Device rejected {control_name} (code={code})")
         self.code = code
+
+
+class LocalControlAckRoute(Enum):
+    """Whether a matched local-control ACK may continue to PETLIBRO."""
+
+    NOT_MATCHED = auto()
+    FORWARD_TO_CLOUD = auto()
+    LOCAL_ONLY = auto()
 
 
 @dataclass(slots=True)
@@ -273,26 +282,42 @@ class DeviceControlController:
             raise ControlStateUnavailableError("Schedule plan is not known")
         return self._submit_schedule(device_id, remaining, "schedule:delete")
 
-    def observe_device_message(self, device_id: str, topic: str, payload: bytes) -> None:
-        """Complete exactly one matching device `/service/post` transaction."""
+    def observe_device_message(
+        self, device_id: str, topic: str, payload: bytes
+    ) -> LocalControlAckRoute:
+        """Resolve one ACK and state whether its natural post may reach PETLIBRO."""
         if topic != f"{protocol.topic_prefix(device_id)}/device/service/post":
-            return
+            return LocalControlAckRoute.NOT_MATCHED
         try:
             body = json.loads(payload)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            return
+            return LocalControlAckRoute.NOT_MATCHED
         if not isinstance(body, dict):
-            return
+            return LocalControlAckRoute.NOT_MATCHED
         message_id = body.get("msgId")
         command = body.get("cmd")
         if not isinstance(message_id, str) or not isinstance(command, str):
-            return
+            return LocalControlAckRoute.NOT_MATCHED
         with self._lock:
             pending = self._pending.get((device_id, message_id))
             if pending is None or pending.command != command:
-                return
+                return LocalControlAckRoute.NOT_MATCHED
             pending.code = body.get("code")
             pending.completed.set()
+        route = (
+            LocalControlAckRoute.LOCAL_ONLY
+            if command == protocol.Command.FEEDING_PLAN_SERVICE
+            else LocalControlAckRoute.FORWARD_TO_CLOUD
+        )
+        _LOGGER.info(
+            "DEVICE CONTROL ACK device_id=%s msgId=%s cmd=%s code=%s route=%s",
+            device_id,
+            message_id,
+            command,
+            body.get("code"),
+            route.name,
+        )
+        return route
 
     def _submit_schedule(self, device_id: str, plans: list[dict[str, Any]], control_name: str) -> dict[str, Any]:
         """Send the current schedule as a complete, feeder-confirmed snapshot."""
@@ -332,6 +357,13 @@ class DeviceControlController:
             if not self._publish_local_control(device_id, context.product_id, raw):
                 self._increment("control_rejected")
                 raise ControlPublishError("Local MQTT publication failed")
+            _LOGGER.info(
+                "LOCAL CONTROL TX device_id=%s msgId=%s cmd=%s control=%s",
+                device_id,
+                message_id,
+                command,
+                control_name,
+            )
             if not pending.completed.wait(self._ack_timeout_seconds):
                 self._increment("control_timeout")
                 raise ControlAckTimeoutError("Device acknowledgement timeout")

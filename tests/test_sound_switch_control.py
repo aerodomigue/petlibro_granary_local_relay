@@ -68,6 +68,37 @@ class ControlHarness:
         return True
 
 
+class RecordingMqttClient:
+    """Fake connected MQTT client used to prove bridge routing without a broker."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, bytes]] = []
+        self.published_event = threading.Event()
+
+    def is_connected(self) -> bool:
+        """Represent a connected fake MQTT session."""
+        return True
+
+    def publish(self, topic: str, payload: bytes, qos: int = 0) -> Any:
+        """Record one fake publication and synchronously confirm it."""
+        self.published.append((topic, payload))
+        self.published_event.set()
+
+        class Published:
+            """Minimal Paho publication result."""
+
+            rc = 0
+
+            def wait_for_publish(self, timeout: float | None = None) -> None:
+                """Confirm immediately without a network."""
+
+            def is_published(self) -> bool:
+                """Report the fake publication as confirmed."""
+                return True
+
+        return Published()
+
+
 @pytest.fixture
 def control_environment(
     make_config: RelayConfigFactory, tmp_path: Path
@@ -392,6 +423,129 @@ def test_bridge_keeps_forwarding_a_service_post_after_control_observation(
     bridge._on_local_message(None, None, FakeMessage())  # type: ignore[arg-type]
 
     assert queue.count(DEVICE_A, LOCAL_TO_UPSTREAM) == 1
+
+
+def test_local_attr_set_ack_resolves_then_forwards_once_when_online(
+    control_environment: tuple[TestClient, ControlHarness, StateShadow, MessageQueue, DeviceManager],
+    make_config: RelayConfigFactory,
+) -> None:
+    """A locally issued control stays local on `/sub`, but its ACK reaches cloud once."""
+    _, harness, _, queue, devices = control_environment
+    assert harness.controller is not None
+    bridge = MqttBridge(make_config(), devices, queue, RelayTelemetry())
+    local_client = RecordingMqttClient()
+    upstream_client = RecordingMqttClient()
+    bridge._local_client = local_client  # type: ignore[assignment]
+    bridge.set_sound_switch_controller(harness.controller)
+    harness.controller._publish_local_control = bridge.publish_sound_switch
+
+    context = devices.get_by_device_id(DEVICE_A)
+    assert context is not None
+    context.telemetry.upstream_online()
+    result: dict[str, object] = {}
+
+    def submit_control() -> None:
+        """Run the ACK-waiting write while the test injects its feeder response."""
+        result.update(harness.controller.set_sound_switch(DEVICE_A, True))
+
+    worker = threading.Thread(target=submit_control)
+    worker.start()
+    assert local_client.published_event.wait(1.0)
+    assert queue.count(DEVICE_A, LOCAL_TO_UPSTREAM) == 0
+    assert upstream_client.published == []
+
+    control_topic, control_payload = local_client.published[0]
+    request = json.loads(control_payload)
+    assert control_topic == f"dl/{PRODUCT_ID}/{DEVICE_A}/device/service/sub"
+    assert request["cmd"] == "ATTR_SET_SERVICE"
+
+    ack_payload = json.dumps(
+        {
+            "cmd": "ATTR_SET_SERVICE",
+            "msgId": request["msgId"],
+            "code": 0,
+            "soundSwitch": True,
+        }
+    ).encode()
+
+    class FeederAck:
+        """Minimal local broker message for the feeder's natural ACK."""
+
+        topic = SERVICE_POST_A
+        payload = ack_payload
+        qos = 0
+
+    bridge._on_local_message(None, None, FeederAck())  # type: ignore[arg-type]
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert result["success"] is True
+    queued = queue.peek_oldest(DEVICE_A, LOCAL_TO_UPSTREAM)
+    assert queued is not None
+    assert queued.payload == ack_payload
+    assert queued.is_live is True
+
+    pump = DeliveryPump(
+        LOCAL_TO_UPSTREAM,
+        queue,
+        targets=lambda: [PumpTarget(DEVICE_A, upstream_client, context.telemetry)],  # type: ignore[arg-type]
+        is_cloud_to_device=False,
+        replay_rate_per_device=1.0,
+        replay_rate_global=1.0,
+    )
+    assert pump._run_once() is True
+    assert upstream_client.published == [(SERVICE_POST_A, ack_payload)]
+    assert queue.count(DEVICE_A, LOCAL_TO_UPSTREAM) == 0
+
+
+def test_local_schedule_ack_is_never_forwarded_upstream(
+    control_environment: tuple[TestClient, ControlHarness, StateShadow, MessageQueue, DeviceManager],
+    make_config: RelayConfigFactory,
+) -> None:
+    """A local-only schedule ACK completes its transaction without entering cloud flow."""
+    _, harness, _, queue, devices = control_environment
+    assert harness.controller is not None
+    bridge = MqttBridge(make_config(), devices, queue, RelayTelemetry())
+    local_client = RecordingMqttClient()
+    bridge._local_client = local_client  # type: ignore[assignment]
+    bridge.set_sound_switch_controller(harness.controller)
+    harness.controller._publish_local_control = bridge.publish_sound_switch
+    result: dict[str, object] = {}
+    plan = {
+        "executionTime": "08:00",
+        "grainNum": 1,
+        "enableAudio": False,
+        "audioTimes": 1,
+        "repeatDay": [1, 2, 3, 4, 5, 6, 7],
+    }
+
+    def submit_schedule() -> None:
+        """Run the schedule write while the test injects its feeder response."""
+        result.update(harness.controller.create_schedule(DEVICE_A, plan))
+
+    worker = threading.Thread(target=submit_schedule)
+    worker.start()
+    assert local_client.published_event.wait(1.0)
+    _, control_payload = local_client.published[0]
+    request = json.loads(control_payload)
+    assert request["cmd"] == "FEEDING_PLAN_SERVICE"
+    ack_payload = json.dumps(
+        {"cmd": "FEEDING_PLAN_SERVICE", "msgId": request["msgId"], "code": 0}
+    ).encode()
+
+    class FeederAck:
+        """Minimal local broker message for the schedule acknowledgement."""
+
+        topic = SERVICE_POST_A
+        payload = ack_payload
+        qos = 0
+
+    bridge._on_local_message(None, None, FeederAck())  # type: ignore[arg-type]
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert result["success"] is True
+    assert queue.count(DEVICE_A, LOCAL_TO_UPSTREAM) == 0
 
 
 def test_offline_sound_ack_is_queued_and_replayed_without_reissuing_the_control(

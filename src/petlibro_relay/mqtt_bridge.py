@@ -52,6 +52,7 @@ from .device_context import LOCAL_TO_UPSTREAM, UPSTREAM_TO_LOCAL
 from .device_manager import DeviceManager
 from .message_queue import MessageQueue
 from .observability.telemetry import RelayTelemetry
+from .sound_switch_control import LocalControlAckRoute
 
 if TYPE_CHECKING:
     from .sound_switch_control import SoundSwitchController
@@ -220,11 +221,11 @@ class MqttBridge:
         self._upstream_to_local_pump.start()
 
     def set_sound_switch_controller(self, controller: SoundSwitchController) -> None:
-        """Attach the narrow UI control acknowledgement observer.
+        """Attach the explicit local control acknowledgement observer.
 
-        This does not alter normal device-to-cloud handling: it only lets the
-        controller correlate a matching service `/post` ACK before the same
-        message continues into the existing queue and upstream bridge.
+        A matched settings ACK continues into the normal device-to-cloud
+        queue after correlation. A matched local schedule ACK is intentionally
+        local-only and stops here.
         """
         self._sound_switch_controller = controller
 
@@ -306,9 +307,22 @@ class MqttBridge:
             return
 
         if self._sound_switch_controller is not None:
-            self._sound_switch_controller.observe_device_message(
+            ack_route = self._sound_switch_controller.observe_device_message(
                 address.device_id, message.topic, message.payload
             )
+            if ack_route is LocalControlAckRoute.LOCAL_ONLY:
+                _LOGGER.info(
+                    "DEVICE POST LOCAL ONLY device_id=%s topic=%s",
+                    address.device_id,
+                    message.topic,
+                )
+                return
+            if ack_route is LocalControlAckRoute.FORWARD_TO_CLOUD:
+                _LOGGER.info(
+                    "DEVICE POST FORWARD upstream device_id=%s topic=%s",
+                    address.device_id,
+                    message.topic,
+                )
 
         _LOGGER.debug(
             "local -> queue(%s) for %s: %s (%d bytes)",
