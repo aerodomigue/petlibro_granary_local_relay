@@ -13,6 +13,7 @@ import logging
 import queue
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Protocol, cast
@@ -57,6 +58,12 @@ class CameraStatus:
     def snapshot(self) -> dict[str, object]:
         """Return a JSON-ready status that contains no source or credential."""
         return asdict(self)
+
+@dataclass(frozen=True, slots=True)
+class WebRtcExchange:
+    """One constrained WHEP exchange and its opaque teardown token."""
+    answer: bytes
+    session_id: str | None
 
 
 class CameraStatusProvider(Protocol):
@@ -474,6 +481,7 @@ class Go2RtcStreamClient:
     def __init__(self, settings: Go2RtcSettings) -> None:
         self._settings = settings
         self._ensured_streams: set[str] = set()
+        self._webrtc_sessions: dict[str, tuple[str, str]] = {}
         self._lock = threading.Lock()
 
     def ensure_stream(self, device_id: str) -> bool:
@@ -509,7 +517,7 @@ class Go2RtcStreamClient:
                 self._ensured_streams.discard(stream_name)
             return stream_exists
 
-    def exchange_webrtc(self, device_id: str, offer: bytes) -> bytes:
+    def exchange_webrtc(self, device_id: str, offer: bytes) -> WebRtcExchange:
         """Proxy one SDP offer to the device's fixed go2rtc WHEP endpoint."""
         if not self._settings.enabled or not self.ensure_stream(device_id):
             raise RuntimeError("camera stream is unavailable")
@@ -524,10 +532,37 @@ class Go2RtcStreamClient:
         try:
             with urlopen(request, timeout=self._settings.timeout_seconds * 10) as response:  # noqa: S310
                 answer = cast(bytes, response.read())
+                location = response.headers.get("Location")
+            session_id = self._remember_webrtc_session(device_id, location)
             _LOGGER.info("WEBRTC CONNECTED device=%s", device_id)
-            return answer
+            return WebRtcExchange(answer, session_id)
         except (HTTPError, URLError, OSError, TimeoutError) as error:
             raise RuntimeError("go2rtc WebRTC exchange failed") from error
+
+    def close_webrtc(self, device_id: str, session_id: str) -> bool:
+        """Close one opaque, device-scoped WHEP session in go2rtc."""
+        with self._lock:
+            session = self._webrtc_sessions.pop(session_id, None)
+        if session is None or session[0] != device_id:
+            return False
+        try:
+            with urlopen(Request(session[1], method="DELETE"), timeout=self._settings.timeout_seconds):  # noqa: S310
+                pass
+        except (HTTPError, URLError, OSError, TimeoutError) as error:
+            _LOGGER.debug("WEBRTC CLOSE FAILED device=%s error=%s", device_id, error)
+            return False
+        _LOGGER.info("WEBRTC CLOSED device=%s", device_id)
+        return True
+
+    def _remember_webrtc_session(self, device_id: str, location: str | None) -> str | None:
+        """Store go2rtc locations behind opaque browser tokens."""
+        if not location:
+            return None
+        session_id = uuid.uuid4().hex
+        session_url = location if location.startswith("http") else f"{self._base_url()}{location}"
+        with self._lock:
+            self._webrtc_sessions[session_id] = (device_id, session_url)
+        return session_id
 
     def _stream_exists(self, stream_name: str) -> bool:
         request = Request(f"{self._base_url()}{GO2RTC_STREAMS_PATH}", method="GET")

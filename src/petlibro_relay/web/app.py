@@ -32,6 +32,7 @@ MAX_PAGE_SIZE = 500
 MAX_CAMERA_WEBRTC_OFFER_BYTES = 256_000
 SSE_WAIT_SECONDS = 15.0
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+WEBRTC_SESSION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 
 class ControlRequest(BaseModel):
@@ -282,10 +283,20 @@ def create_app(context: DashboardContext) -> FastAPI:
         if not offer or len(offer) > MAX_CAMERA_WEBRTC_OFFER_BYTES:
             raise HTTPException(status_code=400, detail="Invalid WebRTC offer")
         try:
-            answer = context.exchange_camera_webrtc(device_id, offer)
+            exchange = context.exchange_camera_webrtc(device_id, offer)
         except RuntimeError as error:
             raise HTTPException(status_code=503, detail="Camera stream is unavailable") from error
-        return Response(content=answer, status_code=201, media_type="application/sdp")
+        headers = {"X-Relay-WebRTC-Session": exchange.session_id} if exchange.session_id else None
+        return Response(content=exchange.answer, status_code=201, media_type="application/sdp", headers=headers)
+
+    @app.delete("/api/devices/{device_id}/camera/webrtc/{session_id}", status_code=204)
+    def close_camera_webrtc(device_id: str, session_id: str) -> Response:
+        """Release one opaque, device-scoped WHEP session after viewer teardown."""
+        if not DEVICE_ID_PATTERN.fullmatch(device_id) or context.device_detail(device_id, 1) is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        if not WEBRTC_SESSION_ID_PATTERN.fullmatch(session_id) or not context.close_camera_webrtc(device_id, session_id):
+            raise HTTPException(status_code=404, detail="Unknown camera session")
+        return Response(status_code=204)
 
     @app.patch("/api/devices/{device_id}/controls/sound")
     def set_device_sound(device_id: str, request: SoundRequest) -> dict[str, object]:

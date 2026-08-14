@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from conftest import RelayConfigFactory
 
 from petlibro_relay.device_context import LOCAL_TO_UPSTREAM
-from petlibro_relay.camera import CameraStatus
+from petlibro_relay.camera import CameraStatus, WebRtcExchange
 from petlibro_relay.device_manager import DeviceManager
 from petlibro_relay.device_presence import DevicePresenceTracker
 from petlibro_relay.device_registry import DeviceIdentity, DeviceRegistry
@@ -214,9 +214,9 @@ def test_camera_webrtc_proxy_is_device_scoped_and_accepts_only_sdp(
     context, _ = dashboard
     calls: list[tuple[str, bytes]] = []
 
-    def exchange(device_id: str, offer: bytes) -> bytes:
+    def exchange(device_id: str, offer: bytes) -> WebRtcExchange:
         calls.append((device_id, offer))
-        return b"v=0\r\na=answer\r\n"
+        return WebRtcExchange(b"v=0\r\na=answer\r\n", "a" * 32)
 
     monkeypatch.setattr(context, "exchange_camera_webrtc", exchange)
     client = TestClient(create_app(context))
@@ -229,6 +229,7 @@ def test_camera_webrtc_proxy_is_device_scoped_and_accepts_only_sdp(
 
     assert response.status_code == 201
     assert response.headers["content-type"].startswith("application/sdp")
+    assert response.headers["x-relay-webrtc-session"] == "a" * 32
     assert response.content == b"v=0\r\na=answer\r\n"
     assert calls == [(DEVICE_A, b"v=0\r\na=offer\r\n")]
     assert client.post(f"/api/devices/{DEVICE_A}/camera/webrtc", json={"src": "bad"}).status_code == 415
@@ -458,6 +459,7 @@ def test_dashboard_exposes_only_narrow_confirmed_control_write_routes(
         ("/api/devices/{device_id}/controls/sound-detection", ("PATCH",)),
         ("/api/devices/{device_id}/controls/video", ("PATCH",)),
         ("/api/devices/{device_id}/camera/webrtc", ("POST",)),
+        ("/api/devices/{device_id}/camera/webrtc/{session_id}", ("DELETE",)),
         ("/api/devices/{device_id}/schedule", ("POST",)),
         ("/api/devices/{device_id}/schedule/{plan_id}", ("DELETE",)),
         ("/api/devices/{device_id}/schedule/{plan_id}", ("PATCH",)),

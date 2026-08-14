@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from ..camera import CameraStatusProvider, Go2RtcCameraClient, Go2RtcStreamClient
+from ..camera import CameraStatusProvider, Go2RtcCameraClient, Go2RtcStreamClient, WebRtcExchange
 from ..config import RelayConfig
 from ..device_context import LOCAL_TO_UPSTREAM, UPSTREAM_TO_LOCAL
 from ..device_manager import DeviceManager
@@ -170,9 +170,13 @@ class DashboardContext:
             "uid_learned": self._shadow.get_camera_uid(device_id) is not None,
         }
 
-    def exchange_camera_webrtc(self, device_id: str, offer: bytes) -> bytes:
+    def exchange_camera_webrtc(self, device_id: str, offer: bytes) -> WebRtcExchange:
         """Proxy one validated device SDP offer without accepting arbitrary streams."""
         return self._camera_streams.exchange_webrtc(device_id, offer)
+
+    def close_camera_webrtc(self, device_id: str, session_id: str) -> bool:
+        """Release one opaque browser WHEP session without exposing go2rtc."""
+        return self._camera_streams.close_webrtc(device_id, session_id)
 
     def queues(self, device_id: str, limit: int) -> dict[str, Any]:
         """Return bounded metadata for one device's two durable directions."""
