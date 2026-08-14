@@ -72,10 +72,10 @@ func TestEncodeLANSearch3MatchesVerifiedLayout(t *testing.T) {
 	}
 }
 
-func TestDecodeKnockReplyValidatesIdentityAndWireStructure(t *testing.T) {
+func TestDecodeKnock2ValidatesIdentityAndWireStructure(t *testing.T) {
 	nonce := [8]byte{8, 7, 6, 5, 4, 3, 2, 1}
-	packet := testKnockReply(protocolTestUID, nonce)
-	knock, err := DecodeKnockReply(packet, protocolTestUID, nonce)
+	packet := testKnock2(protocolTestUID, nonce)
+	knock, err := DecodeKnock2(packet, protocolTestUID, nonce)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,47 +84,47 @@ func TestDecodeKnockReplyValidatesIdentityAndWireStructure(t *testing.T) {
 	}
 
 	t.Run("wrong UID", func(t *testing.T) {
-		wrongUID := testKnockReply("PLAF2030000000000002", nonce)
-		if _, err := DecodeKnockReply(wrongUID, protocolTestUID, nonce); !errors.Is(err, ErrUIDMismatch) {
+		wrongUID := testKnock2("PLAF2030000000000002", nonce)
+		if _, err := DecodeKnock2(wrongUID, protocolTestUID, nonce); !errors.Is(err, ErrUIDMismatch) {
 			t.Fatalf("error=%v", err)
 		}
 	})
 	t.Run("wrong magic", func(t *testing.T) {
 		wrongMagic := append([]byte(nil), packet...)
 		wrongMagic[2] = clientMagicVersion
-		if _, err := DecodeKnockReply(wrongMagic, protocolTestUID, nonce); !errors.Is(err, ErrUnexpectedPacket) {
+		if _, err := DecodeKnock2(wrongMagic, protocolTestUID, nonce); !errors.Is(err, ErrUnexpectedPacket) {
 			t.Fatalf("error=%v", err)
 		}
 	})
 	t.Run("wrong nonce", func(t *testing.T) {
 		wrongNonce := nonce
 		wrongNonce[0]++
-		if _, err := DecodeKnockReply(testKnockReply(protocolTestUID, wrongNonce), protocolTestUID, nonce); !errors.Is(err, ErrUnexpectedPacket) {
+		if _, err := DecodeKnock2(testKnock2(protocolTestUID, wrongNonce), protocolTestUID, nonce); !errors.Is(err, ErrUnexpectedPacket) {
 			t.Fatalf("error=%v", err)
 		}
 	})
 	t.Run("truncated", func(t *testing.T) {
-		if _, err := DecodeKnockReply(packet[:20], protocolTestUID, nonce); !errors.Is(err, ErrPacketTooShort) {
+		if _, err := DecodeKnock2(packet[:20], protocolTestUID, nonce); !errors.Is(err, ErrPacketTooShort) {
 			t.Fatalf("error=%v", err)
 		}
 	})
 }
 
-func TestEncodeKnock2MatchesVerifiedLayout(t *testing.T) {
+func TestEncodeKnockReplyMatchesVerifiedLayout(t *testing.T) {
 	nonce := [8]byte{1, 1, 2, 3, 5, 8, 13, 21}
-	packet, err := EncodeKnock2(protocolTestUID, nonce)
+	packet, err := EncodeKnockReply(protocolTestUID, nonce)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(packet) != knockLength || packet[2] != clientMagicVersion || binary.LittleEndian.Uint16(packet[8:]) != knockOpcode {
-		t.Fatalf("unexpected KNOCK2: %x", packet)
+	if len(packet) != knockLength || packet[2] != clientMagicVersion || binary.LittleEndian.Uint16(packet[8:]) != knockReplyOpcode {
+		t.Fatalf("unexpected KNOCK_RR2: %x", packet)
 	}
 	if string(packet[uidOffset:uidOffset+UIDLength]) != protocolTestUID || [8]byte(packet[nonceOffset:nonceOffset+8]) != nonce {
-		t.Fatalf("KNOCK2 does not preserve correlation: %x", packet)
+		t.Fatalf("KNOCK_RR2 does not preserve correlation: %x", packet)
 	}
 }
 
-func TestDiscoverAcceptsOnlyMatchingLANSearchResponseUID(t *testing.T) {
+func TestDiscoverRequiresValidLANSearchResponseThenKnock2(t *testing.T) {
 	nonce := [8]byte{9, 8, 7, 6, 5, 4, 3, 2}
 	address := &net.UDPAddr{IP: net.ParseIP("192.0.2.20"), Port: 40238}
 	transport := &fakeTransport{responses: []fakeDatagram{
@@ -134,6 +134,18 @@ func TestDiscoverAcceptsOnlyMatchingLANSearchResponseUID(t *testing.T) {
 		},
 		{
 			packet:  tutk.TransCodePartial(nil, testLANSearchResponse(protocolTestUID)),
+			address: address,
+		},
+		{
+			packet:  tutk.TransCodePartial(nil, testKnock2("PLAF2030000000000002", nonce)),
+			address: address,
+		},
+		{
+			packet:  tutk.TransCodePartial(nil, testKnock2(protocolTestUID, [8]byte{1, 2, 3, 4, 5, 6, 7, 8})),
+			address: address,
+		},
+		{
+			packet:  tutk.TransCodePartial(nil, testKnock2(protocolTestUID, nonce)),
 			address: address,
 		},
 	}}
@@ -171,6 +183,7 @@ func TestDiscoverUnicastAcceptsOnlyKnownIPWithDynamicSourcePort(t *testing.T) {
 		transport.addResponse(capturedLANSearchResponseWire(t), &net.UDPAddr{IP: net.ParseIP("192.0.2.41"), Port: 49152})
 		transport.addResponse(tutk.TransCodePartial(nil, testLANSearchResponse("PLAF2030000000000002")), &net.UDPAddr{IP: knownIP, Port: 49153})
 		transport.addResponse(capturedLANSearchResponseWire(t), &net.UDPAddr{IP: knownIP, Port: 41135})
+		transport.addResponse(tutk.TransCodePartial(nil, testKnock2(capturedResponseUID, [8]byte{})), &net.UDPAddr{IP: knownIP, Port: 41135})
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -180,36 +193,6 @@ func TestDiscoverUnicastAcceptsOnlyKnownIPWithDynamicSourcePort(t *testing.T) {
 	}
 	if !result.IP.Equal(knownIP) || result.Port != 41135 || len(transport.sent) != 1 {
 		t.Fatalf("result=%v sends=%d", result, len(transport.sent))
-	}
-}
-
-func TestCompleteKnockRequiresMatchingUIDAndNonceWithDynamicPort(t *testing.T) {
-	feederIP := net.ParseIP("192.0.2.40")
-	discoveryPeer := &net.UDPAddr{IP: feederIP, Port: 41135}
-	nonce := [8]byte{9, 8, 7, 6, 5, 4, 3, 2}
-	transport := &fakeTransport{}
-	transport.onSend = func(packet []byte, address *net.UDPAddr) {
-		decoded := tutk.ReverseTransCodePartial(nil, packet)
-		if binary.LittleEndian.Uint16(decoded[8:10]) != knockOpcode {
-			return
-		}
-		wrongNonce := nonce
-		wrongNonce[0]++
-		transport.addResponse(tutk.TransCodePartial(nil, testKnockReply("PLAF2030000000000002", nonce)), &net.UDPAddr{IP: feederIP, Port: 41136})
-		transport.addResponse(tutk.TransCodePartial(nil, testKnockReply(protocolTestUID, wrongNonce)), &net.UDPAddr{IP: feederIP, Port: 41137})
-		transport.addResponse(tutk.TransCodePartial(nil, testKnockReply(protocolTestUID, nonce)), &net.UDPAddr{IP: feederIP, Port: 41138})
-		if address == nil || !address.IP.Equal(feederIP) || address.Port != discoveryPeer.Port {
-			t.Fatalf("knock target=%v", address)
-		}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	peer, err := CompleteKnock(ctx, transport, discoveryPeer, protocolTestUID, nonce, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !peer.IP.Equal(feederIP) || peer.Port != 41138 || len(transport.sent) != 2 {
-		t.Fatalf("peer=%v sends=%d", peer, len(transport.sent))
 	}
 }
 
@@ -227,7 +210,10 @@ func TestDirectDiscoveryUsesUnicastBeforeBroadcast(t *testing.T) {
 		if len(decoded) != lanSearchLength {
 			return
 		}
+		var nonce [8]byte
+		copy(nonce[:], decoded[lanSearchNonce:lanSearchNonce+len(nonce)])
 		transport.addResponse(tutk.TransCodePartial(nil, testLANSearchResponse(protocolTestUID)), &net.UDPAddr{IP: knownIP, Port: 40238})
+		transport.addResponse(tutk.TransCodePartial(nil, testKnock2(protocolTestUID, nonce)), &net.UDPAddr{IP: knownIP, Port: 40238})
 		if address == nil || !address.IP.Equal(knownIP) {
 			t.Fatalf("unicast address=%v", address)
 		}
@@ -253,7 +239,10 @@ func TestDirectDiscoveryFallsBackOnlyWhenEnabled(t *testing.T) {
 		if len(decoded) != lanSearchLength || address == nil || !address.IP.Equal(broadcastIP) {
 			return
 		}
+		var nonce [8]byte
+		copy(nonce[:], decoded[lanSearchNonce:lanSearchNonce+len(nonce)])
 		transport.addResponse(tutk.TransCodePartial(nil, testLANSearchResponse(protocolTestUID)), &net.UDPAddr{IP: knownIP, Port: 40238})
+		transport.addResponse(tutk.TransCodePartial(nil, testKnock2(protocolTestUID, nonce)), &net.UDPAddr{IP: knownIP, Port: 40238})
 	}
 	result, mode, err := connector.discover(context.Background(), transport, protocolTestUID, [8]byte{}, knownIP, 5*time.Millisecond, nil)
 	if err != nil || result == nil || mode != "broadcast" || len(transport.sent) != 2 {
@@ -280,7 +269,11 @@ func TestDirectDiscoveryUsesBroadcastWhenNoFeederIPIsKnown(t *testing.T) {
 		if address == nil || !address.IP.Equal(broadcastIP) {
 			t.Fatalf("broadcast address=%v", address)
 		}
+		decoded := tutk.ReverseTransCodePartial(nil, packet)
+		var nonce [8]byte
+		copy(nonce[:], decoded[lanSearchNonce:lanSearchNonce+len(nonce)])
 		transport.addResponse(tutk.TransCodePartial(nil, testLANSearchResponse(protocolTestUID)), &net.UDPAddr{IP: feederIP, Port: 40238})
+		transport.addResponse(tutk.TransCodePartial(nil, testKnock2(protocolTestUID, nonce)), &net.UDPAddr{IP: feederIP, Port: 40238})
 	}
 	result, mode, err := connector.discover(context.Background(), transport, protocolTestUID, [8]byte{}, nil, time.Second, nil)
 	if err != nil || result == nil || mode != "broadcast" || !result.IP.Equal(feederIP) || len(transport.sent) != 1 {
@@ -295,15 +288,8 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 		if len(decoded) == lanSearchLength && binary.LittleEndian.Uint16(decoded[8:]) == lanSearchOpcode {
 			var nonce [8]byte
 			copy(nonce[:], decoded[lanSearchNonce:lanSearchNonce+len(nonce)])
-			if decoded[lanSearchPhase] == 1 {
-				transport.addResponse(tutk.TransCodePartial(nil, testLANSearchResponse(protocolTestUID)), &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 40238})
-			}
-			return
-		}
-		if len(decoded) == knockLength && binary.LittleEndian.Uint16(decoded[8:]) == knockOpcode {
-			var nonce [8]byte
-			copy(nonce[:], decoded[nonceOffset:nonceOffset+len(nonce)])
-			transport.addResponse(tutk.TransCodePartial(nil, testKnockReply(protocolTestUID, nonce)), &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 41135})
+			transport.addResponse(tutk.TransCodePartial(nil, testLANSearchResponse(protocolTestUID)), &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 40238})
+			transport.addResponse(tutk.TransCodePartial(nil, testKnock2(protocolTestUID, nonce)), &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 41135})
 			return
 		}
 		if len(decoded) == loginRequestLength && binary.LittleEndian.Uint16(decoded[8:]) == clientSessionOpcode && binary.LittleEndian.Uint16(decoded[6:]) == 1 {
@@ -331,7 +317,6 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 	connector := &DirectConnector{
 		TransportFactory:  fakeTransportFactory{transport: transport},
 		DiscoveryTimeout:  time.Second,
-		KnockTimeout:      time.Second,
 		LoginTimeout:      time.Second,
 		DiscoveryTargeter: func() ([]*net.UDPAddr, error) { return []*net.UDPAddr{{IP: net.IPv4bcast, Port: LANPort}}, nil },
 		Clock:             func() time.Time { return time.UnixMilli(1_786_544_102_000) },
@@ -358,19 +343,17 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 			t.Fatalf("states=%v want=%v", states, want)
 		}
 	}
-	if len(transport.sent) != 12 {
+	if len(transport.sent) != 11 {
 		t.Fatalf("wire messages=%d want discovery, knock, login, and bootstrap", len(transport.sent))
 	}
-	phaseOne := tutk.ReverseTransCodePartial(nil, transport.sent[0])
-	phaseTwo := tutk.ReverseTransCodePartial(nil, transport.sent[1])
-	knock := tutk.ReverseTransCodePartial(nil, transport.sent[2])
-	if binary.LittleEndian.Uint16(phaseOne[8:10]) != lanSearchOpcode || phaseOne[lanSearchPhase] != 1 ||
-		binary.LittleEndian.Uint16(phaseTwo[8:10]) != lanSearchOpcode || phaseTwo[lanSearchPhase] != 2 ||
-		binary.LittleEndian.Uint16(knock[8:10]) != knockOpcode {
-		t.Fatalf("unexpected preamble sequence: phase1=%x phase2=%x knock=%x", phaseOne[:12], phaseTwo[:12], knock[:12])
+	search := tutk.ReverseTransCodePartial(nil, transport.sent[0])
+	knockReply := tutk.ReverseTransCodePartial(nil, transport.sent[1])
+	if binary.LittleEndian.Uint16(search[8:10]) != lanSearchOpcode || search[lanSearchPhase] != 1 ||
+		binary.LittleEndian.Uint16(knockReply[8:10]) != knockReplyOpcode {
+		t.Fatalf("unexpected preamble sequence: search=%x knock_reply=%x", search[:12], knockReply[:12])
 	}
 	bootstrapPackets := make([][]byte, 0, 7)
-	for _, packet := range transport.sent[5:] {
+	for _, packet := range transport.sent[4:] {
 		bootstrapPackets = append(bootstrapPackets, tutk.ReverseTransCodePartial(nil, packet))
 	}
 	if len(bootstrapPackets) != 7 || len(bootstrapPackets[0]) != loginRequestLength || len(bootstrapPackets[1]) != loginRequestLength {
@@ -520,15 +503,10 @@ func configureDiscoveryResponder(transport *fakeTransport, onLoginSend func([]by
 	transport.onSend = func(packet []byte, address *net.UDPAddr) {
 		decoded := tutk.ReverseTransCodePartial(nil, packet)
 		if len(decoded) == lanSearchLength && binary.LittleEndian.Uint16(decoded[8:]) == lanSearchOpcode {
-			if decoded[lanSearchPhase] == 1 {
-				transport.addResponse(tutk.TransCodePartial(nil, testLANSearchResponse(protocolTestUID)), &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 40238})
-			}
-			return
-		}
-		if len(decoded) == knockLength && binary.LittleEndian.Uint16(decoded[8:]) == knockOpcode {
 			var nonce [8]byte
-			copy(nonce[:], decoded[nonceOffset:nonceOffset+len(nonce)])
-			transport.addResponse(tutk.TransCodePartial(nil, testKnockReply(protocolTestUID, nonce)), &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 41135})
+			copy(nonce[:], decoded[lanSearchNonce:lanSearchNonce+len(nonce)])
+			transport.addResponse(tutk.TransCodePartial(nil, testLANSearchResponse(protocolTestUID)), &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 40238})
+			transport.addResponse(tutk.TransCodePartial(nil, testKnock2(protocolTestUID, nonce)), &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 41135})
 			return
 		}
 		onLoginSend(decoded, address)
@@ -539,7 +517,6 @@ func testDirectConnector(transport DatagramTransport, loginTimeout time.Duration
 	return &DirectConnector{
 		TransportFactory:  fakeTransportFactory{transport: transport},
 		DiscoveryTimeout:  time.Second,
-		KnockTimeout:      time.Second,
 		LoginTimeout:      loginTimeout,
 		DiscoveryTargeter: func() ([]*net.UDPAddr, error) { return []*net.UDPAddr{{IP: net.IPv4bcast, Port: LANPort}}, nil },
 		Clock:             func() time.Time { return time.UnixMilli(1_786_544_102_000) },
@@ -559,14 +536,14 @@ func testLANSearchResponse(uid string) []byte {
 	return packet
 }
 
-func testKnockReply(uid string, nonce [8]byte) []byte {
+func testKnock2(uid string, nonce [8]byte) []byte {
 	packet := make([]byte, knockLength)
 	packet[0] = 0x04
 	packet[1] = 0x02
 	packet[2] = deviceMagicVersion
 	packet[3] = controlFlags
 	binary.LittleEndian.PutUint16(packet[4:], knockLength-16)
-	binary.LittleEndian.PutUint16(packet[8:], knockReplyOpcode)
+	binary.LittleEndian.PutUint16(packet[8:], knockOpcode)
 	binary.LittleEndian.PutUint16(packet[10:], knockSubtype)
 	copy(packet[uidOffset:uidOffset+UIDLength], uid)
 	copy(packet[nonceOffset:nonceOffset+len(nonce)], nonce[:])

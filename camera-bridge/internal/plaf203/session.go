@@ -13,7 +13,6 @@ import (
 
 const (
 	defaultDiscoveryTimeout = 2 * time.Second
-	defaultKnockTimeout     = 2 * time.Second
 	defaultLoginTimeout     = 3 * time.Second
 	mediaStatsLogInterval   = 5 * time.Second
 )
@@ -61,7 +60,6 @@ type TransportFactory interface {
 type DirectConnector struct {
 	TransportFactory  TransportFactory
 	DiscoveryTimeout  time.Duration
-	KnockTimeout      time.Duration
 	LoginTimeout      time.Duration
 	BootstrapTimeout  time.Duration
 	BroadcastFallback bool
@@ -74,7 +72,6 @@ func NewDirectConnector() *DirectConnector {
 	return &DirectConnector{
 		TransportFactory:  UDPTransportFactory{},
 		DiscoveryTimeout:  defaultDiscoveryTimeout,
-		KnockTimeout:      defaultKnockTimeout,
 		LoginTimeout:      defaultLoginTimeout,
 		BootstrapTimeout:  defaultBootstrapTimeout,
 		BroadcastFallback: true,
@@ -118,15 +115,12 @@ func (connector *DirectConnector) Connect(ctx context.Context, uid string, feede
 	}
 
 	emit(observe, Event{State: StateKnocking, Address: address, Step: discoveryMode})
-	knockTimeout := connector.KnockTimeout
-	if knockTimeout <= 0 {
-		knockTimeout = defaultKnockTimeout
-	}
-	knockContext, knockCancel := context.WithTimeout(ctx, knockTimeout)
-	address, err = CompleteKnock(knockContext, transport, address, uid, nonce, observe)
-	knockCancel()
+	knockReply, err := EncodeKnockReply(uid, nonce)
 	if err != nil {
 		return nil, err
+	}
+	if err := transport.SendTo(tutk.TransCodePartial(nil, knockReply), address); err != nil {
+		return nil, fmt.Errorf("send PLAF203 KNOCK_RR2: %w", err)
 	}
 
 	emit(observe, Event{State: StateLoggingIn, Address: address})

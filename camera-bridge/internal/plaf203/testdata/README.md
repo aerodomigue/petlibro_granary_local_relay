@@ -12,4 +12,4 @@ stored in wire-transcoded form. After `ReverseTransCodePartial`, it has a
 `0x0602` opcode and `0x0012` subtype, the UID at offsets `16..35`, and no
 field confirmed as an echoed request nonce. The dynamic UDP source address is
 the peer endpoint. The nonce is strictly correlated by the following
-`KNOCK_RR2` packet at offsets `36..43`.
+`KNOCK2` packet at offsets `36..43`; the bridge then sends `KNOCK_RR2`.

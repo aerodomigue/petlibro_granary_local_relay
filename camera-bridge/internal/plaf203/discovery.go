@@ -20,8 +20,8 @@ type DatagramTransport interface {
 }
 
 // Discover sends a UID-specific LAN_SEARCH3 broadcast probe and accepts only a
-// LAN_SEARCH_R that proves the requested UID. The generated nonce is checked
-// later against the KNOCK_RR2 response.
+// LAN_SEARCH_R that proves the requested UID, followed by a KNOCK2 that
+// proves the requested UID and generated nonce.
 func Discover(ctx context.Context, transport DatagramTransport, uid string, nonce [8]byte, targets []*net.UDPAddr) (*net.UDPAddr, error) {
 	return discover(ctx, transport, uid, nonce, targets, nil, nil)
 }
@@ -55,6 +55,7 @@ func discover(ctx context.Context, transport DatagramTransport, uid string, nonc
 		}
 	}
 
+	var searchPeer *net.UDPAddr
 	for {
 		packet, address, receiveErr := transport.Receive(ctx)
 		if receiveErr != nil {
@@ -66,56 +67,37 @@ func discover(ctx context.Context, transport DatagramTransport, uid string, nonc
 		}
 		decoded := tutk.ReverseTransCodePartial(nil, packet)
 		opcode := discoveryOpcode(decoded)
-		emitDiscoveryDiagnostic(observe, address, "response", len(packet), opcode)
+		if searchPeer == nil {
+			emitDiscoveryDiagnostic(observe, address, "response", len(packet), opcode)
+		}
 		if expectedSourceIP != nil && !address.IP.Equal(expectedSourceIP) {
-			emitDiscoveryDiagnostic(observe, address, "reject_source_ip", len(packet), opcode)
+			if searchPeer == nil {
+				emitDiscoveryDiagnostic(observe, address, "reject_source_ip", len(packet), opcode)
+			}
 			continue
 		}
-		if _, decodeErr := DecodeLANSearchResponse(decoded, uid); decodeErr != nil {
-			emitDiscoveryDiagnostic(observe, address, discoveryRejectStep(decodeErr), len(packet), opcode)
+		if searchPeer == nil {
+			if _, decodeErr := DecodeLANSearchResponse(decoded, uid); decodeErr != nil {
+				emitDiscoveryDiagnostic(observe, address, discoveryRejectStep(decodeErr), len(packet), opcode)
+				continue
+			}
+			searchPeer = cloneDiscoveryAddress(address)
+			emitDiscoveryDiagnostic(observe, address, "valid", len(packet), opcode)
+			emit(observe, Event{State: StateKnocking, Address: searchPeer, Step: "wait"})
 			continue
 		}
-		emitDiscoveryDiagnostic(observe, address, "valid", len(packet), opcode)
-		return &net.UDPAddr{IP: append(net.IP(nil), address.IP...), Port: address.Port}, nil
+		if !address.IP.Equal(searchPeer.IP) {
+			continue
+		}
+		if _, decodeErr := DecodeKnock2(decoded, uid, nonce); decodeErr != nil {
+			continue
+		}
+		return cloneDiscoveryAddress(address), nil
 	}
 }
 
-// CompleteKnock sends LAN_SEARCH3 phase 2 then KNOCK2, and accepts only a
-// KNOCK_RR2 with the requested UID and nonce. The feeder may change its UDP
-// source port, so the peer IP is pinned while the port remains dynamic.
-func CompleteKnock(ctx context.Context, transport DatagramTransport, address *net.UDPAddr, uid string, nonce [8]byte, observe Observer) (*net.UDPAddr, error) {
-	if address == nil || address.IP == nil {
-		return nil, fmt.Errorf("PLAF203 KNOCK requires a discovery peer")
-	}
-	phaseTwo, err := EncodeLANSearch3Phase(uid, nonce, 2)
-	if err != nil {
-		return nil, err
-	}
-	if err := transport.SendTo(tutk.TransCodePartial(nil, phaseTwo), address); err != nil {
-		return nil, fmt.Errorf("send PLAF203 LAN_SEARCH3 phase 2: %w", err)
-	}
-	knock, err := EncodeKnock2(uid, nonce)
-	if err != nil {
-		return nil, err
-	}
-	if err := transport.SendTo(tutk.TransCodePartial(nil, knock), address); err != nil {
-		return nil, fmt.Errorf("send PLAF203 KNOCK2: %w", err)
-	}
-	emit(observe, Event{State: StateKnocking, Address: address, Step: "wait"})
-	for {
-		packet, peer, receiveErr := transport.Receive(ctx)
-		if receiveErr != nil {
-			return nil, fmt.Errorf("receive PLAF203 KNOCK_RR2: %w", receiveErr)
-		}
-		if peer == nil || peer.IP == nil || !peer.IP.Equal(address.IP) {
-			continue
-		}
-		decoded := tutk.ReverseTransCodePartial(nil, packet)
-		if _, decodeErr := DecodeKnockReply(decoded, uid, nonce); decodeErr != nil {
-			continue
-		}
-		return &net.UDPAddr{IP: append(net.IP(nil), peer.IP...), Port: peer.Port}, nil
-	}
+func cloneDiscoveryAddress(address *net.UDPAddr) *net.UDPAddr {
+	return &net.UDPAddr{IP: append(net.IP(nil), address.IP...), Port: address.Port, Zone: address.Zone}
 }
 
 func emitDiscoveryDiagnostic(observe Observer, address *net.UDPAddr, step string, packetLength int, opcode uint16) {
