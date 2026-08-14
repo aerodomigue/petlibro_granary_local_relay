@@ -4,6 +4,7 @@ package bridge
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strings"
@@ -95,7 +96,18 @@ func (server *MediaServer) handleConnection(connection net.Conn) {
 		release = closer
 		log.Printf("CAMERA MEDIA CLIENT CONNECTED device=%s peer=%s", deviceID, connection.RemoteAddr())
 	})
-	_ = consumer.Accept()
+	if err := consumer.Accept(); err != nil {
+		if !errors.Is(err, io.EOF) {
+			log.Printf("CAMERA MEDIA CLIENT SETUP FAILED peer=%s error=%v", connection.RemoteAddr(), err)
+		}
+	} else if release != nil {
+		// rtsp.Conn.Accept returns as soon as the consumer has completed PLAY.
+		// The connection must remain in Handle for RTP output and RTSP keepalives;
+		// closing it here makes go2rtc retry the source in a tight EOF loop.
+		if err := consumer.Handle(); err != nil && !errors.Is(err, io.EOF) {
+			log.Printf("CAMERA MEDIA CLIENT HANDLE FAILED peer=%s error=%v", connection.RemoteAddr(), err)
+		}
+	}
 	_ = consumer.Stop()
 	if release != nil {
 		release()
