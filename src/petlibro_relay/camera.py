@@ -34,6 +34,7 @@ CAMERA_BRIDGE_HEALTH_PATH = "/healthz"
 CACHE_SECONDS = 2.0
 REGISTRATION_QUEUE_MAXSIZE = 128
 REGISTRAR_POLL_TIMEOUT_SECONDS = 0.1
+WHEP_IDLE_CLOSE_SECONDS = 10.0
 
 CameraBridgeMapping = tuple[str, str, str | None]
 
@@ -481,7 +482,8 @@ class Go2RtcStreamClient:
     def __init__(self, settings: Go2RtcSettings) -> None:
         self._settings = settings
         self._ensured_streams: set[str] = set()
-        self._webrtc_sessions: dict[str, tuple[str, str]] = {}
+        self._webrtc_sessions: dict[str, tuple[str, str | None]] = {}
+        self._webrtc_stop_timers: dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
 
     def ensure_stream(self, device_id: str) -> bool:
@@ -545,24 +547,51 @@ class Go2RtcStreamClient:
             session = self._webrtc_sessions.pop(session_id, None)
         if session is None or session[0] != device_id:
             return False
-        try:
-            with urlopen(Request(session[1], method="DELETE"), timeout=self._settings.timeout_seconds):  # noqa: S310
-                pass
-        except (HTTPError, URLError, OSError, TimeoutError) as error:
-            _LOGGER.debug("WEBRTC CLOSE FAILED device=%s error=%s", device_id, error)
-            return False
+        if session[1] is not None:
+            try:
+                with urlopen(Request(session[1], method="DELETE"), timeout=self._settings.timeout_seconds):  # noqa: S310
+                    pass
+            except (HTTPError, URLError, OSError, TimeoutError) as error:
+                _LOGGER.debug("WEBRTC CLOSE FAILED device=%s error=%s", device_id, error)
+                return False
+        self._schedule_idle_stream_stop(device_id)
         _LOGGER.info("WEBRTC CLOSED device=%s", device_id)
         return True
 
     def _remember_webrtc_session(self, device_id: str, location: str | None) -> str | None:
         """Store go2rtc locations behind opaque browser tokens."""
-        if not location:
-            return None
         session_id = uuid.uuid4().hex
-        session_url = location if location.startswith("http") else f"{self._base_url()}{location}"
+        session_url = None
+        if location:
+            session_url = location if location.startswith("http") else f"{self._base_url()}{location}"
         with self._lock:
+            timer = self._webrtc_stop_timers.pop(device_id, None)
+            if timer is not None:
+                timer.cancel()
             self._webrtc_sessions[session_id] = (device_id, session_url)
         return session_id
+
+    def _schedule_idle_stream_stop(self, device_id: str) -> None:
+        """Stop the local producer only after the final viewer grace period."""
+        with self._lock:
+            if any(session[0] == device_id for session in self._webrtc_sessions.values()):
+                return
+            if device_id in self._webrtc_stop_timers:
+                return
+            timer = threading.Timer(WHEP_IDLE_CLOSE_SECONDS, self._stop_idle_stream, args=(device_id,))
+            timer.daemon = True
+            self._webrtc_stop_timers[device_id] = timer
+            timer.start()
+
+    def _stop_idle_stream(self, device_id: str) -> None:
+        """Drop the go2rtc source after the grace period if no viewer returned."""
+        with self._lock:
+            self._webrtc_stop_timers.pop(device_id, None)
+            if any(session[0] == device_id for session in self._webrtc_sessions.values()):
+                return
+            self._ensured_streams.discard(stream_name_for_device(device_id))
+        self._delete_stream(stream_name_for_device(device_id))
+        _LOGGER.info("CAMERA STREAM STOP device=%s reason=no_viewers", device_id)
 
     def _stream_exists(self, stream_name: str) -> bool:
         request = Request(f"{self._base_url()}{GO2RTC_STREAMS_PATH}", method="GET")
