@@ -29,7 +29,7 @@ services:
   # empty until its device-specific protocol has been documented; the relay
   # only reads go2rtc's stream status API on this Docker network.
   go2rtc:
-    image: alexxit/go2rtc:v1.9.14
+    image: alexxit/go2rtc:1.9.14
     container_name: petlibro-relay-go2rtc
     restart: unless-stopped
     volumes:

@@ -394,7 +394,7 @@ deliberate choice.
 
 ## Camera / go2rtc POC
 
-The Compose stack includes a pinned `alexxit/go2rtc:v1.9.14` sidecar for
+The Compose stack includes a pinned `alexxit/go2rtc:1.9.14` sidecar for
 read-only camera status. It is internal-only and the relay calls only
 go2rtc's stream-list endpoint; no go2rtc administration is proxied. The
 PLAF203 source itself is intentionally **not configured**: go2rtc contains

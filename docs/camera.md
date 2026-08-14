@@ -1,6 +1,6 @@
 # Camera / TUTK POC
 
-The Compose stack includes an internal `alexxit/go2rtc:v1.9.14` sidecar. The
+The Compose stack includes an internal `alexxit/go2rtc:1.9.14` sidecar. The
 relay only queries its `GET /api/streams` endpoint and exposes the safe status
 at `GET /api/devices/{device_id}/camera` and the device Camera tab. It does
 not proxy go2rtc's administrative API, write its configuration, or publish
