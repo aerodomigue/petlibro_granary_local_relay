@@ -536,6 +536,7 @@ def test_camera_player_survives_device_status_refreshes() -> None:
     """Camera polling preserves the active WebRTC video element and peer connection."""
     assert "player&&player.deviceId===deviceId&&byId('camera-player')" in DASHBOARD_HTML
     assert "runtime.deviceDetail=detail;updateCameraPlayerStatus(detail.camera);return" in DASHBOARD_HTML
+    assert "video.onloadeddata=()=>{if(runtime.cameraPlayer===player)setCameraPlayerState('Live','live')}" in DASHBOARD_HTML
 
 
 def test_controls_and_schedule_use_conditional_human_friendly_components() -> None:
