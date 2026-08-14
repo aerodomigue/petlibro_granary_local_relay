@@ -3,6 +3,7 @@ package plaf203
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,7 +26,14 @@ const (
 
 var streamControlHD = [8]byte{0x01, 0x00, 0xFF, 0x3F, 0x00, 0x00, 0x00, 0x00}
 
-func (session *Session) bootstrap(ctx context.Context) (*VideoFrame, error) {
+func (session *Session) bootstrap(ctx context.Context) (_ *VideoFrame, returnErr error) {
+	diagnostics := newBootstrapDiagnostics(session.ID, session.observer)
+	defer func() {
+		if errors.Is(returnErr, context.DeadlineExceeded) {
+			diagnostics.emitTimeout()
+		}
+	}()
+
 	timestampMillis := uint32(session.clock().UnixMilli())
 	if err := session.sendLoginPair(timestampMillis); err != nil {
 		return nil, err
@@ -44,13 +52,13 @@ func (session *Session) bootstrap(ctx context.Context) (*VideoFrame, error) {
 	if err := session.sendBody(encodeBootstrapAck(session.nextControlCounter(), formatControlIndex, uint16(session.clock().UnixMilli()))); err != nil {
 		return nil, fmt.Errorf("send PLAF203 bootstrap acknowledgement: %w", err)
 	}
-	if err := session.waitForControlReplies(ctx); err != nil {
+	if err := session.waitForControlReplies(ctx, diagnostics); err != nil {
 		return nil, err
 	}
 	if err := session.sendControl(controlChannelSystem, 2, controlStartVideo, nil); err != nil {
 		return nil, err
 	}
-	return session.waitForVideo(ctx)
+	return session.waitForVideo(ctx, diagnostics)
 }
 
 func (session *Session) sendLoginPair(timestampMillis uint32) error {
@@ -82,18 +90,24 @@ func (session *Session) sendControl(channel uint16, index uint32, controlType ui
 	return nil
 }
 
-func (session *Session) waitForControlReplies(ctx context.Context) error {
+func (session *Session) waitForControlReplies(ctx context.Context, diagnostics *bootstrapDiagnostics) error {
 	replyContext, cancel := context.WithTimeout(ctx, bootstrapReplyTimeout)
 	defer cancel()
 	const requiredReplies = 2
 	replies := 0
 	for replies < requiredReplies {
-		packet, _, err := session.transport.Receive(replyContext)
+		packet, peer, err := session.transport.Receive(replyContext)
 		if err != nil {
 			return fmt.Errorf("receive PLAF203 bootstrap control reply: %w", err)
 		}
-		inner, err := decodeDeviceSession(tutk.ReverseTransCodePartial(nil, packet), session.ID)
-		if err != nil || !isControlReply(inner) {
+		decoded, details := diagnostics.observe(packet, peer)
+		inner, decodeErr := decodeDeviceSession(decoded, session.ID)
+		if decodeErr != nil {
+			diagnostics.ignore(details, details.classification)
+			continue
+		}
+		if !isControlReply(inner) {
+			diagnostics.ignore(details, "not_control_reply")
 			continue
 		}
 		replies++
@@ -101,14 +115,24 @@ func (session *Session) waitForControlReplies(ctx context.Context) error {
 	return nil
 }
 
-func (session *Session) waitForVideo(ctx context.Context) (*VideoFrame, error) {
+func (session *Session) waitForVideo(ctx context.Context, diagnostics *bootstrapDiagnostics) (*VideoFrame, error) {
 	for {
-		packet, _, err := session.transport.Receive(ctx)
+		packet, peer, err := session.transport.Receive(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("receive PLAF203 bootstrap media: %w", err)
 		}
-		frame, parseErr := session.media.HandlePacket(tutk.ReverseTransCodePartial(nil, packet), session.ID, session.clock())
-		if parseErr != nil || frame == nil {
+		decoded, details := diagnostics.observe(packet, peer)
+		frame, parseErr := session.media.HandlePacket(decoded, session.ID, session.clock())
+		if parseErr != nil {
+			diagnostics.ignore(details, "media_parse_error")
+			continue
+		}
+		if frame == nil {
+			if details.classification == "media_fragment" {
+				diagnostics.ignore(details, "media_fragment_incomplete")
+			} else {
+				diagnostics.ignore(details, details.classification)
+			}
 			continue
 		}
 		return frame, nil

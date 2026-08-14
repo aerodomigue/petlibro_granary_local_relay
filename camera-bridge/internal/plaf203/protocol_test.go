@@ -284,6 +284,9 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 	}
 	states := make([]SessionState, 0, 5)
 	session, err := connector.Connect(context.Background(), protocolTestUID, nil, func(event Event) {
+		if event.State == StateBootstrapping && event.Step != "" {
+			return
+		}
 		states = append(states, event.State)
 	})
 	if err != nil {

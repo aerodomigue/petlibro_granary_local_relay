@@ -335,7 +335,16 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 		log.Printf("CAMERA LOGIN OK device=%s", deviceID)
 		log.Printf("CAMERA SESSION CONNECTED device=%s", deviceID)
 	case plaf203.StateBootstrapping:
-		log.Printf("CAMERA BOOTSTRAP START device=%s", deviceID)
+		switch event.Step {
+		case "rx":
+			log.Printf("CAMERA BOOTSTRAP RX device=%s peer=%s bytes=%d outer_opcode=0x%04x session_channel=0x%04x session_cmd=0x%04x control_type=0x%08x seq=%d", deviceID, safeAddress(event.Address), event.PacketLength, event.Opcode, event.SessionChannel, event.SessionCommand, event.ControlType, event.Sequence)
+		case "ignore":
+			log.Printf("CAMERA BOOTSTRAP IGNORE device=%s peer=%s bytes=%d outer_opcode=0x%04x session_channel=0x%04x session_cmd=0x%04x reason=%s", deviceID, safeAddress(event.Address), event.PacketLength, event.Opcode, event.SessionChannel, event.SessionCommand, event.Reason)
+		case "timeout":
+			log.Printf("CAMERA BOOTSTRAP TIMEOUT device=%s rx_packets=%d rx_bytes=%d types=%s rejected=%s", deviceID, event.PacketCount, event.ByteCount, event.Types, event.Rejected)
+		default:
+			log.Printf("CAMERA BOOTSTRAP START device=%s", deviceID)
+		}
 	case plaf203.StateStreaming:
 		if event.Step != "media_stats" {
 			log.Printf("CAMERA BOOTSTRAP OK device=%s", deviceID)

@@ -33,14 +33,23 @@ const (
 
 // Event reports an immutable protocol transition to the owning bridge.
 type Event struct {
-	State        SessionState
-	Address      *net.UDPAddr
-	LocalAddress *net.UDPAddr
-	Step         string
-	PacketLength int
-	Opcode       uint16
-	Error        string
-	Frame        *VideoFrame
+	State          SessionState
+	Address        *net.UDPAddr
+	LocalAddress   *net.UDPAddr
+	Step           string
+	PacketLength   int
+	Opcode         uint16
+	Sequence       uint16
+	SessionChannel uint16
+	SessionCommand uint16
+	ControlType    uint32
+	Reason         string
+	PacketCount    uint64
+	ByteCount      uint64
+	Types          string
+	Rejected       string
+	Error          string
+	Frame          *VideoFrame
 }
 
 // Observer receives state transitions without receiving the UID or any secret.
