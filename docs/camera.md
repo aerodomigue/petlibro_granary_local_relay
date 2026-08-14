@@ -7,14 +7,15 @@ and asynchronously registers it to `camera-bridge`. The dashboard exposes only
 safe readiness state at `GET /api/devices/{device_id}/camera`; it never returns
 the UID, source URL, token, password, or a writable media API.
 
-## Current status: discovery and knock verified; LOGIN and media unsupported
+## Current status: discovery, knock, and LOGIN verified; media unsupported
 
 There is deliberately no `plaf203_<device_id>` source in
 `go2rtc/go2rtc.yaml`. The `camera-bridge` API is limited to `GET /healthz`,
 `GET /devices`, `PUT /devices/{device_id}`, `POST /devices/{device_id}/connect`,
 `POST /devices/{device_id}/disconnect`, and `DELETE /devices/{device_id}`.
-It records a UID mapping but explicitly reports
-`plaf203_login_not_implemented`; it never opens a persistent session.
+It records a UID mapping and reports `plaf203_media_not_implemented`: an
+authenticated control transport may be open, but no camera media source is
+created.
 
 The bridge now implements the bounded, explicit connection preamble exposed by
 `POST /devices/{device_id}/connect` and cancelled by
@@ -31,15 +32,23 @@ confirmed in the local capture:
 2. The feeder answers from its dynamic UDP source port with `KNOCK2`. The
    bridge accepts the candidate only when **both** the UID and nonce match the
    request, then sends `KNOCK_RR2` back to that exact address.
-3. The bridge enters `logging_in` and stops with
-   `PLAF203 LOGIN is not enabled`.
+3. The bridge enters `logging_in`, sends the two captured Session16
+   `client-start` datagrams (`0x0407`, 598 bytes each), and applies the same
+   official TUTK partial wire transform as the preamble. The pair differs only
+   by its fixed variant marker, sequence number, and timestamp.
+4. The feeder must answer with the captured explicit `0x0408` / `0x0012`
+   success acknowledgement (88 bytes after decoding), with the correlated
+   Session16 ID and command bytes `00 21 0b`. Only then does the bridge retain
+   the UDP transport and expose `connected`.
 
-No `connected` state is produced by the production connector at this stage.
-The third-party fork documents a different `LOGIN A/B` shape from the local
-V3.0.30 capture's post-knock exchange, so sending either would be an
-unverified write to the feeder. The LOGIN primitive will be added only after a
-fresh, device-specific capture establishes its exact packet layout and success
-criterion.
+`POST /devices/{device_id}/disconnect` closes that authenticated transport.
+No automatic retry or post-login traffic is implemented. The next captured
+`0x0407` packet is deliberately outside this scope; it appears to begin
+post-login bootstrap/session work, not the LOGIN proof itself.
+
+The third-party fork's 570/572-byte login pair differs from the local V3.0.30
+capture and is not used at runtime. The bridge uses only the pinned official
+`github.com/AlexxIT/go2rtc/pkg/tutk` wire transform primitives.
 
 The conclusion comes from these inspected upstream sources:
 
@@ -111,7 +120,6 @@ returns a source URL, UID, token, password, or cloud contract.
 For a configured device, the deterministic stream name is
 `plaf203_<device_id>`. It supports the future multi-device mapping but is not
 an instruction to invent a source. The next required evidence is a passive
-capture of the exact V3.0.30 LOGIN response and authentication criterion,
-followed separately by the AV control frames, media framing, and codecs. Only
-then can a device-specific go2rtc producer or a verified upstream source be
-considered.
+capture and decoding of the post-login AV control frames, media framing, and
+codecs. Only then can a device-specific go2rtc producer or a verified upstream
+source be considered.

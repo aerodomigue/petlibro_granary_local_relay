@@ -47,6 +47,7 @@ type deviceRecord struct {
 	device        Device
 	uid           string
 	cancel        context.CancelFunc
+	session       *plaf203.Session
 	attemptID     uint64
 	connectActive bool
 }
@@ -82,9 +83,9 @@ func (r *Registry) Upsert(deviceID string, uid string) (Device, error) {
 		return Device{}, ErrInvalidUID
 	}
 
-	// Keep the official transport dependency compile-checked. A real session
-	// must use this package only after the Petlibro-specific protocol has a
-	// separate, tested implementation; it must not borrow fork code at runtime.
+	// Keep the official wire-transform dependency compile-checked. The
+	// Petlibro-specific protocol remains a separately tested implementation and
+	// never borrows third-party fork code at runtime.
 	_ = tutk.TransCodePartial
 
 	r.mu.Lock()
@@ -96,7 +97,7 @@ func (r *Registry) Upsert(deviceID string, uid string) (Device, error) {
 			UIDLearned:       true,
 			Stream:           streamPrefix + deviceID,
 			StreamAvailable:  false,
-			Reason:           "plaf203_login_not_implemented",
+			Reason:           "plaf203_media_not_implemented",
 			ConnectionState:  plaf203.StateIdle,
 			LastTransitionAt: now,
 		}
@@ -117,6 +118,9 @@ func (r *Registry) Delete(deviceID string) bool {
 	r.mu.Unlock()
 	if found && record.cancel != nil {
 		record.cancel()
+	}
+	if found && record.session != nil {
+		_ = record.session.Close()
 	}
 	return found
 }
@@ -163,9 +167,11 @@ func (r *Registry) Disconnect(deviceID string) bool {
 		return false
 	}
 	cancel := record.cancel
+	session := record.session
 	record.attemptID++
 	record.connectActive = false
 	record.cancel = nil
+	record.session = nil
 	record.device.ConnectionState = plaf203.StateIdle
 	record.device.LastError = ""
 	record.device.LastTransitionAt = time.Now().UTC()
@@ -174,6 +180,9 @@ func (r *Registry) Disconnect(deviceID string) bool {
 	r.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if session != nil {
+		_ = session.Close()
 	}
 	return true
 }
@@ -193,14 +202,37 @@ func (r *Registry) List() []Device {
 }
 
 func (r *Registry) runConnect(ctx context.Context, connector plaf203.Connector, deviceID string, uid string, attemptID uint64) {
-	err := connector.Connect(ctx, uid, func(event plaf203.Event) {
+	session, err := connector.Connect(ctx, uid, func(event plaf203.Event) {
 		r.transition(deviceID, attemptID, event)
 	})
 	if err == nil {
-		r.transition(deviceID, attemptID, plaf203.Event{State: plaf203.StateConnected})
+		r.connected(deviceID, attemptID, session)
 		return
 	}
 	r.fail(deviceID, attemptID, err)
+}
+
+func (r *Registry) connected(deviceID string, attemptID uint64, session *plaf203.Session) {
+	r.mu.Lock()
+	record, found := r.devices[deviceID]
+	if !found || record.attemptID != attemptID {
+		r.mu.Unlock()
+		if session != nil {
+			_ = session.Close()
+		}
+		return
+	}
+	now := time.Now().UTC()
+	record.session = session
+	record.cancel = nil
+	record.device.ConnectionState = plaf203.StateConnected
+	record.device.LastError = ""
+	record.device.LastTransitionAt = now
+	record.device.UpdatedAt = now
+	r.devices[deviceID] = record
+	r.mu.Unlock()
+	log.Printf("CAMERA LOGIN OK device=%s", deviceID)
+	log.Printf("CAMERA SESSION CONNECTED device=%s", deviceID)
 }
 
 func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.Event) {
@@ -225,10 +257,12 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 		log.Printf("CAMERA DISCOVERY FOUND device=%s addr=%s", deviceID, safeAddress(event.Address))
 		log.Printf("CAMERA KNOCK START device=%s", deviceID)
 	case plaf203.StateLoggingIn:
-		log.Printf("CAMERA KNOCK OK device=%s", deviceID)
-		log.Printf("CAMERA LOGIN START device=%s", deviceID)
-	case plaf203.StateConnected:
-		log.Printf("CAMERA SESSION CONNECTED device=%s", deviceID)
+		if event.Step == "" {
+			log.Printf("CAMERA KNOCK OK device=%s", deviceID)
+			log.Printf("CAMERA LOGIN START device=%s", deviceID)
+		} else {
+			log.Printf("CAMERA LOGIN STEP device=%s step=%s", deviceID, event.Step)
+		}
 	}
 }
 
@@ -239,6 +273,7 @@ func (r *Registry) fail(deviceID string, attemptID uint64, connectionError error
 		r.mu.Unlock()
 		return
 	}
+	failedState := record.device.ConnectionState
 	now := time.Now().UTC()
 	record.connectActive = false
 	record.cancel = nil
@@ -248,14 +283,11 @@ func (r *Registry) fail(deviceID string, attemptID uint64, connectionError error
 	record.device.UpdatedAt = now
 	r.devices[deviceID] = record
 	r.mu.Unlock()
-	log.Printf("CAMERA SESSION FAILED device=%s stage=%s error=%v", deviceID, connectionStage(connectionError), connectionError)
-}
-
-func connectionStage(connectionError error) string {
-	if errors.Is(connectionError, plaf203.ErrLoginUnsupported) {
-		return "login"
+	if failedState == plaf203.StateLoggingIn {
+		log.Printf("CAMERA LOGIN FAILED device=%s error=%v", deviceID, connectionError)
+	} else {
+		log.Printf("CAMERA SESSION FAILED device=%s stage=%s error=%v", deviceID, failedState, connectionError)
 	}
-	return "discovery_or_knock"
 }
 
 func safeAddress(address *net.UDPAddr) string {

@@ -91,7 +91,7 @@ type scriptedConnector struct {
 	release chan struct{}
 }
 
-func (connector *scriptedConnector) Connect(ctx context.Context, uid string, observer plaf203.Observer) error {
+func (connector *scriptedConnector) Connect(ctx context.Context, uid string, observer plaf203.Observer) (*plaf203.Session, error) {
 	connector.mu.Lock()
 	connector.calls++
 	release := connector.release
@@ -101,9 +101,9 @@ func (connector *scriptedConnector) Connect(ctx context.Context, uid string, obs
 	case <-release:
 		observer(plaf203.Event{State: plaf203.StateKnocking})
 		observer(plaf203.Event{State: plaf203.StateLoggingIn})
-		return plaf203.ErrLoginUnsupported
+		return nil, errors.New("test login failed")
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
 }
 
@@ -139,9 +139,9 @@ func TestRegistryCanRepresentAConfirmedFutureLoginWithoutFalseProductionSuccess(
 
 type connectedConnector struct{}
 
-func (connectedConnector) Connect(_ context.Context, _ string, observer plaf203.Observer) error {
+func (connectedConnector) Connect(_ context.Context, _ string, observer plaf203.Observer) (*plaf203.Session, error) {
 	observer(plaf203.Event{State: plaf203.StateDiscovering})
 	observer(plaf203.Event{State: plaf203.StateKnocking})
 	observer(plaf203.Event{State: plaf203.StateLoggingIn})
-	return nil
+	return &plaf203.Session{}, nil
 }

@@ -123,30 +123,43 @@ func TestDiscoveryTimeoutIsBounded(t *testing.T) {
 	}
 }
 
-func TestDirectConnectorStopsBeforeUnconfirmedLogin(t *testing.T) {
+func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) {
 	transport := &fakeTransport{}
 	transport.onSend = func(packet []byte, address *net.UDPAddr) {
 		decoded := tutk.ReverseTransCodePartial(nil, packet)
-		if len(decoded) != lanSearchLength || binary.LittleEndian.Uint16(decoded[8:]) != lanSearchOpcode {
+		if len(decoded) == lanSearchLength && binary.LittleEndian.Uint16(decoded[8:]) == lanSearchOpcode {
+			var nonce [8]byte
+			copy(nonce[:], decoded[lanSearchNonce:lanSearchNonce+len(nonce)])
+			transport.addResponse(tutk.TransCodePartial(nil, testKnock2(protocolTestUID, nonce)), &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 40238})
 			return
 		}
-		var nonce [8]byte
-		copy(nonce[:], decoded[lanSearchNonce:lanSearchNonce+len(nonce)])
-		transport.addResponse(tutk.TransCodePartial(nil, testKnock2(protocolTestUID, nonce)), &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 40238})
+		if len(decoded) == loginRequestLength && binary.LittleEndian.Uint16(decoded[8:]) == clientSessionOpcode && binary.LittleEndian.Uint16(decoded[6:]) == 1 {
+			var sessionID [8]byte
+			copy(sessionID[:], decoded[20:28])
+			transport.addResponse(tutk.TransCodePartial(nil, testLoginSuccess(sessionID)), address)
+		}
 	}
 	connector := &DirectConnector{
 		TransportFactory:  fakeTransportFactory{transport: transport},
 		DiscoveryTimeout:  time.Second,
+		LoginTimeout:      time.Second,
 		DiscoveryTargeter: func() ([]*net.UDPAddr, error) { return []*net.UDPAddr{{IP: net.IPv4bcast, Port: LANPort}}, nil },
+		Clock:             func() time.Time { return time.UnixMilli(1_786_544_102_000) },
 	}
-	states := make([]SessionState, 0, 3)
-	err := connector.Connect(context.Background(), protocolTestUID, func(event Event) {
+	states := make([]SessionState, 0, 5)
+	session, err := connector.Connect(context.Background(), protocolTestUID, func(event Event) {
 		states = append(states, event.State)
 	})
-	if !errors.Is(err, ErrLoginUnsupported) {
+	if err != nil {
 		t.Fatalf("error=%v", err)
 	}
-	want := []SessionState{StateDiscovering, StateKnocking, StateLoggingIn}
+	if session == nil {
+		t.Fatal("session is nil")
+	}
+	if session.Address == nil || !session.Address.IP.Equal(net.ParseIP("192.0.2.25")) || session.Address.Port != 40238 {
+		t.Fatalf("session address=%v", session.Address)
+	}
+	want := []SessionState{StateDiscovering, StateKnocking, StateLoggingIn, StateLoggingIn, StateLoggingIn}
 	if len(states) != len(want) {
 		t.Fatalf("states=%v want=%v", states, want)
 	}
@@ -155,8 +168,74 @@ func TestDirectConnectorStopsBeforeUnconfirmedLogin(t *testing.T) {
 			t.Fatalf("states=%v want=%v", states, want)
 		}
 	}
-	if len(transport.sent) != 2 {
-		t.Fatalf("wire messages=%d want discovery plus KNOCK_RR2", len(transport.sent))
+	if len(transport.sent) != 4 {
+		t.Fatalf("wire messages=%d want discovery, KNOCK_RR2, and login pair", len(transport.sent))
+	}
+	if transport.CloseCount() != 0 {
+		t.Fatalf("transport closed before session close count=%d", transport.CloseCount())
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if transport.CloseCount() != 1 {
+		t.Fatalf("transport close count=%d want=1", transport.CloseCount())
+	}
+}
+
+func TestDirectConnectorRejectsUnexpectedLoginResponseAndTimesOut(t *testing.T) {
+	transport := &fakeTransport{}
+	configureDiscoveryResponder(transport, func(packet []byte, address *net.UDPAddr) {
+		if len(packet) != loginRequestLength || binary.LittleEndian.Uint16(packet[8:]) != clientSessionOpcode || binary.LittleEndian.Uint16(packet[6:]) != 1 {
+			return
+		}
+		transport.addResponse(tutk.TransCodePartial(nil, testLoginSuccess([8]byte{9, 9, 9, 9, 9, 9, 9, 9})), address)
+	})
+	connector := testDirectConnector(transport, 10*time.Millisecond)
+	_, err := connector.Connect(context.Background(), protocolTestUID, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error=%v", err)
+	}
+	if transport.CloseCount() != 1 {
+		t.Fatalf("transport close count=%d want=1", transport.CloseCount())
+	}
+}
+
+func TestDirectConnectorHonorsCancellationDuringLogin(t *testing.T) {
+	transport := &fakeTransport{}
+	connectionContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	configureDiscoveryResponder(transport, func(packet []byte, _ *net.UDPAddr) {
+		if len(packet) == loginRequestLength && binary.LittleEndian.Uint16(packet[8:]) == clientSessionOpcode && binary.LittleEndian.Uint16(packet[6:]) == 1 {
+			cancel()
+		}
+	})
+	connector := testDirectConnector(transport, time.Second)
+	_, err := connector.Connect(connectionContext, protocolTestUID, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func configureDiscoveryResponder(transport *fakeTransport, onLoginSend func([]byte, *net.UDPAddr)) {
+	transport.onSend = func(packet []byte, address *net.UDPAddr) {
+		decoded := tutk.ReverseTransCodePartial(nil, packet)
+		if len(decoded) == lanSearchLength && binary.LittleEndian.Uint16(decoded[8:]) == lanSearchOpcode {
+			var nonce [8]byte
+			copy(nonce[:], decoded[lanSearchNonce:lanSearchNonce+len(nonce)])
+			transport.addResponse(tutk.TransCodePartial(nil, testKnock2(protocolTestUID, nonce)), &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 40238})
+			return
+		}
+		onLoginSend(decoded, address)
+	}
+}
+
+func testDirectConnector(transport DatagramTransport, loginTimeout time.Duration) *DirectConnector {
+	return &DirectConnector{
+		TransportFactory:  fakeTransportFactory{transport: transport},
+		DiscoveryTimeout:  time.Second,
+		LoginTimeout:      loginTimeout,
+		DiscoveryTargeter: func() ([]*net.UDPAddr, error) { return []*net.UDPAddr{{IP: net.IPv4bcast, Port: LANPort}}, nil },
+		Clock:             func() time.Time { return time.UnixMilli(1_786_544_102_000) },
 	}
 }
 
@@ -180,10 +259,11 @@ type fakeDatagram struct {
 }
 
 type fakeTransport struct {
-	mu        sync.Mutex
-	sent      [][]byte
-	responses []fakeDatagram
-	onSend    func([]byte, *net.UDPAddr)
+	mu         sync.Mutex
+	sent       [][]byte
+	responses  []fakeDatagram
+	onSend     func([]byte, *net.UDPAddr)
+	closeCalls int
 }
 
 func (transport *fakeTransport) SendTo(packet []byte, address *net.UDPAddr) error {
@@ -211,7 +291,18 @@ func (transport *fakeTransport) Receive(ctx context.Context) ([]byte, *net.UDPAd
 	return nil, nil, ctx.Err()
 }
 
-func (transport *fakeTransport) Close() error { return nil }
+func (transport *fakeTransport) Close() error {
+	transport.mu.Lock()
+	transport.closeCalls++
+	transport.mu.Unlock()
+	return nil
+}
+
+func (transport *fakeTransport) CloseCount() int {
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	return transport.closeCalls
+}
 
 func (transport *fakeTransport) addResponse(packet []byte, address *net.UDPAddr) {
 	transport.mu.Lock()
