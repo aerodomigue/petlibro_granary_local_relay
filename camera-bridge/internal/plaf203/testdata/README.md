@@ -11,5 +11,5 @@ session identifier; it contains no account, MQTT, or camera credential.
 stored in wire-transcoded form. After `ReverseTransCodePartial`, it has a
 `0x0602` opcode and `0x0012` subtype, the UID at offsets `16..35`, and no
 field confirmed as an echoed request nonce. The dynamic UDP source address is
-the peer endpoint. The nonce is strictly correlated by the following
-`KNOCK2` packet at offsets `36..43`; the bridge then sends `KNOCK_RR2`.
+the peer endpoint. The direct-LAN sequence continues with a client-emitted
+`LAN_SEARCH3` phase 2 carrying the original nonce before LOGIN.

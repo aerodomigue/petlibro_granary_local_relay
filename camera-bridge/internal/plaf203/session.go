@@ -56,8 +56,8 @@ type TransportFactory interface {
 	Open() (DatagramTransport, error)
 }
 
-// DirectConnector implements only the protocol section confirmed against the
-// current PLAF203 capture: LAN_SEARCH3, KNOCK2/KNOCK_RR2, and the Session16
+// DirectConnector implements the direct-LAN protocol section confirmed for
+// PLAF203: LAN_SEARCH3 phases 1 and 2, followed by the existing Session16
 // client-start LOGIN pair.
 type DirectConnector struct {
 	TransportFactory  TransportFactory
@@ -82,7 +82,7 @@ func NewDirectConnector() *DirectConnector {
 	}
 }
 
-// Connect performs discovery, knock, and the verified V3.0.30 Session16
+// Connect performs direct LAN discovery and the verified V3.0.30 Session16
 // client-start pair. It returns an open session only after the feeder's 0x0408
 // ACK. The caller owns closing that session.
 func (connector *DirectConnector) Connect(ctx context.Context, uid string, feederIP net.IP, observe Observer) (*Session, error) {
@@ -130,18 +130,13 @@ func (connector *DirectConnector) Connect(ctx context.Context, uid string, feede
 	if timeout <= 0 {
 		timeout = defaultDiscoveryTimeout
 	}
-	address, discoveryMode, err := connector.discover(ctx, transport, uid, nonce, feederIP, timeout, observe)
+	address, _, err := connector.discover(ctx, transport, uid, nonce, feederIP, timeout, observe)
 	if err != nil {
 		return nil, err
 	}
 
-	emit(observe, Event{State: StateKnocking, Address: address, Step: discoveryMode})
-	knockReply, err := EncodeKnockReply(uid, nonce)
-	if err != nil {
+	if err := CompleteDirectDiscovery(transport, address, uid, nonce, observe); err != nil {
 		return nil, err
-	}
-	if err := transport.SendTo(tutk.TransCodePartial(nil, knockReply), address); err != nil {
-		return nil, fmt.Errorf("send PLAF203 KNOCK_RR2: %w", err)
 	}
 
 	emit(observe, Event{State: StateLoggingIn, Address: address})

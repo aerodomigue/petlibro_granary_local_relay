@@ -25,9 +25,9 @@ type routedTransportFactory interface {
 	OpenForDestination(context.Context, net.IP) (DatagramTransport, error)
 }
 
-// Discover sends a UID-specific LAN_SEARCH3 broadcast probe and accepts only a
-// LAN_SEARCH_R that proves the requested UID, followed by a KNOCK2 that
-// proves the requested UID and generated nonce.
+// Discover sends a UID-specific LAN_SEARCH3 phase 1 probe and accepts only a
+// LAN_SEARCH_R that proves the requested UID. The caller must then send phase
+// 2 to the returned dynamic peer before starting LOGIN.
 func Discover(ctx context.Context, transport DatagramTransport, uid string, nonce [8]byte, targets []*net.UDPAddr) (*net.UDPAddr, error) {
 	return discover(ctx, transport, uid, nonce, targets, nil, nil)
 }
@@ -83,7 +83,6 @@ func discover(ctx context.Context, transport DatagramTransport, uid string, nonc
 		})
 	}
 
-	var searchPeer *net.UDPAddr
 	for {
 		packet, address, receiveErr := transport.Receive(ctx)
 		if receiveErr != nil {
@@ -95,33 +94,38 @@ func discover(ctx context.Context, transport DatagramTransport, uid string, nonc
 		}
 		decoded := tutk.ReverseTransCodePartial(nil, packet)
 		opcode := discoveryOpcode(decoded)
-		if searchPeer == nil {
-			emitDiscoveryDiagnostic(observe, address, "response", len(packet), opcode)
-		}
+		emitDiscoveryDiagnostic(observe, address, "response", len(packet), opcode)
 		if expectedSourceIP != nil && !address.IP.Equal(expectedSourceIP) {
-			if searchPeer == nil {
-				emitDiscoveryDiagnostic(observe, address, "reject_source_ip", len(packet), opcode)
-			}
+			emitDiscoveryDiagnostic(observe, address, "reject_source_ip", len(packet), opcode)
 			continue
 		}
-		if searchPeer == nil {
-			if _, decodeErr := DecodeLANSearchResponse(decoded, uid); decodeErr != nil {
-				emitDiscoveryDiagnostic(observe, address, discoveryRejectStep(decodeErr), len(packet), opcode)
-				continue
-			}
-			searchPeer = cloneDiscoveryAddress(address)
-			emitDiscoveryDiagnostic(observe, address, "valid", len(packet), opcode)
-			emit(observe, Event{State: StateKnocking, Address: searchPeer, Step: "wait"})
+		if _, decodeErr := DecodeLANSearchResponse(decoded, uid); decodeErr != nil {
+			emitDiscoveryDiagnostic(observe, address, discoveryRejectStep(decodeErr), len(packet), opcode)
 			continue
 		}
-		if !address.IP.Equal(searchPeer.IP) {
-			continue
-		}
-		if _, decodeErr := DecodeKnock2(decoded, uid, nonce); decodeErr != nil {
-			continue
-		}
+		emitDiscoveryDiagnostic(observe, address, "valid", len(packet), opcode)
 		return cloneDiscoveryAddress(address), nil
 	}
+}
+
+// CompleteDirectDiscovery sends LAN_SEARCH3 phase 2 after a verified
+// LAN_SEARCH_R. The legacy direct TUTK path does not wait for a KNOCK packet
+// here; it immediately continues to LOGIN using the same session nonce.
+func CompleteDirectDiscovery(transport DatagramTransport, address *net.UDPAddr, uid string, nonce [8]byte, observe Observer) error {
+	if address == nil || address.IP == nil {
+		return fmt.Errorf("PLAF203 direct discovery requires a LAN_SEARCH_R peer")
+	}
+	phaseTwo, err := EncodeLANSearch3Phase(uid, nonce, 2)
+	if err != nil {
+		return err
+	}
+	wirePhaseTwo := tutk.TransCodePartial(nil, phaseTwo)
+	emit(observe, Event{State: StateDiscovering, Address: cloneDiscoveryAddress(address), Step: "phase_two_tx", PacketLength: len(wirePhaseTwo)})
+	if err := transport.SendTo(wirePhaseTwo, address); err != nil {
+		return fmt.Errorf("send PLAF203 LAN_SEARCH3 phase 2: %w", err)
+	}
+	emit(observe, Event{State: StateDiscovering, Address: cloneDiscoveryAddress(address), Step: "complete", PacketLength: len(wirePhaseTwo)})
+	return nil
 }
 
 func cloneDiscoveryAddress(address *net.UDPAddr) *net.UDPAddr {

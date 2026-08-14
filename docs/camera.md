@@ -38,12 +38,11 @@ confirmed in the local capture:
    bridge-network broadcast delivery.
 2. The feeder answers from a dynamic UDP source port with the 200-byte
    `LAN_SEARCH_R` (`0x0602`). The bridge validates the source IP and UID, then
-   uses that dynamic source as the peer endpoint. No response field has yet
-   been confirmed as an echoed request nonce. The feeder then emits the
-   parser's existing 52-byte `KNOCK2`; the bridge validates its UID and nonce,
-   sends `KNOCK_RR2` back to that peer, then begins LOGIN. The 52-byte KNOCK2
-   layout remains to be confirmed against a dedicated PCAP. The response port
-   is intentionally not required to be `32761`.
+   uses that dynamic source as the peer endpoint. It sends `LAN_SEARCH3` phase
+   2 with the same nonce and then begins LOGIN; the response port is
+   intentionally not required to be `32761`. This follows the legacy direct
+   TUTK path. The generic remote path's `0x0402`/`0x0404` exchange is not part
+   of this direct-LAN flow and is deliberately not emitted.
 3. The bridge enters `logging_in`, sends the two captured Session16
    `client-start` datagrams (`0x0407`, 598 bytes each), and applies the same
    official TUTK partial wire transform as the preamble. The pair differs only

@@ -299,6 +299,10 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 			log.Printf("CAMERA DISCOVERY RESPONSE device=%s peer=%s bytes=%d opcode=0x%04x", deviceID, safeAddress(event.Address), event.PacketLength, event.Opcode)
 		case "valid":
 			log.Printf("CAMERA DISCOVERY VALID device=%s peer=%s bytes=%d opcode=0x%04x", deviceID, safeAddress(event.Address), event.PacketLength, event.Opcode)
+		case "phase_two_tx":
+			log.Printf("CAMERA DISCOVERY PHASE2 TX device=%s peer=%s bytes=%d", deviceID, safeAddress(event.Address), event.PacketLength)
+		case "complete":
+			log.Printf("CAMERA DISCOVERY COMPLETE device=%s peer=%s", deviceID, safeAddress(event.Address))
 		case "reject_missing_peer", "reject_source_ip", "reject_uid_mismatch", "reject_invalid_length", "reject_invalid_packet":
 			log.Printf("DEBUG CAMERA DISCOVERY REJECT device=%s peer=%s bytes=%d opcode=0x%04x reason=%s", deviceID, safeAddress(event.Address), event.PacketLength, event.Opcode, event.Step)
 		case "unicast_timeout":
@@ -323,7 +327,6 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 		log.Printf("CAMERA KNOCK START device=%s", deviceID)
 	case plaf203.StateLoggingIn:
 		if event.Step == "" {
-			log.Printf("CAMERA KNOCK OK device=%s", deviceID)
 			log.Printf("CAMERA LOGIN START device=%s", deviceID)
 		} else {
 			log.Printf("CAMERA LOGIN STEP device=%s step=%s", deviceID, event.Step)

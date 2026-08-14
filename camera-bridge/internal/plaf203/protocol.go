@@ -16,30 +16,22 @@ const (
 
 	lanSearchLength         = 88
 	lanSearchResponseLength = 200
-	knockLength             = 52
-
-	clientMagicVersion = 0x1C
-	deviceMagicVersion = 0x1B
-	controlFlags       = 0x02
+	clientMagicVersion      = 0x1C
+	deviceMagicVersion      = 0x1B
+	controlFlags            = 0x02
 
 	lanSearchOpcode         uint16 = 0x0601
 	lanSearchResponseOpcode uint16 = 0x0602
-	knockOpcode             uint16 = 0x0402
-	knockReplyOpcode        uint16 = 0x0404
 
 	lanSearchSubtype         uint16 = 0x0021
 	lanSearchResponseSubtype uint16 = 0x0012
-	knockSubtype             uint16 = 0x0033
 
-	uidOffset   = 16
-	nonceOffset = 36
+	uidOffset = 16
 
-	lanSearchSDKOffset = 52
-	lanSearchNonce     = 56
-	lanSearchPhase     = 64
-	lanSearchText      = 74
-	knockSDKOffset     = 48
-
+	lanSearchSDKOffset         = 52
+	lanSearchNonce             = 56
+	lanSearchPhase             = 64
+	lanSearchText              = 74
 	lanSearchResponseUIDOffset = 16
 	lanSearchResponseTail      = 184
 	lanSearchResponseToken     = 188
@@ -79,26 +71,17 @@ type LANSearchResponse struct {
 	ResponseFlags uint32
 }
 
-// Knock2 is the fixed-width identity correlation emitted by the feeder after
-// LAN_SEARCH_R. The source address is supplied by the transport, not the
-// packet.
-type Knock2 struct {
-	UID        string
-	Nonce      [8]byte
-	SDKVersion [4]byte
-}
-
-// KnockReply is the fixed-width KNOCK_RR2 acknowledgement sent by the bridge
-// to a verified KNOCK2 source address.
-type KnockReply struct {
-	UID   string
-	Nonce [8]byte
-}
-
 // EncodeLANSearch3 builds the fixed-width, plaintext LAN_SEARCH3 payload.
 // Callers must apply the official TUTK wire transform before UDP transmission.
 func EncodeLANSearch3(uid string, nonce [8]byte) ([]byte, error) {
-	return (LANSearch3{UID: uid, Nonce: nonce, Phase: 1}).Encode()
+	return EncodeLANSearch3Phase(uid, nonce, 1)
+}
+
+// EncodeLANSearch3Phase builds the fixed-width LAN_SEARCH3 datagram for a
+// direct-LAN discovery phase. The legacy direct TUTK path sends phase 1,
+// receives LAN_SEARCH_R, and sends phase 2 before LOGIN.
+func EncodeLANSearch3Phase(uid string, nonce [8]byte, phase byte) ([]byte, error) {
+	return (LANSearch3{UID: uid, Nonce: nonce, Phase: phase}).Encode()
 }
 
 // Encode serializes a fixed-width LAN_SEARCH3 packet before wire encryption.
@@ -124,9 +107,8 @@ func (search LANSearch3) Encode() ([]byte, error) {
 }
 
 // DecodeLANSearchResponse validates a decrypted LAN_SEARCH_R datagram. The
-// feeder's dynamic UDP source is the endpoint. No field in the captured
-// response has been confirmed as an echoed request nonce, so nonce validation
-// happens on KNOCK_RR2.
+// feeder's dynamic UDP source is the endpoint. The captured response does not
+// echo the client nonce; the following LAN_SEARCH3 phase 2 preserves it.
 func DecodeLANSearchResponse(packet []byte, expectedUID string) (LANSearchResponse, error) {
 	if err := ValidateUID(expectedUID); err != nil {
 		return LANSearchResponse{}, err
@@ -151,63 +133,6 @@ func DecodeLANSearchResponse(packet []byte, expectedUID string) (LANSearchRespon
 		return LANSearchResponse{}, ErrUIDMismatch
 	}
 	return response, nil
-}
-
-// DecodeKnock2 validates a decrypted feeder KNOCK2 datagram and extracts its
-// UID and nonce. The UID and nonce checks are mandatory before the bridge can
-// acknowledge the KNOCK2 and advance to LOGIN.
-func DecodeKnock2(packet []byte, expectedUID string, expectedNonce [8]byte) (Knock2, error) {
-	if err := ValidateUID(expectedUID); err != nil {
-		return Knock2{}, err
-	}
-	if len(packet) != knockLength {
-		return Knock2{}, fmt.Errorf("%w: got=%d want=%d", ErrPacketTooShort, len(packet), knockLength)
-	}
-	if packet[0] != 0x04 || packet[1] != 0x02 || packet[2] != deviceMagicVersion || packet[3] != controlFlags {
-		return Knock2{}, ErrUnexpectedPacket
-	}
-	if binary.LittleEndian.Uint16(packet[4:]) != knockLength-16 ||
-		binary.LittleEndian.Uint16(packet[8:]) != knockOpcode ||
-		binary.LittleEndian.Uint16(packet[10:]) != knockSubtype {
-		return Knock2{}, ErrUnexpectedPacket
-	}
-
-	knock := Knock2{UID: string(packet[uidOffset : uidOffset+UIDLength])}
-	copy(knock.Nonce[:], packet[nonceOffset:nonceOffset+len(knock.Nonce)])
-	copy(knock.SDKVersion[:], packet[knockSDKOffset:knockSDKOffset+len(knock.SDKVersion)])
-	if knock.UID != expectedUID {
-		return Knock2{}, ErrUIDMismatch
-	}
-	if knock.Nonce != expectedNonce {
-		return Knock2{}, ErrUnexpectedPacket
-	}
-	return knock, nil
-}
-
-// EncodeKnockReply builds the KNOCK_RR2 acknowledgement for a verified
-// feeder-originated KNOCK2.
-func EncodeKnockReply(uid string, nonce [8]byte) ([]byte, error) {
-	return (KnockReply{UID: uid, Nonce: nonce}).Encode()
-}
-
-// Encode serializes a fixed-width KNOCK_RR2 acknowledgement before wire
-// encryption.
-func (reply KnockReply) Encode() ([]byte, error) {
-	if err := ValidateUID(reply.UID); err != nil {
-		return nil, err
-	}
-	packet := make([]byte, knockLength)
-	packet[0] = 0x04
-	packet[1] = 0x02
-	packet[2] = clientMagicVersion
-	packet[3] = controlFlags
-	binary.LittleEndian.PutUint16(packet[4:], knockLength-16)
-	binary.LittleEndian.PutUint16(packet[8:], knockReplyOpcode)
-	binary.LittleEndian.PutUint16(packet[10:], knockSubtype)
-	copy(packet[uidOffset:uidOffset+UIDLength], reply.UID)
-	copy(packet[nonceOffset:nonceOffset+len(reply.Nonce)], reply.Nonce[:])
-	copy(packet[knockSDKOffset:knockSDKOffset+len(clientSDKVersion)], clientSDKVersion[:])
-	return packet, nil
 }
 
 // ValidateUID confirms the discovered UID can be safely encoded as protocol bytes.
