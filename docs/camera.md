@@ -60,7 +60,7 @@ confirmed in the local capture:
    the UDP transport and expose `connected`.
 5. The bridge enters `bootstrapping` and repeats the captured client-start
    pair, sends the observed Session16 heartbeat, `SET_STREAM_CTRL` (`0x0024`,
-   HD payload), and `GET_FORMAT` (`0x032A`). It sends the observed
+   captured primary-profile payload), and `GET_FORMAT` (`0x032A`). It sends the observed
    acknowledgement shape immediately after `GET_FORMAT`, then waits for the
    matching `SET_STREAM_CTRL` reply (`0x0025`) on `0x1000` and `GET_FORMAT`
    reply (`0x032b`) on `0x7000` before sending `IPCAM_START` (`0x01ff`).
@@ -193,3 +193,6 @@ does not contain an identifiable audio stream, and the incomplete channel-6
 fragments in the official capture do not establish a codec or an audio-start
 command. The bridge logs only rate-limited channel/size diagnostics for future
 offline identification and never labels an unconfirmed channel as AAC.
+The currently observed video is 640×360 H.264; the confirmed primary bootstrap
+payload does not by itself establish an HD/SD switch mapping, so the dashboard
+does not offer a quality control.

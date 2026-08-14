@@ -351,16 +351,18 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 		log.Printf("CAMERA SESSION LOST device=%s error=%s", deviceID, event.Error)
 		return
 	}
-	record.device.ConnectionState = event.State
-	record.device.LastError = ""
-	if event.State == plaf203.StateStreaming {
-		record.device.StreamAvailable = true
-		record.device.Reason = ""
-		record.reconnectAttempts = 0
+	if !(record.device.ConnectionState == plaf203.StateStreaming && event.State == plaf203.StateBootstrapping) {
+		record.device.ConnectionState = event.State
+		record.device.LastError = ""
+		if event.State == plaf203.StateStreaming {
+			record.device.StreamAvailable = true
+			record.device.Reason = ""
+			record.reconnectAttempts = 0
+		}
+		record.device.LastTransitionAt = now
+		record.device.UpdatedAt = now
+		r.devices[deviceID] = record
 	}
-	record.device.LastTransitionAt = now
-	record.device.UpdatedAt = now
-	r.devices[deviceID] = record
 	r.mu.Unlock()
 
 	switch event.State {
@@ -450,7 +452,7 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 			log.Printf("CAMERA BOOTSTRAP START device=%s", deviceID)
 		}
 	case plaf203.StateStreaming:
-		if event.Step != "media_stats" {
+		if event.Step == "bootstrap" {
 			log.Printf("CAMERA BOOTSTRAP OK device=%s", deviceID)
 			log.Printf("CAMERA STREAM START device=%s codec=h264", deviceID)
 		}

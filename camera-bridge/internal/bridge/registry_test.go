@@ -279,6 +279,23 @@ func TestRegistryReconnectsOnlyWhenAConsumedSessionIsLost(t *testing.T) {
 	awaitCalls(t, connector, 2)
 }
 
+func TestRegistryKeepsStreamingStateDuringRuntimeBootstrapDiagnostics(t *testing.T) {
+	registry := NewRegistryWithConnector(connectedConnector{})
+	if _, err := registry.Upsert(testDeviceID, testUID, "192.0.2.10"); err != nil {
+		t.Fatal(err)
+	}
+	registry.mu.Lock()
+	record := registry.devices[testDeviceID]
+	record.device.ConnectionState = plaf203.StateStreaming
+	record.device.StreamAvailable = true
+	record.attemptID = 1
+	registry.devices[testDeviceID] = record
+	registry.mu.Unlock()
+
+	registry.transition(testDeviceID, 1, plaf203.Event{State: plaf203.StateBootstrapping, Step: "session_heartbeat_rx"})
+	assertDeviceStateAndConsumers(t, registry, plaf203.StateStreaming, 0)
+}
+
 type connectedConnector struct{}
 
 func (connectedConnector) Connect(_ context.Context, _ string, _ net.IP, observer plaf203.Observer) (*plaf203.Session, error) {
