@@ -460,6 +460,30 @@ def test_device_ui_has_typed_controls_schedule_camera_and_reused_views() -> None
     assert "escapeHtml" in DASHBOARD_HTML
 
 
+def test_controls_and_schedule_use_conditional_human_friendly_components() -> None:
+    """The device UI hides protocol details behind explicit control components."""
+    for marker in (
+        "setting-grid",
+        "setting-card",
+        "control-form",
+        "data-show-when",
+        "Enable motion detection",
+        "Enable sound detection",
+        "Enable device sound",
+        "720p",
+        "Always on",
+        "Cloud recording",
+        "schedule-editor",
+        "Create feeding plan",
+        "Custom days",
+        "Local MQTT schedules",
+        "Delete this feeding plan? This cannot be undone locally.",
+        "repeatDay=mode==='every'?[1,2,3,4,5,6,7]",
+    ):
+        assert marker in DASHBOARD_HTML
+    assert "Days (1=Mon … 7=Sun)" not in DASHBOARD_HTML
+
+
 def test_sse_emits_new_sanitized_log(
     dashboard: tuple[DashboardContext, RingBufferLogHandler],
 ) -> None:
