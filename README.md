@@ -1,566 +1,163 @@
-# petlibro-relay
+# PETLIBRO Granary Local Relay
 
-Transparent local MQTT proxy for a PETLIBRO PLAF203 (Granary Smart Camera
-Feeder). Sits between the feeder and `mqtt.us.petlibro.com`, keeping the
-official app/cloud features working while adding a local, durable buffer so
-a PETLIBRO cloud outage doesn't drop traffic in either direction.
+Local control and resilience for a PETLIBRO feeder that would otherwise depend
+on a remote cloud service to remain useful.
 
-Run instructions and the DNS redirection steps are in
-[`docs/setup.md`](docs/setup.md). This file covers the architecture.
+The project currently targets the **PETLIBRO PLAF203 Granary Smart Camera
+Feeder**. It is under active development; it does not claim support for every
+PETLIBRO model.
+
+## Why this project exists
+
+Connected feeders depend heavily on PETLIBRO's servers. If that service is
+unavailable, unstable, or eventually discontinued, a device someone owns can
+lose important functions despite still being physically capable of doing them.
+
+This project places a local relay between the feeder and PETLIBRO. It keeps the
+official path available when it works, while adding local state, controls, and
+camera access so the device is not wholly dependent on the cloud.
+
+> The goal is to make locally owned hardware remain useful even when its cloud
+> dependency is unavailable.
+
+## How it works
+
+```text
+PETLIBRO device
+       │
+       ▼
+PETLIBRO Local Relay
+       │
+       ├── Local control and state
+       │
+       └── PETLIBRO cloud
+```
+
+The PLAF203 firmware studied by this project connects to the PETLIBRO MQTT
+infrastructure over an unencrypted MQTT connection. A LAN DNS override can
+therefore direct that MQTT connection to the relay without breaking TLS. The
+relay learns the feeder identity from its own MQTT CONNECT packet, forwards
+normal traffic to PETLIBRO, and handles selected local work when the cloud is
+not available.
+
+This observation is a protocol/design weakness, not a claim of a demonstrated
+exploit. Other PETLIBRO endpoints, including the official app's HTTPS traffic,
+are outside this MQTT redirect and may use TLS.
+
+```text
+Normal
+Feeder ─────────────────► PETLIBRO MQTT
+
+With this project
+Feeder ── DNS redirect ─► Local Relay ──► PETLIBRO MQTT
+                              │
+                              └──────────► Local logic
+```
+
+## Modes
+
+### Relay mode
+
+Relay mode is the primary, transparent mode. The feeder continues to work with
+the official PETLIBRO app and cloud, but MQTT traffic passes through the local
+relay. The relay records state, buffers eligible traffic during an outage, and
+keeps supported local functions available without trying to replace a working
+cloud service.
+
+### Offline mode
+
+Offline mode is the long-term continuity goal: local manual dispense,
+schedules, basic configuration, device status, and the camera stream without
+depending on PETLIBRO servers. The building blocks are present, but this is
+**not yet a complete replacement for the official service or app**.
+
+## Current features
+
+- Automatic MQTT identity capture and enrollment; one relay can bridge multiple
+  PLAF203 feeders.
+- Transparent MQTT relay with separate cloud sessions, durable queues, replay
+  policies, local state shadow, and cloud-outage telemetry.
+- Local dashboard with Home, device overview, camera, schedule, activity,
+  settings, and an optional Advanced view.
+- ACK-backed local manual dispense, typed device settings, and persisted local
+  feeding schedules. Interactive actions are never replayed later.
+- Feature-flagged local fallback for confirmed NTP, cached configuration, and
+  feeding-plan requests.
+- Verified PLAF203 direct-LAN H.264 camera path:
+  `camera-bridge → RTSP → go2rtc → WebRTC`, including multiple viewers and an
+  on-demand idle lifecycle.
+
+## Quick start
+
+1. Copy the generic environment file and enable the features you need:
+
+   ```sh
+   cp .env.example .env
+   # Edit .env: at minimum set PETLIBRO_WEB_ENABLED=true for the dashboard.
+   ```
+
+2. Start the stack:
+
+   ```sh
+   docker compose up -d --build
+   ```
+
+3. Point the feeder's MQTT hostnames at the LAN address of this machine with a
+   DNS override, then reconnect the feeder. See [setup](docs/setup.md) for the
+   exact hostnames and the required split-DNS safeguard.
+
+4. Open `http://<relay-lan-ip>:8080/` when the dashboard is enabled.
 
 ## Architecture
 
-```
-petlibro_relay.mosquitto_config (one-shot "mosquitto-config" service)
-   │  renders mosquitto.conf from env vars onto a shared volume, then exits
-   ▼
-mosquitto (stock, unmodified image, internal only - not published)
-   ▲
-   │  raw bytes, forwarded unmodified
-CredentialCaptureProxy (inside the "relay" container, publishes the port)
-   ▲
-   │  MQTT 3.1, plain TCP, port 1883
-PLAF203 feeder  (after the DNS override, see docs/setup.md)
+```text
+PLAF203 MQTT
+     │
+     ▼
+credential-capture proxy → local Mosquitto → relay → PETLIBRO MQTT
 
-MqttBridge (container "relay")
-   │  paho-mqtt client, device's own identity
-   ▼
-mqtt.us.petlibro.com (real PETLIBRO cloud broker)
+PLAF203 camera
+     │
+     ▼
+camera-bridge → RTSP → go2rtc → WebRTC → dashboard
 ```
 
-The `mosquitto` image is never customized or rebuilt: all of its tunable
-behavior (listener port, persistence, queueing policy) is generated by our
-own code (`petlibro_relay.mosquitto_config`) from the exact same
-environment-variable model as the relay itself, written once to a shared
-volume before `mosquitto` starts (`depends_on: condition:
-service_completed_successfully` in `docker-compose.yml`). Every setting in
-this project - relay and broker alike - lives in `.env`; nothing is
-hardcoded in a Dockerfile or config file baked into an image.
-
-### No manual credential extraction
-
-The feeder's MQTT identity (client ID = device serial, username =
-`DL_PRODUCT_KEY`, password = `DL_PRODUCT_SECRET`) doesn't need to be
-extracted by hand (e.g. via a packet capture) and configured up front.
-`CredentialCaptureProxy` (`credential_capture_proxy.py`) sits in front of
-`mosquitto` on the port the feeder actually connects to: it parses the
-feeder's own CONNECT packet (`mqtt_connect_packet.py`, a small hand-rolled
-reader - MQTT 3.1 has no TLS here, so the identity is in cleartext), records
-it into `DeviceRegistry` (SQLite, `device_registry.py`), forwards those exact
-bytes to `mosquitto` unmodified, then becomes a plain bidirectional byte pipe
-for the rest of the session. `mosquitto` never sees anything different.
-
-On startup, `__main__` rebuilds every enrolled device from the registry and
-opens each one's cloud session. `PETLIBRO_DEVICE_CLIENT_ID` / `_USERNAME` /
-`_PASSWORD` remain available as a manual seed for one device (useful to
-bridge it before it has ever connected locally, e.g. during development);
-seeding adds that device, it does not restrict the relay to it. Nothing
-blocks waiting for a feeder: devices are picked up as they connect.
-
-The feeder's opening burst (`DEVICE_START_EVENT`, NTP handshake) would land
-before anything is subscribed on a fresh install, so
-`prime_local_subscription()` registers the local subscription up front, as
-the same `clean_session=False` client, so the broker holds those messages
-until the bridge connects for real.
-
-### Multiple devices
-
-One relay process bridges **N devices**. Each keeps its own MQTT identity and
-its own upstream session - the cloud authenticates the connection *as the
-device*, so a shared session could only ever speak for one of them.
-
-```
-                        PETLIBRO
-             ┌─────────────┼─────────────┐
-       upstream A     upstream B     upstream C
-             │             │             │
-       DeviceContext  DeviceContext  DeviceContext
-             └─────────────┼─────────────┘
-                      DeviceManager
-                           │
-                    Local Mosquitto
-                           │
-                 CONNECT capture proxy
-             ┌─────────────┼─────────────┐
-          Device A      Device B      Device C
-```
-
-`DeviceContext` (`device_context.py`) owns one device's identity, cloud
-client, upstream state machine, responder and metrics. `DeviceManager`
-(`device_manager.py`) owns the set of them and is the only thing that creates
-or destroys one. Routing is by topic: every device topic names its device, so
-`MqttBridge` parses the topic (`protocol.parse_topic`), looks the device up,
-and hands the message to that context. A topic that resolves to no bridged
-device is ignored rather than guessed at.
-
-Adding a feeder needs **no configuration change, no restart and no second
-container** - it is bridged as soon as it connects.
-
-### Enrollment
-
-Anything on the LAN can reach the capture proxy and get itself recorded, so
-being *seen* is not the same as being *trusted*. Each identity carries a
-status:
-
-| Status | Meaning |
-|---|---|
-| `KNOWN` | enrolled; the relay opens an upstream session for it |
-| `CANDIDATE` | seen and shown on the dashboard, but never bridged |
-| `DISABLED` | explicitly held back |
-
-`PETLIBRO_AUTO_ENROLL` (default `true`) decides where a newly learned device
-lands. With it off, a new feeder is stored as a candidate and waits, so
-adding one is a deliberate act rather than a consequence of plugging
-something into the LAN. Seeing a device again never re-opens that decision in
-either direction.
-
-The TTL is `PETLIBRO_DEVICE_RETENTION_HOURS` (72h): an identity whose device
-has not connected within it is forgotten. Identities are deliberately *not*
-validated against the cloud before being trusted - the relay's whole purpose
-is to keep working while the cloud is unreachable (which, observed in
-practice, means TCP accepted then no CONNACK for ~30s before a reset), so
-cloud reachability must never gate it.
-
-Upgrading from the previous single-device model preserves its decision
-exactly: the device that was ACTIVE becomes `KNOWN`, and identities that were
-only candidates stay `CANDIDATE` even with auto-enrollment on.
-
-### Connections
-
-One connection to the local broker, plus one cloud connection per device -
-never one client relaying through another's socket directly:
-
-- **local**: a single `relay-local` client connects to the `mosquitto`
-  container and serves every device.
-- **upstream**: one client per device connects to the real cloud broker,
-  authenticated as that device, with its own reconnect and its own state.
-
-Both use MQTT 3.1 (`MQTTv31`), `clean_session=False`, 90s keepalive - matching
-exactly what the physical feeder sends, since the cloud broker's ACL is keyed
-off that exact identity/session.
-
-### Upstream sessions follow the device
-
-The relay authenticates upstream **as the device**, so holding that session
-open for a feeder that is powered off would tell PETLIBRO the device is
-online when it cannot answer anything. The session therefore tracks local
-presence:
-
-| Local state | Upstream session |
-|---|---|
-| present | connects and reconnects normally |
-| gone, inside the 90s grace | left running - a reconnecting feeder must not churn its session |
-| absent past the grace | closed with a clean MQTT DISCONNECT, state `SUSPENDED` |
-| feeder returns | a fresh session starts and **only that device's** backlog replays |
-
-`SUSPENDED` is deliberately distinct from `DISCONNECTED`: nothing is wrong
-with the cloud, no reconnect is pending, and no downtime accrues - so an
-absent feeder is never counted as "cloud degraded".
-
-The context itself survives throughout. Identity, queues, shadow, responder
-and metrics all stay loaded, so a return resumes rather than rebuilds. A
-device's backlog simply waits while its session is closed, instead of being
-dropped or drained through some other device.
-
-A single supervisor thread reconciles every device against presence every 5s.
-Because `start_upstream` and `stop_upstream` are both idempotent, the ordering
-of enrollment, presence and startup does not matter - the next tick converges,
-which is what makes the boot path race-free. On a relay restart, an enrolled
-but absent device is restored as a context **without** a cloud session, and
-connects once its feeder is actually seen.
-
-The trade-off: while a device is away, cloud pushes for it are not received.
-That is intended - the real device would miss them too - and the feeder asks
-the cloud to resync (`FEEDING_PLAN_SERVICE`, config) on session establishment
-when it comes back.
-
-### Isolation
-
-A device's message never leaves under another's credentials, enters another's
-queue, touches another's shadow, or lands in another's metrics:
-
-- **queue** rows carry `device_id`; draining, counting and replaying are
-  always scoped to one device, and the size cap is per device so a flood
-  cannot evict another's backlog.
-- **state shadow** is keyed by `device_id` on every read and write.
-- **transactions** are keyed by `(device_id, msgId)` - two feeders can
-  legitimately mint the same identifier.
-- **telemetry** is one `DeviceTelemetry` per device, so a cloud outage on one
-  is invisible to the others.
-
-## MQTT topics
-
-Topic prefix: `dl/PLAF203/<PETLIBRO_DEVICE_CLIENT_ID>` (device serial number;
-casing matters - the cloud uses `PLAF203` uppercase, not `plaf203`).
-
-- **Local side**: subscribes to `dl/+/+/device/+/post` - device -> cloud
-  traffic only, and device-agnostic so the subscription can be registered
-  before the identity is known. Never a filter covering the `/sub` topics the
-  relay itself publishes locally (see "Loop safety").
-- **Upstream side**: the cloud ACL rejects wildcard `SUBSCRIBE` for a device
-  identity, so the bridge subscribes to each known server->device category
-  individually:
-
-  ```
-  <prefix>/device/service/sub
-  <prefix>/device/event/sub
-  <prefix>/device/ota/sub
-  <prefix>/device/ntp/sub
-  <prefix>/device/broadcast/sub
-  <prefix>/device/heart/sub
-  <prefix>/device/config/sub
-  <prefix>/device/system/sub
-  ```
-
-  Every `SUBACK` is logged individually (`granted`/`denied`) - see
-  `_on_upstream_subscribe` in `mqtt_bridge.py`. Probed against the real
-  account, all eight literal category topics are granted (QoS 0) and a
-  trailing `#` is denied. No wildcard is attempted any more: besides being
-  refused, `<prefix>/#` would also match the `/post` topics this same client
-  publishes upstream, so the broker would echo them straight back.
-
-## Loop safety
-
-MQTT 3.1 has no "no local" subscription option (that arrived in MQTT 5), so a
-client subscribed to a filter covering what it publishes gets its own
-messages back from the broker. The two directions therefore never overlap:
-
-```
-device -> cloud :  local subscribes to    <prefix>/device/+/post
-cloud -> device :  upstream subscribes to <prefix>/device/<category>/sub
-```
-
-No wildcard is used on either side. An earlier version subscribed locally to
-`<prefix>/#`, which matched the `/sub` topics the cloud->device pump
-republishes locally; each cloud command came straight back in, was forwarded
-upstream onto a `/sub` topic we were also subscribed to, and came back again
-- unbounded amplification. Verified fixed by test, in both directions.
-
-Because the local client uses `clean_session=False` (so the broker holds
-what the feeder published while the relay was down), the broker also
-*restores previously registered subscriptions*. Dropping the wildcard from
-the code is therefore not enough on an existing deployment - the old
-`<prefix>/#` subscription lives on in the persisted session. The bridge
-explicitly unsubscribes it on every local connect, which self-heals a broker
-that already has it stored.
-
-## Local <-> cloud sync logic
-
-No network callback ever publishes directly. `on_message` on either client
-only does two things: record the payload in `StateCache` (last-known-value
-per topic, JSON on disk) and hand it to `MessageQueue.enqueue()` (durable
-SQLite FIFO, one logical queue per direction: `local-to-upstream` /
-`upstream-to-local`).
-
-A dedicated `DeliveryPump` thread per direction independently drains its
-queue onto the *destination* client:
-
-```
-local feeder message  -> queue("local-to-upstream")  -> pump -> upstream_client.publish()
-cloud command message  -> queue("upstream-to-local")  -> pump -> local_client.publish()
-```
-
-Because ingestion (enqueue) and delivery (pump) are decoupled, a stalled or
-disconnected destination on one side never blocks reception on the other.
-The queue is capped (`PETLIBRO_MAX_QUEUE_SIZE`, default 5000 per direction);
-beyond that, oldest messages are dropped with a warning log rather than
-growing unbounded during a very long outage.
-
-A message is only removed from the durable queue once the client confirms
-the packet actually went out (`wait_for_publish`), not merely once paho
-accepted it into its buffer - otherwise a crash between the two loses it.
-
-### Replay is not unconditional
-
-Replaying everything oldest-first is right for telemetry going device ->
-cloud: an event from 14:00 is still true at 17:00, it just arrives late. It
-is wrong for commands going cloud -> device, which act on the physical world
-*when delivered*. Replaying a manual feed the user pressed before a
-three-hour outage would feed the cat at 17:00 for a 14:00 button press.
-
-`replay_policy.py` assigns each cloud -> device command one of:
-
-| Policy | Commands | Behaviour |
-|---|---|---|
-| never replay | `NTP`, `NTP_SYNC`, `DEVICE_REBOOT`, `RESET`, `RESTORE`, `OTA_*`, `BINDING`, `UNBIND`, `WIFI_*`, `INITIALIZE_SD_CARD_SERVICE` | dropped beyond a 5s grace window covering normal latency |
-| TTL | `MANUAL_FEEDING_SERVICE` | dropped after 60s |
-| latest-wins | `ATTR_SET_SERVICE`, `FEEDING_PLAN_SERVICE`, `DEVICE_CONFIG_SYNC`, `SERVER_CONFIG_PUSH`, … | a new message supersedes any older pending one with the same topic+`cmd`, so only the current intended state is delivered |
-| durable FIFO (default) | everything else, and all device -> cloud traffic | replayed in order, no expiry |
-
-Unrecognised commands fall through to durable FIFO: delivering something we
-don't understand late beats silently dropping it.
-
-## Disconnect / reconnect handling
-
-- Both paho clients use `reconnect_delay_set(1, 60)`: automatic exponential
-  backoff, capped at 60s, no manual retry loop needed.
-- Each `DeliveryPump` polls `client.is_connected()` before attempting a
-  publish; while disconnected, it just waits (no busy loop, no lost
-  messages - they stay queued on disk).
-- On reconnect, if the queue built up a backlog during the outage, the pump
-  logs it explicitly: `Destination for <direction> is back online, replaying
-  N backlogged message(s)`, then drains oldest-first.
-- The queue is a SQLite file on a mounted volume (`/data`), so a relay
-  container restart (crash, redeploy, `docker compose down`) doesn't lose
-  anything in flight either - only a fresh `docker volume rm` would.
-
-## State shadow and local responder
-
-Beyond relaying, the relay keeps a persistent shadow of what it has learned
-(`state_shadow.py`, SQLite) and can answer a small set of the feeder's
-requests itself when the cloud is unreachable (`local_responder.py`).
-
-**Off by default.** `PETLIBRO_LOCAL_RESPONDER` gates everything, with a flag
-per function (`_LOCAL_NTP`, `_LOCAL_CONFIG`, `_LOCAL_FEEDING_PLAN`). With
-them unset the relay behaves exactly as before.
-
-The shadow separates three kinds of knowledge by owner:
-
-- **reported** - physical facts the device states (heartbeat, RSSI, firmware,
-  grain output). The device owns these; the relay only observes and never
-  synthesises them.
-- **desired** - settings the cloud last pushed. The cloud owns these; the
-  newest valid push becomes the last-known-good.
-- **feeding plans** - the last *complete* plan set, stored whole rather than
-  merged, so a deleted plan cannot be resurrected. The device's own
-  `/post` names plan ids with no schedule, and is explicitly rejected as a
-  plan definition so it cannot overwrite the real one.
-
-Unrecognised traffic is archived verbatim in `raw_messages` rather than
-interpreted.
-
-### What is answered locally
-
-| Command | Answer | Source of truth |
-|---|---|---|
-| `NTP` | `NTP_SYNC` with the current UTC offset and the next two DST transitions, **only if the device's clock has drifted** past `PETLIBRO_CLOCK_DRIFT_TOLERANCE_SECONDS` (10s) | generated locally - clocks are a safe local service |
-| `FEEDING_PLAN_SERVICE` | the cached complete plan set, echoing the request's `msgId` | cloud's last-known-good |
-| `ATTR_GET_SERVICE` | the cached settings, echoing the request's `msgId` | cloud's last-known-good |
-
-**Never answered locally**, whatever the cache holds:
-`MANUAL_FEEDING_SERVICE`, `DEVICE_REBOOT`, `RESET`, `RESTORE`, OTA, Wi-Fi and
-binding commands - they act on the physical world or on the device's cloud
-association. Unknown commands are forwarded and logged
-(`NO LOCAL RESPONSE unknown cmd=...`), never guessed at: a wrong synthesised
-reply can leave the device in a state nobody can debug, which is worse than
-it retrying later.
-
-If a cache is empty, nothing is invented - the request is simply forwarded
-and a warning logged.
-
-### "Upstream is available" means CONNACK
-
-`UpstreamState` distinguishes `DISCONNECTED` / `TCP_CONNECTING` /
-`MQTT_CONNECTING` / `ONLINE`, and only `ONLINE` (CONNACK 0 received, session
-live) counts. This matters because PETLIBRO's broker has repeatedly been
-observed accepting the TCP connection, never answering the CONNECT, and
-resetting ~30s later - treating a completed TCP handshake as availability
-would leave the feeder waiting on a cloud that never replies.
-
-### Avoiding a double answer
-
-When a request is answered locally, that occurrence is **not** forwarded
-upstream, so the cloud is never asked the same question twice. As a second
-guard, the `msgId` answered locally is remembered for
-`PETLIBRO_HANDLED_MSG_ID_TTL_SECONDS` (120s); a cloud message arriving later
-with that same `msgId` is dropped rather than delivered
-(`SUPPRESSED late cloud response`). This is in-memory: a restart clears it,
-which is harmless since the corresponding request is long gone.
-
-NTP is exempt from correlation because the device's `NTP` request carries no
-`msgId` at all (confirmed on our traffic and by icex2) - a late cloud
-`NTP_SYNC` is just another clock sync, so it is harmless.
-
-### Protocol grounding
-
-Payload shapes come from this device's real traffic first. Notably, this
-firmware's `NTP_SYNC` carries `timezoneOffsetSeconds`, `nextDSTOffsetSeconds`,
-`nextDSTTransitionTs` and their "second next" counterparts, which icex2's
-older firmware does not document; the locally generated reply reproduces
-those fields, and `dst_schedule.py` computes them from the IANA zone. Against
-the real cloud payload captured on 2026-08-12 for `Europe/Paris`, all five
-values match exactly.
-
-A full exchange has since been captured, confirming the shape and correcting
-one assumption: the cloud **pushes** `NTP_SYNC` (with a msgId it mints), and
-the device **acknowledges** it on `ntp/post` with the same msgId and
-`code: 0`. The locally generated sync therefore remembers its own msgId so
-that ack is swallowed rather than forwarded to a cloud that never issued it.
-
-`PETLIBRO_LOCAL_NTP` still ships off: the payload is confirmed, but what the
-cloud replies to the device's own `cmd: NTP` *request* (as opposed to these
-unsolicited pushes) has not been observed, so enabling it remains a
-deliberate choice.
-
-## Camera / go2rtc POC
-
-The Compose stack includes a pinned `alexxit/go2rtc:1.9.14` sidecar for
-read-only camera status. It is internal-only and the relay calls only
-go2rtc's stream-list endpoint; no go2rtc administration is proxied. The
-PLAF203 source is registered locally after its camera identity has been
-learned. The device Camera tab uses WebRTC through go2rtc for the verified
-live H.264 stream and keeps player controls local to the browser. See
-[docs/camera.md](docs/camera.md) for the protocol boundary, stream lifecycle,
-and the evidence still required for audio and profile switching.
-
-## Observability dashboard and confirmed control
-
-Set `PETLIBRO_WEB_ENABLED=true` to start the integrated FastAPI dashboard on
-`PETLIBRO_WEB_HOST:PETLIBRO_WEB_PORT` (default `0.0.0.0:8080`). It exposes
-only typed, device-confirmed feeder actions (settings, schedules and manual
-dispense) for a locally present PLAF203; the HTTP API never accepts an arbitrary
-MQTT topic, command, field, or JSON payload.
-
-The dashboard has no HTTP authentication. Keep its port on a trusted private
-administration network only: a client able to reach it can invoke the explicitly
-enabled feeder actions. Never expose port 8080 to the Internet.
-The UI provides Home and device-focused Overview, Camera, Schedule, Activity
-and Settings tabs. Advanced mode adds redacted diagnostics, queues, NTP,
-responder status, raw state and device-scoped logs, backed by versionable JSON
-endpoints:
-
-```
-GET /healthz
-GET /api/status     GET /api/cloud      GET /api/devices
-GET /api/devices/{device_id}
-GET /api/queues?device_id=…    GET /api/state?device_id=…
-GET /api/ntp?device_id=…
-GET /api/logs       GET /api/logs/stream (SSE)
-GET /api/system
-PATCH /api/devices/{device_id}/controls/sound   {"enabled": true|false}
-PATCH /api/devices/{device_id}/controls/motion  {"enabled": true|false}
-```
-
-The sound endpoint requires local presence plus valid `soundSwitch` and
-`soundAgingType` shadow values. It publishes one local `ATTR_SET_SERVICE` and
-returns success only after the feeder posts `code: 0` with the same `msgId`.
-The motion endpoint requires local presence plus a known
-`motionDetectionSwitch` shadow value and emits only `cmd`, `ts`, `msgId`, and
-`motionDetectionSwitch`; it does not invent an aging field. Both interactive
-requests are never inserted into the durable queue or replayed. Sound cloud
-sync is confirmed; motion cloud sync remains unknown. All other controls
-remain read-only.
-
-Overview and the header aggregate across devices (known / local online /
-cloud online / cloud degraded / queues pending). Devices is a table with a
-per-device drill-down; Queues, State and NTP are scoped to one device via the
-picker. Logs can be filtered by device, component, level, cmd and text.
-
-Local presence comes from sessions the capture proxy actually observed, not
-from the 72h identity TTL: a device that is merely *known* is shown
-`LOCAL_OFFLINE`.
-
-`/healthz` reports the local relay only: PETLIBRO being down remains HTTP
-200, while each device's exact `DISCONNECTED` / `MQTT_CONNECTING` / `ONLINE`
-state and its last 15m/1h/24h observed availability remain visible in the
-Cloud tab.
-
-### Temporary cloud service-payload diagnosis
-
-To inspect settings pushed by the official app, set
-`PETLIBRO_LOG_UPSTREAM_SERVICE_PAYLOADS=true` in `.env` and recreate only the
-`relay` container. The relay then logs each incoming
-`/device/service/sub` message at INFO before forwarding its bytes unchanged
-to local Mosquitto. Functional setting values are visible; passwords, tokens,
-credentials, and TUTK/Kalay fields are redacted. The default is `false`.
-
-```bash
-sudo docker compose logs -f relay | grep -E 'UPSTREAM SERVICE RX|ATTR_SET_SERVICE'
-```
-
-Turn the flag back off when the capture is complete.
-
-### Temporary device-start diagnosis
-
-Set `PETLIBRO_LOG_DEVICE_START_EVENT=true` to log a sanitized device-originated
-`DEVICE_START_EVENT`, including `uuid` when present, before its normal relay
-handling continues unchanged. The flag defaults to `false`; credentials and
-secret-looking keys are redacted from the JSON payload.
-
-## Local device settings and schedules
-
-The device page exposes only typed, feeder-confirmed MQTT controls. Each
-change is published locally on `/device/service/sub` and becomes successful
-only after the matching `/device/service/post` `code: 0` ACK for the same
-device and `msgId`. Interactive writes are never added to the durable replay
-queue; the feeder's natural acknowledgement remains forwarded normally.
-
-Settings are grouped as detection, speaker, lighting, camera, recording,
-feeding video, and bowl mode. Booleans, enums, numeric bounds, and local
-`HH:MM` values are validated before MQTT is touched. `ts` uses Unix epoch
-milliseconds; schedule `syncTime` is epoch milliseconds truncated to the
-second. The configured IANA `PETLIBRO_DEVICE_TIMEZONE` is used for local-time
-to UTC conversion, including DST. No fixed UTC offset is assumed.
-
-`repeatDay` is a set: `1` through `7` mean Monday through Sunday, `0` is
-ignored legacy padding, and `[]` means **Never**. The order received from
-PETLIBRO is not meaningful. `grainNum` is limited to `1..48` and `audioTimes`
-to `1..5`.
-
-### Local MQTT schedule is not PETLIBRO Cloud schedule
-
-Schedule writes use `FEEDING_PLAN_SERVICE` with the complete known snapshot.
-Plans created locally receive persistent negative IDs (`-1`, `-2`, …) per
-device, so they cannot collide with PETLIBRO's positive cloud IDs. They apply
-directly to the feeder, but PETLIBRO Cloud does not create them and the
-official app may not display them. On every stable local MQTT reconnect, the
-relay restores one complete persisted snapshot to the feeder: current cloud
-plans with positive IDs plus local plans with negative IDs. A newer PETLIBRO
-snapshot replaces only the positive entries; it never removes a local plan.
-If no persisted plans are known, the relay sends nothing, rather than risking
-an accidental empty schedule. A locally edited positive cloud plan can be
-replaced by PETLIBRO's next cloud snapshot. `cloudVideoRecordSwitch` is
-retained in the shadow but deliberately has no writable route.
-Logs are retained in a process-local ring buffer (5,000 entries), sanitized
-before API/SSE exposure; passwords, secrets, tokens and full MQTT usernames
-are never rendered. Keep the port LAN-only: diagnostics still contain device
-IDs, topics, local IP/state and operational history.
-
-## References
-
-- [`icex2/plaf203`](https://github.com/icex2/plaf203) - independently reverse-engineered
-  protocol spec (topic naming, `PLAF203` casing, full `cmd` list, `msgId`
-  request/response pairing). Matches everything captured from this device's
-  own MQTT traffic.
-- [`bobobo1618/catbro-server`](https://github.com/bobobo1618/catbro-server) - a Rust
-  implementation of the same idea, `--mode record`: a transparent MITM relay
-  between the local and cloud brokers, one cloud connection per device
-  identity. Same architecture as this project.
-
-## Known limitation
-
-The feeder's already-synced feeding schedule executes on-device regardless
-of connectivity - this proxy doesn't add new offline autonomy to the
-feeder's firmware. What it protects is the cloud-dependent path: manual
-feed, live settings changes, camera, notifications, and app visibility -
-these still need the upstream connection to eventually be reachable to take
-effect, but nothing is silently dropped in the meantime.
-
-## CI/CD and versioning
-
-Two workflows, each with one job:
-
-- **`ci.yml`** (every PR and push to `main`): `mypy --strict` and a
-  Dockerfile build validation (image is built, not pushed). Merge gate, not
-  a release mechanism.
-- **`release.yml`** (push to `main`): [`release-please`](https://github.com/googleapis/release-please)
-  reads [Conventional Commits](https://www.conventionalcommits.org/) since
-  the last release and keeps a standing release PR bumping
-  `pyproject.toml`'s version and `CHANGELOG.md` accordingly (`fix:` -> patch,
-  `feat:` -> minor, `!`/`BREAKING CHANGE:` -> major). Merging that PR is what
-  actually cuts a GitHub Release and a `vX.Y.Z` tag - nothing is published on
-  every commit. That tag triggers the second job, which builds the image for
-  `linux/amd64` + `linux/arm64` and pushes:
-
-  ```
-  ghcr.io/aerodomigue/petlibro_granary_local_relay:X.Y.Z
-  ghcr.io/aerodomigue/petlibro_granary_local_relay:latest
-  ```
-
-  `docker-compose.yml` uses `build: .` for local development. To run a
-  published release instead, replace `build: .` with `image:
-  ghcr.io/aerodomigue/petlibro_granary_local_relay:latest` (or a pinned
-  `X.Y.Z`) under the `relay` and `mosquitto-config` services.
-
-Commit messages on `main` must follow Conventional Commits for the
-versioning to mean anything - that's the only input release-please has.
+The camera sidecars use host networking because PLAF203 direct-LAN UDP and
+browser WebRTC candidates need the VM's real LAN addresses. The MQTT broker is
+internal; the capture proxy on the relay container is the port exposed to the
+feeder.
+
+## Development status
+
+The real-device protocol work is based on PLAF203 firmware V3.0.30 traffic and
+captures. The project deliberately distinguishes observed behavior from
+inference and keeps unknown commands conservative. Firmware changes can alter
+undocumented behavior.
+
+## Known limitations
+
+- PLAF203 is the primary tested device; other PETLIBRO products are unverified.
+- The offline mode is incomplete. The official mobile app, remote access,
+  notifications, binding, OTA, Wi-Fi changes, and other cloud features are not
+  locally reproduced.
+- Browser video is validated. PLAF203 AAC transport has been captured and
+  reassembled, but end-to-end browser audio is not yet claimed as validated.
+- SD/HD profile switching is not enabled: observed profile traffic does not yet
+  prove a stable quality mapping or resolution change.
+- The dashboard has no authentication. Keep it on a trusted LAN and do not
+  expose it to the Internet.
+
+## Documentation
+
+- [Setup and configuration](docs/setup.md)
+- [Camera protocol and lifecycle](docs/camera.md)
+- [Dashboard guide](docs/ui-parity.md)
+- [Troubleshooting](docs/troubleshooting.md)
+
+## Security and responsible use
+
+Use this project only with devices and networks you own or are authorized to
+administer. Never commit `.env`, captured MQTT identities, tokens, or private
+camera data. The project is for local control, interoperability, resilience,
+reverse engineering, and preservation of device functionality; it is not a
+commercial PETLIBRO replacement or a way to bypass someone else's service.
