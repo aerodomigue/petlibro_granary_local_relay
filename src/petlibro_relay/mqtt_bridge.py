@@ -35,6 +35,7 @@ strict and directional:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -52,6 +53,7 @@ from .device_context import LOCAL_TO_UPSTREAM, UPSTREAM_TO_LOCAL
 from .device_manager import DeviceManager
 from .message_queue import MessageQueue
 from .observability.telemetry import RelayTelemetry
+from .observability.sanitizer import sanitize_value
 from .sound_switch_control import LocalControlAckRoute
 
 if TYPE_CHECKING:
@@ -306,6 +308,8 @@ class MqttBridge:
             self._warn_unknown_device_once(address.device_id, message.topic)
             return
 
+        self._log_device_start_event(address.device_id, message.topic, message.payload)
+
         if self._sound_switch_controller is not None:
             ack_route = self._sound_switch_controller.observe_device_message(
                 address.device_id, message.topic, message.payload
@@ -334,6 +338,26 @@ class MqttBridge:
         action = context.handle_local_message(message.topic, message.payload, message.qos)
         if action is not None and action.response_topic is not None and action.response_payload is not None:
             client.publish(action.response_topic, action.response_payload, qos=QOS_AT_MOST_ONCE)
+
+    def _log_device_start_event(self, device_id: str, topic: str, payload: bytes) -> None:
+        """Log an opt-in, sanitized device-start event without affecting routing."""
+        if not self._config.log_device_start_event:
+            return
+        try:
+            decoded = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+        if not isinstance(decoded, dict) or decoded.get("cmd") != "DEVICE_START_EVENT":
+            return
+        uuid = decoded.get("uuid")
+        _LOGGER.info(
+            "DEVICE START EVENT RX source=device device_id=%s topic=%s cmd=DEVICE_START_EVENT "
+            "uuid=%s payload=%s",
+            device_id,
+            topic,
+            uuid if isinstance(uuid, str) else "none",
+            json.dumps(sanitize_value(decoded), separators=(",", ":"), sort_keys=True),
+        )
 
     def _warn_unknown_device_once(self, device_id: str, topic: str) -> None:
         """Log an unbridged device once, rather than on every message it sends."""

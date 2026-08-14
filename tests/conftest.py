@@ -59,6 +59,7 @@ def make_config(tmp_path: Path) -> RelayConfigFactory:
             "replay_start_delay_seconds": 1.5,
             "replay_jitter": 0.15,
             "log_upstream_service_payloads": False,
+            "log_device_start_event": False,
             "go2rtc": Go2RtcSettings(enabled=False),
         }
         defaults.update(overrides)

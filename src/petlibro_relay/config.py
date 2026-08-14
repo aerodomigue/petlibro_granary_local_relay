@@ -33,6 +33,7 @@ DEFAULT_REPLAY_RATE_GLOBAL = 20.0
 DEFAULT_REPLAY_START_DELAY_SECONDS = 1.5
 DEFAULT_REPLAY_JITTER = 0.15
 DEFAULT_LOG_UPSTREAM_SERVICE_PAYLOADS = False
+DEFAULT_LOG_DEVICE_START_EVENT = False
 DEFAULT_GO2RTC_ENABLED = False
 DEFAULT_GO2RTC_HOST = "go2rtc"
 DEFAULT_GO2RTC_PORT = 1984
@@ -100,6 +101,7 @@ class RelayConfig:
     replay_start_delay_seconds: float
     replay_jitter: float
     log_upstream_service_payloads: bool
+    log_device_start_event: bool
     go2rtc: Go2RtcSettings
 
     @classmethod
@@ -160,6 +162,9 @@ class RelayConfig:
             replay_jitter=float(os.environ.get("PETLIBRO_REPLAY_JITTER", DEFAULT_REPLAY_JITTER)),
             log_upstream_service_payloads=_env_flag(
                 "PETLIBRO_LOG_UPSTREAM_SERVICE_PAYLOADS", DEFAULT_LOG_UPSTREAM_SERVICE_PAYLOADS
+            ),
+            log_device_start_event=_env_flag(
+                "PETLIBRO_LOG_DEVICE_START_EVENT", DEFAULT_LOG_DEVICE_START_EVENT
             ),
             go2rtc=Go2RtcSettings(
                 enabled=_env_flag("PETLIBRO_GO2RTC_ENABLED", DEFAULT_GO2RTC_ENABLED),

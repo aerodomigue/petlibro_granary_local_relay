@@ -16,6 +16,13 @@ def test_upstream_service_payload_diagnostic_defaults_to_disabled(monkeypatch: p
     assert RelayConfig.from_env().log_upstream_service_payloads is False
 
 
+def test_device_start_event_diagnostic_defaults_to_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Device boot payloads are not logged until an operator opts in."""
+    monkeypatch.delenv("PETLIBRO_LOG_DEVICE_START_EVENT", raising=False)
+
+    assert RelayConfig.from_env().log_device_start_event is False
+
+
 @pytest.mark.parametrize("upstream_host", ["127.0.0.1", "localhost", "::1"])
 def test_loopback_upstream_on_capture_port_is_rejected(
     make_config: RelayConfigFactory, upstream_host: str

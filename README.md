@@ -465,6 +465,13 @@ sudo docker compose logs -f relay | grep -E 'UPSTREAM SERVICE RX|ATTR_SET_SERVIC
 
 Turn the flag back off when the capture is complete.
 
+### Temporary device-start diagnosis
+
+Set `PETLIBRO_LOG_DEVICE_START_EVENT=true` to log a sanitized device-originated
+`DEVICE_START_EVENT`, including `uuid` when present, before its normal relay
+handling continues unchanged. The flag defaults to `false`; credentials and
+secret-looking keys are redacted from the JSON payload.
+
 ## Local device settings and schedules
 
 The device page exposes only typed, feeder-confirmed MQTT controls. Each
