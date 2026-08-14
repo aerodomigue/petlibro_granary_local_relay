@@ -26,12 +26,12 @@ DASHBOARD_HTML = """<!doctype html>
     <div id="header-status" class="header-status" aria-live="polite">Loading…</div>
   </header>
   <nav id="primary-nav" class="primary-nav" aria-label="Main navigation"></nav>
-  <main id="application" class="application" aria-live="polite"></main>
+  <main id="application" class="application"></main>
   <dialog id="app-modal" aria-labelledby="modal-title">
-    <form method="dialog" class="modal-shell">
-      <div class="modal-heading"><h2 id="modal-title">PETLIBRO</h2><button class="icon-button" value="cancel" aria-label="Close">×</button></div>
+    <div class="modal-shell">
+      <div class="modal-heading"><h2 id="modal-title">PETLIBRO</h2><button id="modal-dismiss" class="icon-button" type="button" aria-label="Close">×</button></div>
       <div id="modal-content" class="modal-content"></div>
-    </form>
+    </div>
   </dialog>
   <script>""" + DASHBOARD_JAVASCRIPT + """</script>
 </body>

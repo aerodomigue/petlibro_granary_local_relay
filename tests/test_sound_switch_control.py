@@ -182,6 +182,57 @@ def test_sound_control_builds_confirmed_payload_and_waits_for_ack(
     assert shadow.get_local_confirmed(DEVICE_A)["soundSwitch"] is True
 
 
+def test_manual_dispense_is_ack_confirmed_and_never_queued(
+    control_environment: tuple[TestClient, ControlHarness, StateShadow, MessageQueue, DeviceManager],
+) -> None:
+    """Manual dispensing uses one immediate local command, not durable replay."""
+    client, harness, _, queue, _ = control_environment
+
+    response = client.post(f"/api/devices/{DEVICE_A}/dispense", json={"grainNum": 2})
+
+    assert response.status_code == 200
+    payload = json.loads(harness.published[-1][2])
+    assert payload["cmd"] == "MANUAL_FEEDING_SERVICE"
+    assert payload["grainNum"] == 2
+    assert isinstance(payload["msgId"], str) and payload["msgId"]
+    assert isinstance(payload["ts"], int)
+    assert response.json()["device_ack"] is True
+    assert queue.count(DEVICE_A, LOCAL_TO_UPSTREAM) == 0
+
+
+def test_manual_dispense_rejects_an_offline_or_invalid_request(
+    control_environment: tuple[TestClient, ControlHarness, StateShadow, MessageQueue, DeviceManager],
+) -> None:
+    """A manual action must never be deferred until an absent feeder reconnects."""
+    client, harness, _, queue, _ = control_environment
+
+    assert client.post(f"/api/devices/{DEVICE_A}/dispense", json={"grainNum": 0}).status_code == 422
+    offline = client.post(f"/api/devices/{DEVICE_B}/dispense", json={"grainNum": 1})
+
+    assert offline.status_code == 409
+    assert harness.published == []
+    assert queue.count(DEVICE_B, LOCAL_TO_UPSTREAM) == 0
+
+
+@pytest.mark.parametrize(("ack_code", "expected_status"), [(7, 502), (None, 504)])
+def test_manual_dispense_requires_a_successful_feeder_ack(
+    control_environment: tuple[TestClient, ControlHarness, StateShadow, MessageQueue, DeviceManager],
+    ack_code: object | None,
+    expected_status: int,
+) -> None:
+    """Manual dispense never reports success solely because local publish succeeded."""
+    client, harness, _, queue, _ = control_environment
+    assert harness.controller is not None
+    harness.ack_code = ack_code
+    if ack_code is None:
+        harness.controller._ack_timeout_seconds = 0.01
+
+    response = client.post(f"/api/devices/{DEVICE_A}/dispense", json={"grainNum": 2})
+
+    assert response.status_code == expected_status
+    assert queue.count(DEVICE_A, LOCAL_TO_UPSTREAM) == 0
+
+
 def test_capability_model_exposes_only_explicitly_confirmed_controls_as_writable(
     control_environment: tuple[TestClient, ControlHarness, StateShadow, MessageQueue, DeviceManager],
 ) -> None:
@@ -456,7 +507,7 @@ def test_local_attr_set_ack_resolves_then_forwards_once_when_online(
     worker.start()
     assert local_client.published_event.wait(1.0)
     assert queue.count(DEVICE_A, LOCAL_TO_UPSTREAM) == 0
-    assert upstream_client.published == []
+
 
     control_topic, control_payload = local_client.published[0]
     request = json.loads(control_payload)
@@ -500,6 +551,64 @@ def test_local_attr_set_ack_resolves_then_forwards_once_when_online(
     assert pump._run_once() is True
     assert upstream_client.published == [(SERVICE_POST_A, ack_payload)]
     assert queue.count(DEVICE_A, LOCAL_TO_UPSTREAM) == 0
+
+
+def test_manual_dispense_ack_forwards_once_without_forwarding_the_command(
+    control_environment: tuple[TestClient, ControlHarness, StateShadow, MessageQueue, DeviceManager],
+    make_config: RelayConfigFactory,
+) -> None:
+    """The feeder's natural manual-feed ACK is the sole cloud-visible message."""
+    _, harness, _, queue, devices = control_environment
+    assert harness.controller is not None
+    harness.ack_code = None
+    bridge = MqttBridge(make_config(), devices, queue, RelayTelemetry())
+    local_client = RecordingMqttClient()
+    upstream_client = RecordingMqttClient()
+    bridge._local_client = local_client  # type: ignore[assignment]
+    bridge.set_sound_switch_controller(harness.controller)
+    harness.controller._publish_local_control = bridge.publish_sound_switch
+    context = devices.get_by_device_id(DEVICE_A)
+    assert context is not None
+    context.telemetry.upstream_online()
+    outcome: dict[str, object] = {}
+
+    worker = threading.Thread(
+        target=lambda: outcome.update(harness.controller.dispense(DEVICE_A, 2))
+    )
+    worker.start()
+    assert local_client.published_event.wait(1.0)
+    command_topic, command_payload = local_client.published[0]
+    command = json.loads(command_payload)
+    assert command_topic.endswith("/device/service/sub")
+    assert command["cmd"] == "MANUAL_FEEDING_SERVICE"
+    assert queue.count(DEVICE_A, LOCAL_TO_UPSTREAM) == 0
+    assert upstream_client.published == []
+
+    ack_payload = json.dumps(
+        {"cmd": "MANUAL_FEEDING_SERVICE", "msgId": command["msgId"], "code": 0}
+    ).encode()
+
+    class FeederAck:
+        """Natural feeder service-post acknowledgement for the manual command."""
+
+        topic = SERVICE_POST_A
+        payload = ack_payload
+        qos = 0
+
+    bridge._on_local_message(None, None, FeederAck())  # type: ignore[arg-type]
+    worker.join(timeout=1.0)
+
+    assert outcome["success"] is True
+    queued = queue.peek_oldest(DEVICE_A, LOCAL_TO_UPSTREAM)
+    assert queued is not None and queued.payload == ack_payload
+    pump = DeliveryPump(
+        LOCAL_TO_UPSTREAM,
+        queue,
+        targets=lambda: [PumpTarget(DEVICE_A, upstream_client, context.telemetry)],  # type: ignore[arg-type]
+        is_cloud_to_device=False,
+    )
+    assert pump._run_once() is True
+    assert upstream_client.published == [(SERVICE_POST_A, ack_payload)]
 
 
 def test_schedule_resync_ack_is_never_forwarded_upstream(

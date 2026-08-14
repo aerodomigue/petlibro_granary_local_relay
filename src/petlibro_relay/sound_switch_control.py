@@ -237,6 +237,29 @@ class DeviceControlController:
         response["value"] = enabled
         return response
 
+    def dispense(self, device_id: str, grain_num: int) -> dict[str, Any]:
+        """Request an immediate, feeder-confirmed manual portion delivery.
+
+        The command is deliberately submitted directly to the local feeder and
+        is never persisted in the durable replay queue.  A stale manual feed
+        is unsafe by definition.
+        """
+        if not MIN_GRAIN_NUM <= grain_num <= MAX_GRAIN_NUM:
+            raise ControlStateUnavailableError(
+                f"grainNum must be between {MIN_GRAIN_NUM} and {MAX_GRAIN_NUM}"
+            )
+        return self._submit(
+            device_id,
+            protocol.Command.MANUAL_FEEDING_SERVICE,
+            "manual:dispense",
+            {"grainNum": grain_num},
+            {
+                "cmd": protocol.Command.MANUAL_FEEDING_SERVICE,
+                "ts": _timestamp_ms(),
+                "grainNum": grain_num,
+            },
+        )
+
     def set_group(
         self, device_id: str, group_name: str, updates: dict[str, Any], minimal: bool = False
     ) -> dict[str, Any]:

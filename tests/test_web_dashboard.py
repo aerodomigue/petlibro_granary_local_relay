@@ -31,6 +31,7 @@ from petlibro_relay.state_shadow import StateShadow
 from petlibro_relay.web.app import _stream_logs, create_app
 from petlibro_relay.web.context import DashboardContext
 from petlibro_relay.web.static import DASHBOARD_HTML
+from petlibro_relay.web.user_interface import DASHBOARD_JAVASCRIPT
 
 DEVICE_A = "TESTDEVICE0000000001"
 DEVICE_B = "TESTDEVICE0000000002"
@@ -47,6 +48,9 @@ DEVICE_A_PLANS = [
         "executionTime": "07:30",
         "repeatDay": [1, 2, 3, 4, 5],
         "grainNum": 3,
+        "tutkP2pRegion": "internal-region",
+        "credentialHint": "must-not-appear",
+        "internalUrl": "http://private.example.invalid",
     }
 ]
 DEVICE_B_PLANS = [
@@ -252,7 +256,16 @@ def test_api_masks_credentials_and_sanitizes_raw_state(client: TestClient) -> No
     )
     payload = " ".join(client.get(path).text for path in paths)
 
-    for secret in (PASSWORD_A, PASSWORD_B, PASSWORD_C, QUEUE_SECRET, USERNAME_A):
+    for secret in (
+        PASSWORD_A,
+        PASSWORD_B,
+        PASSWORD_C,
+        QUEUE_SECRET,
+        USERNAME_A,
+        "must-not-appear",
+        "internal-region",
+        "private.example.invalid",
+    ):
         assert secret not in payload
     assert "<redacted>" in client.get(f"/api/state?device_id={DEVICE_A}").text
 
@@ -330,7 +343,11 @@ def test_device_detail_keeps_schedule_and_controls_isolated(client: TestClient) 
 
     desired_a = {item["key"]: item["value"] for item in detail_a["state"]["desired"]}
     assert desired_a["motionDetectionSwitch"] is False
-    assert detail_a["state"]["feeding_plans"]["plans"] == DEVICE_A_PLANS
+    plan_a = detail_a["state"]["feeding_plans"]["plans"][0]
+    assert plan_a["planId"] == DEVICE_A_PLANS[0]["planId"]
+    assert plan_a["tutkP2pRegion"] == "<redacted>"
+    assert plan_a["credentialHint"] == "<redacted>"
+    assert plan_a["internalUrl"] == "<redacted>"
     assert detail_b["state"]["feeding_plans"]["plans"] == DEVICE_B_PLANS
 
 
@@ -346,19 +363,19 @@ def test_device_html_routes_validate_device_ids(client: TestClient) -> None:
 
     assert fleet.status_code == 200
     assert detail.status_code == 200
-    assert "device-page" in detail.text
+    assert 'id="application"' in detail.text
     assert client.get("/devices/UNKNOWN").status_code == 404
     assert client.get("/devices/%2E%2E").status_code == 404
 
 
-@pytest.mark.parametrize("path", ("/", "/cloud", "/devices", "/queues", "/state", "/ntp", "/logs", "/system"))
+@pytest.mark.parametrize("path", ("/", "/settings", "/devices"))
 def test_global_deep_links_return_the_dashboard_shell(client: TestClient, path: str) -> None:
     """Every global URL can be loaded or refreshed without relying on prior navigation."""
     response = client.get(path)
 
     assert response.status_code == 200
-    assert 'id="global-pages"' in response.text
-    assert "applyRoute()" in response.text
+    assert 'id="application"' in response.text
+    assert "function renderRoute()" in response.text
 
 
 def test_devices_api_contract_supports_one_and_many_device_fleet_rendering(client: TestClient) -> None:
@@ -381,6 +398,25 @@ def test_daily_projections_hide_diagnostics_but_keep_feeder_actions(client: Test
     assert {"ip", "mac", "username", "client_id", "firmware"}.isdisjoint(daily["device"])
     assert "raw_messages" not in daily["state"]
     assert "controls" in daily and "schedule_plans" in daily["state"]
+    assert {"mqttAddr", "httpsAddr", "tutkP2pRegion"}.isdisjoint(
+        {entry["key"] for entry in daily["state"]["desired"]}
+    )
+    allowed_plan_keys = {
+        "planId",
+        "executionTime",
+        "grainNum",
+        "enableAudio",
+        "audioTimes",
+        "repeatDay",
+        "syncTime",
+    }
+    assert all(
+        set(entry["plan"]).issubset(allowed_plan_keys)
+        for entry in daily["state"]["schedule_plans"]
+    )
+    assert "internal-region" not in json.dumps(daily)
+    assert "must-not-appear" not in json.dumps(daily)
+    assert "private.example.invalid" not in json.dumps(daily)
 
 
 def test_empty_devices_api_contract_is_renderable(
@@ -404,7 +440,7 @@ def test_empty_devices_api_contract_is_renderable(
         payload = client.get("/api/devices").json()
         assert payload["devices"] == []
         assert payload["summary"]["known"] == 0
-        assert "No devices known yet. Waiting for a PETLIBRO device" in DASHBOARD_HTML
+        assert "No PETLIBRO feeder has connected yet." in DASHBOARD_HTML
     finally:
         queue.close()
         registry.close()
@@ -470,6 +506,7 @@ def test_dashboard_exposes_only_narrow_confirmed_control_write_routes(
         ("/api/devices/{device_id}/controls/sound", ("PATCH",)),
         ("/api/devices/{device_id}/controls/sound-detection", ("PATCH",)),
         ("/api/devices/{device_id}/controls/video", ("PATCH",)),
+        ("/api/devices/{device_id}/dispense", ("POST",)),
         ("/api/devices/{device_id}/camera/webrtc", ("POST",)),
         ("/api/devices/{device_id}/camera/webrtc/{session_id}", ("DELETE",)),
         ("/api/devices/{device_id}/camera/viewers/{viewer_id}", ("DELETE",)),
@@ -483,339 +520,77 @@ def test_dashboard_exposes_only_narrow_confirmed_control_write_routes(
     assert all(route.path != "/api/devices/{device_id}/controls" for route in app.routes)
 
 
-def test_ui_keeps_raw_data_behind_explicit_debug_controls() -> None:
-    """The page provides formatted observability views and explicit raw-data controls."""
-    for helper in (
-        "formatDuration",
-        "formatAge",
-        "formatTimestamp",
-        "formatPercent",
-        "formatBoolean",
-        "statusBadge",
-        "escapeHtml",
-    ):
-        assert helper in DASHBOARD_HTML
-    assert "Raw JSON" in DASHBOARD_HTML
-    assert "EventSource('/api/logs/stream')" in DASHBOARD_HTML
+def test_daily_ui_uses_readable_cards_and_explicit_advanced_debug() -> None:
+    """The refactor keeps daily tasks simple and leaves diagnostics explicit."""
+    from petlibro_relay.web.user_interface import DASHBOARD_JAVASCRIPT
+
+    assert "function renderHome()" in DASHBOARD_JAVASCRIPT
+    assert "function renderAdvanced(detail)" in DASHBOARD_JAVASCRIPT
+    assert "State and raw messages" in DASHBOARD_JAVASCRIPT
+    assert "Device cloud events" in DASHBOARD_JAVASCRIPT
+    assert "Device logs" in DASHBOARD_JAVASCRIPT
+    assert "Raw JSON" not in DASHBOARD_JAVASCRIPT
 
 
-def test_ui_renders_a_fleet_table_and_dedicated_device_pages() -> None:
-    """Fleet listing links to device-scoped tabs instead of embedding a detail pane."""
-    assert "device-row" in DASHBOARD_HTML
-    assert 'href="/devices"' in DASHBOARD_HTML
-    assert "const DEVICE_TABS=" in DASHBOARD_HTML
-    assert "renderDevicePage" in DASHBOARD_HTML
-    assert "/api/devices/${encodeURIComponent(deviceId)}" in DASHBOARD_HTML
-    assert "devicePicker" in DASHBOARD_HTML
-    assert "requestMotionDetectionSwitch" in DASHBOARD_HTML
-    assert "motion-detection-switch-toggle" in DASHBOARD_HTML
+def test_device_ui_preserves_camera_schedule_and_typed_settings() -> None:
+    """Daily device tabs retain all established feeder functionality."""
+    from petlibro_relay.web.user_interface import DASHBOARD_JAVASCRIPT
 
-
-def test_ui_initial_route_activates_the_matching_section_and_supports_history() -> None:
-    """Direct links do not leave the target section hidden behind the shell."""
     for marker in (
-        "const GLOBAL_ROUTES=",
-        "function tabForPath",
-        "function applyRoute",
-        "byId(tab).classList.toggle('active',!deviceId&&tab===runtime.active)",
-        "history.pushState",
-        "window.addEventListener('popstate',applyRoute)",
-        "bindRoutes()",
-        "Failed to render",
+        "function renderCamera(detail)",
+        "function renderSchedule(detail)",
+        "function renderSettings(detail)",
+        "camera&&camera.bridge_registered&&camera.go2rtc_reachable",
+        "startCamera(detail.device.device_id)",
+        "data-add-plan",
+        "data-edit-plan",
+        "data-disable-plan",
+        "data-delete-plan",
     ):
-        assert marker in DASHBOARD_HTML
+        assert marker in DASHBOARD_JAVASCRIPT
+    assert "MANUAL_FEEDING_SERVICE" not in DASHBOARD_JAVASCRIPT
 
 
-def test_device_ui_has_typed_controls_schedule_camera_and_reused_views() -> None:
-    """Device sections expose only the typed ACK-confirmed controls and plans."""
-    for marker in (
-        "controlsMarkup",
-        "scheduleMarkup",
-        "cameraMarkup",
-        "stateMarkup",
-        "logPanel('device-log',deviceId)",
-        "go2rtc stream status",
-        "go2rtc_reachable",
-        "WebRTC via local go2rtc",
-        "camera/webrtc",
-        "renderLogLines('device-log',deviceId)",
-        "schedule-edit",
-        "schedulePayload",
-        "Local MQTT schedule",
-        "Local confirmation differs from cloud desired.",
-    ):
-        assert marker in DASHBOARD_HTML
-    assert HTML_INJECTION_VALUE not in DASHBOARD_HTML
-    assert "escapeHtml" in DASHBOARD_HTML
+def test_camera_lifecycle_is_singleton_and_navigation_safe() -> None:
+    """Only the validated WHEP lifecycle can create or release a viewer."""
+    from petlibro_relay.web.user_interface import DASHBOARD_JAVASCRIPT
+
+    assert DASHBOARD_JAVASCRIPT.count("async function startCamera(") == 1
+    assert DASHBOARD_JAVASCRIPT.count("function closeCamera(") == 1
+    assert "player.abort.abort()" in DASHBOARD_JAVASCRIPT
+    assert "clearInterval(player.heartbeatTimer)" in DASHBOARD_JAVASCRIPT
+    assert "window.addEventListener('pagehide',closeCamera)" in DASHBOARD_JAVASCRIPT
+    assert "document.addEventListener('visibilitychange'" in DASHBOARD_JAVASCRIPT
 
 
-def test_camera_player_survives_device_status_refreshes() -> None:
-    """Camera polling preserves the active WebRTC video element and peer connection."""
-    assert "player&&player.deviceId===deviceId&&byId('camera-player')" in DASHBOARD_HTML
-    assert "runtime.deviceDetail=detail;updateCameraPlayerStatus(detail.camera);return" in DASHBOARD_HTML
-    assert "setCameraPlayerState('Live','live');showCameraControls(player)" in DASHBOARD_HTML
+def test_polling_preserves_device_scoped_schedule_and_setting_drafts() -> None:
+    """Drafts belong to the selected device and block destructive rerenders."""
+    from petlibro_relay.web.user_interface import DASHBOARD_JAVASCRIPT
+
+    assert "draft&&draft.deviceId===detail.device.device_id&&root.querySelector('#schedule-editor')" in DASHBOARD_JAVASCRIPT
+    assert "`${detail.device.device_id}:${group.path}`" in DASHBOARD_JAVASCRIPT
+    assert "state.drafts.schedule=null;state.drafts.settings={}" in DASHBOARD_JAVASCRIPT
+    assert "input.addEventListener('change'" in DASHBOARD_JAVASCRIPT
 
 
-def test_camera_player_closes_cleanly_and_retries_with_backoff() -> None:
-    """Camera UI owns one peer connection and releases it when no longer visible."""
-    for marker in (
-        "CAMERA_HIDDEN_CLOSE_DELAY_MS=15000",
-        "CAMERA_CONTROL_HIDE_DELAY_MS=3000",
-        "CAMERA_RETRY_DELAYS_MS=[1000,2000,5000,10000]",
-        "stream.getTracks().forEach(track=>track.stop())",
-        "window.addEventListener('pagehide',closeCameraPlayer)",
-        "document.addEventListener('visibilitychange',handleCameraVisibility)",
-        "setCameraPlayerState('Starting stream…','waiting')",
-    ):
-        assert marker in DASHBOARD_HTML
+def test_home_live_uses_a_single_accessible_route_link() -> None:
+    """The Home live action navigates to the auto-starting Camera tab."""
+    from petlibro_relay.web.user_interface import DASHBOARD_JAVASCRIPT
+
+    assert 'class="live-link"' in DASHBOARD_JAVASCRIPT
+    assert 'data-route="/devices/${encodeURIComponent(device.device_id)}#camera"' in DASHBOARD_JAVASCRIPT
+    live_markup = DASHBOARD_JAVASCRIPT.split("function deviceCard", 1)[1].split(
+        "function renderHome", 1
+    )[0]
+    assert "<button type=\"button\">▶ Live</button>" not in live_markup
 
 
-def test_camera_player_uses_a_custom_local_control_overlay() -> None:
-    """Camera controls stay in the player and never create a feeder write path."""
-    for marker in (
-        'id="camera-controls"',
-        'id="camera-mute"',
-        'id="camera-volume"',
-        'id="camera-quality"',
-        'Profile switch unavailable',
-        'id="camera-fullscreen"',
-        "CAMERA_VOLUME_STORAGE_KEY='petlibro-camera-volume'",
-        "root.requestFullscreen().catch(()=>{})",
-        "pc.addTransceiver('audio',{direction:'recvonly'})",
-        "camera-player.controls-visible",
-    ):
-        assert marker in DASHBOARD_HTML
-    assert '<video id="camera-video" autoplay playsinline muted controls' not in DASHBOARD_HTML
-    assert "/camera/quality" not in DASHBOARD_HTML
-
-
-def test_controls_and_schedule_use_conditional_human_friendly_components() -> None:
-    """The device UI hides protocol details behind explicit control components."""
-    for marker in (
-        "setting-grid",
-        "setting-card",
-        "control-form",
-        "data-show-when",
-        "Enable motion detection",
-        "Enable sound detection",
-        "Enable device sound",
-        "720p",
-        "Always on",
-        "Cloud recording",
-        "schedule-editor",
-        "Create feeding plan",
-        "Custom days",
-        "Local MQTT schedules",
-        "Delete this feeding plan? This cannot be undone locally.",
-        "scheduleDraftDays",
-    ):
-        assert marker in DASHBOARD_HTML
-    assert "Days (1=Mon … 7=Sun)" not in DASHBOARD_HTML
-
-
-def test_controls_render_and_condition_initialization_are_idempotent() -> None:
-    """Controls markup renders and does not self-trigger observer mutations."""
-    script = DASHBOARD_HTML.split("<script>", 1)[1].rsplit("</script>", 1)[0]
-    controls_start = script.rindex("function effectiveValues")
-    controls_end = script.rindex("function readControlValue")
-    conditions_start = controls_end
-    conditions_end = script.rindex("function controlPayload")
-    fixture = {
-        "state": {
-            "desired": [
-                {"key": "soundSwitch", "value": True},
-                {"key": "soundAgingType", "value": 1},
-                {"key": "volume", "value": 37},
-                {"key": "motionDetectionSwitch", "value": False},
-            ],
-            "reported": [],
-            "local_confirmed": [],
-        },
-        "controls": {
-            "soundSwitch": {
-                "writable": True,
-                "device_online": True,
-                "pending": False,
-            },
-        },
-    }
-    node_test = f"""
-const runtime = {{ controlSaving: {{}}, controlFeedback: {{}} }};
-const escapeHtml = value => String(value ?? '—');
-const desiredValues = state => Object.fromEntries((state.desired || []).map(item => [item.key, item.value]));
-const confirmedValues = state => Object.fromEntries((state.local_confirmed || []).map(item => [item.key, item.value]));
-const reportedValues = state => Object.fromEntries((state.reported || []).map(item => [item.key, item.value]));
-const card = (title, content) => `<article><h2>${{title}}</h2>${{content}}</article>`;
-{script[controls_start:controls_end]}
-globalThis.CSS = {{ escape: value => value }};
-globalThis.HTMLInputElement = class {{}};
-globalThis.HTMLSelectElement = class {{}};
-{script[conditions_start:conditions_end]}
-const fixture = {json.dumps(fixture)};
-const markup = controlsMarkup(fixture.state, fixture.controls);
-if (!markup.includes('Enable device sound') || !markup.includes('value="37"')) {{
-  throw new Error('Controls markup did not render the realistic device fixture.');
-}}
-class FakeInput extends HTMLInputElement {{
-  constructor(name, type, value, checked) {{
-    super();
-    this.name = name;
-    this.type = type;
-    this.value = value;
-    this.checked = checked;
-  }}
-}}
-const soundSwitch = new FakeInput('soundSwitch', 'checkbox', '', true);
-const volume = new FakeInput('volume', 'range', '37', false);
-const visibility = {{
-  dataset: {{ showWhen: 'soundSwitch:true' }},
-  hidden: null,
-  classList: {{ toggle: (_name, hidden) => {{ visibility.hidden = hidden; }} }},
-}};
-const output = {{
-  writes: 0,
-  value: '0%',
-  get textContent() {{ return this.value; }},
-  set textContent(value) {{ this.writes += 1; this.value = value; }},
-}};
-const form = {{
-  querySelectorAll(selector) {{
-    if (selector === '[data-show-when]') return [visibility];
-    if (selector === 'input[type=range]') return [volume];
-    if (selector === '[name="soundSwitch"]') return [soundSwitch];
-    return [];
-  }},
-  querySelector(selector) {{
-    return selector === '[data-range-output="volume"]' ? output : null;
-  }},
-}};
-updateControlConditions(form);
-updateControlConditions(form);
-if (visibility.hidden !== false) throw new Error('Initial visibility state was not applied.');
-if (output.writes !== 1 || output.textContent !== '37%') {{
-  throw new Error(`Condition initialization was not idempotent: ${{output.writes}} writes.`);
-}}
-"""
-    result = subprocess.run(
-        ["node", "-e", node_test],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
-
-
-def test_schedule_drafts_survive_polling_for_create_and_edit() -> None:
-    """Polling server state never replaces an active schedule editor's local draft."""
-    script = DASHBOARD_HTML.split("<script>", 1)[1].rsplit("</script>", 1)[0]
-    schedule_start = script.rindex("function scheduleRepeatMode")
-    schedule_end = script.rindex("async function requestScheduleEditor")
-    node_test = f"""
-const runtime = {{ scheduleEditor: null, scheduleFeedback: null }};
-const escapeHtml = value => String(value ?? '—');
-const readControlValue = (form, key) => form.values[key];
-const timeField = (values, key) => `<input name="${{key}}" value="${{values[key] ?? ''}}">`;
-const numberField = (values, key) => `<input name="${{key}}" value="${{values[key] ?? ''}}">`;
-const checkboxRow = (values, key) => `<input name="${{key}}" type="checkbox" ${{values[key] === true ? 'checked' : ''}}>`;
-const conditional = (_condition, content) => content;
-const radioChoice = (values, key, _label, options) => options.map(([value]) => `<input name="${{key}}" value="${{value}}" ${{values[key] === value ? 'checked' : ''}}>`).join('');
-const scheduleDays = days => Array.isArray(days) ? days.join(',') : '—';
-{script[schedule_start:schedule_end]}
-function form(values, selectedDays) {{
-  return {{
-    values,
-    querySelectorAll: selector => selector === 'input[name="repeatDay"]:checked'
-      ? selectedDays.map(value => ({{ value: String(value) }})) : [],
-  }};
-}}
-runtime.scheduleEditor = {{ mode: 'create', planId: null, draft: scheduleDraftFromPlan() }};
-if (!scheduleMarkup({{ schedule_plans: [] }}).includes('value="every" checked')) {{
-  throw new Error('Create editor no longer defaults to every day.');
-}}
-updateScheduleDraft(form({{
-  executionTime: '12:34', grainNum: '4', enableAudio: true,
-  audioTimes: '3', repeatMode: 'custom',
-}}, [1, 3, 5]));
-const createAfterPoll = scheduleMarkup({{ schedule_plans: [] }});
-if (!createAfterPoll.includes('value="12:34"') || !createAfterPoll.includes('value="4"')) {{
-  throw new Error('Create draft was replaced by the polling render.');
-}}
-if (!createAfterPoll.includes('value="custom" checked') || !createAfterPoll.includes('value="1" checked')) {{
-  throw new Error('Create repeat draft was replaced by the polling render.');
-}}
-runtime.scheduleEditor = {{
-  mode: 'edit', planId: 42,
-  draft: scheduleDraftFromPlan({{ executionTime: '07:30', grainNum: 1, enableAudio: false, audioTimes: 1, repeatDay: [1, 2, 3, 4, 5, 6, 7] }}),
-}};
-updateScheduleDraft(form({{
-  executionTime: '19:45', grainNum: '7', enableAudio: true,
-  audioTimes: '2', repeatMode: 'never',
-}}, []));
-const editAfterPoll = scheduleMarkup({{
-  schedule_plans: [{{ plan: {{ planId: 42, executionTime: '07:30', grainNum: 1, repeatDay: [1, 2, 3, 4, 5, 6, 7] }}, source: 'local' }}],
-}});
-if (!editAfterPoll.includes('value="19:45"') || !editAfterPoll.includes('value="7"')) {{
-  throw new Error('Edit draft was replaced by the polling render.');
-}}
-if (!editAfterPoll.includes('value="never" checked')) {{
-  throw new Error('Edit repeat draft was replaced by the polling render.');
-}}
-"""
-    result = subprocess.run(
-        ["node", "-e", node_test],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
-
-
-def test_control_draft_survives_server_render() -> None:
-    """An unsaved Controls field is restored after a polling-driven rerender."""
-    script = DASHBOARD_HTML.split("<script>", 1)[1].rsplit("</script>", 1)[0]
-    draft_start = script.rindex("function controlDraftKey")
-    draft_end = script.rindex("function controlPayload")
-    node_test = f"""
-const runtime = {{ controlDrafts: {{}} }};
-const currentDeviceId = () => 'DEVICE-A';
-const CSS = {{ escape: value => value }};
-const updateControlConditions = () => undefined;
-globalThis.HTMLInputElement = class {{}};
-globalThis.HTMLSelectElement = class {{}};
-{script[draft_start:draft_end]}
-class Input extends HTMLInputElement {{
-  constructor(name, type, checked) {{
-    super();
-    this.name = name;
-    this.type = type;
-    this.checked = checked;
-    this.value = checked ? 'true' : 'false';
-    this.dataset = {{}};
-  }}
-}}
-const edited = new Input('soundSwitch', 'checkbox', true);
-const editingForm = {{ dataset: {{ controlPath: 'sound' }} }};
-updateControlDraft(editingForm, edited);
-const rerendered = new Input('soundSwitch', 'checkbox', false);
-const renderedForm = {{
-  dataset: {{ controlPath: 'sound' }},
-  querySelectorAll: selector => selector === '[name="soundSwitch"]' ? [rerendered] : [],
-}};
-restoreControlDrafts({{ querySelectorAll: selector => selector === '.control-form' ? [renderedForm] : [] }}, 'DEVICE-A');
-if (rerendered.checked !== true || rerendered.dataset.dirty !== 'true') {{
-  throw new Error('Controls draft was replaced by the polling render.');
-}}
-"""
-    result = subprocess.run(
-        ["node", "-e", node_test],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
+def test_modal_shell_can_host_a_typed_action_form() -> None:
+    """The dialog outer shell is not a form, so dispense can use its own form."""
+    assert '<dialog id="app-modal"' in DASHBOARD_HTML
+    assert '<div class="modal-shell">' in DASHBOARD_HTML
+    assert 'id="modal-dismiss"' in DASHBOARD_HTML
+    assert '<form method="dialog" class="modal-shell">' not in DASHBOARD_HTML
 
 
 def test_sse_emits_new_sanitized_log(

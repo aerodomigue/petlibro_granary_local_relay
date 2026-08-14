@@ -406,12 +406,18 @@ and the evidence still required for audio and profile switching.
 ## Observability dashboard and confirmed control
 
 Set `PETLIBRO_WEB_ENABLED=true` to start the integrated FastAPI dashboard on
-`PETLIBRO_WEB_HOST:PETLIBRO_WEB_PORT` (default `0.0.0.0:8080`). It is
-read-only except for two deliberately narrow, device-confirmed controls:
-`soundSwitch` and `motionDetectionSwitch` on a locally present PLAF203. The HTTP API never accepts an
-arbitrary MQTT topic, command, field, or JSON payload.
-The UI has Overview, Cloud, Devices, Queues, State, NTP, Logs and System
-tabs, backed by versionable JSON endpoints:
+`PETLIBRO_WEB_HOST:PETLIBRO_WEB_PORT` (default `0.0.0.0:8080`). It exposes
+only typed, device-confirmed feeder actions (settings, schedules and manual
+dispense) for a locally present PLAF203; the HTTP API never accepts an arbitrary
+MQTT topic, command, field, or JSON payload.
+
+The dashboard has no HTTP authentication. Keep its port on a trusted private
+administration network only: a client able to reach it can invoke the explicitly
+enabled feeder actions. Never expose port 8080 to the Internet.
+The UI provides Home and device-focused Overview, Camera, Schedule, Activity
+and Settings tabs. Advanced mode adds redacted diagnostics, queues, NTP,
+responder status, raw state and device-scoped logs, backed by versionable JSON
+endpoints:
 
 ```
 GET /healthz

@@ -138,6 +138,12 @@ class BowlRequest(_StrictRequest):
     bowlMode: Literal["SINGLE_BOWL", "DOUBLE_BOWL"]
 
 
+class DispenseRequest(_StrictRequest):
+    """One immediate portion request, bounded to the feeder's supported range."""
+
+    grainNum: int = Field(ge=1, le=48)
+
+
 class ScheduleCreateRequest(_StrictRequest):
     """A safe feeder schedule plan with positive app-compatible limits."""
 
@@ -411,6 +417,12 @@ def create_app(context: DashboardContext) -> FastAPI:
     @app.patch("/api/devices/{device_id}/controls/bowl")
     def set_bowl(device_id: str, request: BowlRequest) -> dict[str, object]:
         return _set_group_endpoint(context, device_id, "bowl", request.model_dump())
+
+    @app.post("/api/devices/{device_id}/dispense")
+    def dispense(device_id: str, request: DispenseRequest) -> dict[str, object]:
+        """Dispense now only after a local feeder acknowledgement."""
+        control = _known_control(context, device_id)
+        return _run_control(control, device_id, lambda: control.dispense(device_id, request.grainNum))
 
     @app.post("/api/devices/{device_id}/schedule")
     def create_schedule(device_id: str, request: ScheduleCreateRequest) -> dict[str, object]:

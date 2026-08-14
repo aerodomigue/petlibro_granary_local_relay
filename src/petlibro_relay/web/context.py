@@ -27,6 +27,60 @@ from ..state_shadow import StateShadow
 from ..sound_switch_control import SoundSwitchController
 
 
+DAILY_SETTING_KEYS = frozenset(
+    {
+        "afterManualFeedingTime",
+        "automaticRecording",
+        "beforeFeedingPlanTime",
+        "cameraAgingType",
+        "cameraEndTime",
+        "cameraStartTime",
+        "cameraSwitch",
+        "enableVideoAfterManualFeeding",
+        "enableVideoStartFeedingPlan",
+        "feedingVideoSwitch",
+        "filterLedSwitch",
+        "lightAgingType",
+        "lightSwitch",
+        "lightingEndTime",
+        "lightingStartTime",
+        "motionDetectionAgingType",
+        "motionDetectionEndTime",
+        "motionDetectionRange",
+        "motionDetectionSensitivity",
+        "motionDetectionStartTime",
+        "motionDetectionSwitch",
+        "nightVision",
+        "resolution",
+        "soundAgingType",
+        "soundDetectionAgingType",
+        "soundDetectionEndTime",
+        "soundDetectionSensitivity",
+        "soundDetectionStartTime",
+        "soundDetectionSwitch",
+        "soundEndTime",
+        "soundStartTime",
+        "soundSwitch",
+        "videoRecordAgingType",
+        "videoRecordEndTime",
+        "videoRecordMode",
+        "videoRecordStartTime",
+        "videoRecordSwitch",
+        "videoWatermarkSwitch",
+        "volume",
+    }
+)
+DAILY_SCHEDULE_PLAN_KEYS = (
+    "planId",
+    "executionTime",
+    "grainNum",
+    "enableAudio",
+    "audioTimes",
+    "repeatDay",
+    "syncTime",
+)
+
+
 class DashboardContext:
     """Expose safe snapshots of existing relay components to HTTP handlers."""
 
@@ -170,6 +224,11 @@ class DashboardContext:
                     "local_responder": self.responder(device_id),
                     "controls": self.controls(device_id),
                     "camera": self.camera(device_id, entry.product_id),
+                    "logs": [
+                        entry
+                        for entry in self._logs.snapshot(100)
+                        if entry.get("device_id") == device_id
+                    ],
                 }
             ),
         )
@@ -189,13 +248,23 @@ class DashboardContext:
                         "desired": [
                             {"key": key, "value": value}
                             for key, value in self._shadow.get_desired(device_id).items()
+                            if key in DAILY_SETTING_KEYS
                         ],
                         "local_confirmed": [
                             {"key": key, "value": value}
                             for key, value in self._shadow.get_local_confirmed(device_id).items()
+                            if key in DAILY_SETTING_KEYS
                         ],
                         "schedule_plans": [
-                            {"plan": plan.plan, "source": plan.source, "updated_at": plan.updated_at}
+                            {
+                                "plan": {
+                                    key: plan.plan[key]
+                                    for key in DAILY_SCHEDULE_PLAN_KEYS
+                                    if key in plan.plan
+                                },
+                                "source": plan.source,
+                                "updated_at": plan.updated_at,
+                            }
                             for plan in self._shadow.get_schedule_plans(device_id)
                         ],
                     },

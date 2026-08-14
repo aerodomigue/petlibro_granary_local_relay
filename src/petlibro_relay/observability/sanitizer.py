@@ -8,6 +8,9 @@ from typing import Any
 
 PASSWORD_FIELD_PATTERN = re.compile(r'(?i)(password|secret)\s*([=:])\s*[^\s,}\]]+')
 TOKEN_FIELD_PATTERN = re.compile(r'(?i)(authorization|token)\s*([=:])\s*[^\s,}\]]+')
+IDENTITY_FIELD_PATTERN = re.compile(
+    r'(?i)\b(uuid|uid|tutk(?:[a-z0-9_]*)?|kalay(?:[a-z0-9_]*)?)\s*([=:])\s*[^\s,}\]]+'
+)
 REDACTED_VALUE = "<redacted>"
 
 
@@ -23,6 +26,7 @@ def sanitize_text(message: str, secrets: Iterable[str] = ()) -> str:
     """
     sanitized = PASSWORD_FIELD_PATTERN.sub(r"\1\2" + REDACTED_VALUE, message)
     sanitized = TOKEN_FIELD_PATTERN.sub(r"\1\2" + REDACTED_VALUE, sanitized)
+    sanitized = IDENTITY_FIELD_PATTERN.sub(r"\1\2" + REDACTED_VALUE, sanitized)
     for secret in secrets:
         if secret:
             sanitized = sanitized.replace(secret, REDACTED_VALUE)
@@ -77,12 +81,32 @@ def sanitize_upstream_service_payload(value: Any) -> Any:
 def _is_sensitive_key(key: str) -> bool:
     """Return whether a JSON property name may carry a secret."""
     normalized = key.lower()
-    return any(fragment in normalized for fragment in ("password", "secret", "authorization", "token"))
+    return normalized in {"username", "user", "uuid", "uid", "mqttaddr", "httpsaddr", "internalurl"} or any(
+        fragment in normalized
+        for fragment in (
+            "password",
+            "secret",
+            "authorization",
+            "token",
+            "credential",
+            "tutk",
+            "kalay",
+        )
+    )
 
 
 def _is_upstream_service_sensitive_key(key: str) -> bool:
     """Return whether a diagnostic service-payload field must be redacted."""
     normalized = key.lower()
-    return _is_sensitive_key(key) or normalized in {"username", "user"} or any(
-        fragment in normalized for fragment in ("credential", "tutk", "kalay")
+    return normalized in {"username", "user"} or any(
+        fragment in normalized
+        for fragment in (
+            "password",
+            "secret",
+            "authorization",
+            "token",
+            "credential",
+            "tutk",
+            "kalay",
+        )
     )
