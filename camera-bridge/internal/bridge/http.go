@@ -57,7 +57,7 @@ func disconnectDevice(writer http.ResponseWriter, request *http.Request, registr
 func healthHandler(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"healthy":          true,
-		"media_protocol":   "not_implemented",
+		"media_protocol":   "plaf203_h264_observation",
 		"tutk_dependency":  "github.com/AlexxIT/go2rtc/pkg/tutk",
 		"stream_on_demand": false,
 	})

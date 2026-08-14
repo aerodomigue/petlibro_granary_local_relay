@@ -2,11 +2,13 @@ package plaf203
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
 	"sync"
+	"time"
 )
 
 const (
@@ -68,25 +70,47 @@ type LoginResponse struct {
 	Sequence  uint16
 }
 
-// Session owns the authenticated UDP transport. It intentionally carries no
-// media, codec, or AV-control state.
+// Session owns one authenticated UDP transport and its bounded, diagnostic
+// H.264 observation state. It never decodes or publishes media.
 type Session struct {
-	ID        [8]byte
-	Address   *net.UDPAddr
-	transport DatagramTransport
-	closeOnce sync.Once
-	closeErr  error
+	ID             [8]byte
+	Address        *net.UDPAddr
+	transport      DatagramTransport
+	clock          func() time.Time
+	sequence       uint16
+	controlCounter uint16
+	media          *MediaReceiver
+	observer       Observer
+	sendMu         sync.Mutex
+	mediaMu        sync.Mutex
+	cancelReceive  context.CancelFunc
+	lastMediaEvent time.Time
+	closeOnce      sync.Once
+	closeErr       error
 }
 
 // Close releases the authenticated transport. It is safe to call repeatedly.
 func (session *Session) Close() error {
-	if session == nil || session.transport == nil {
+	if session == nil {
 		return nil
 	}
 	session.closeOnce.Do(func() {
-		session.closeErr = session.transport.Close()
+		if session.cancelReceive != nil {
+			session.cancelReceive()
+		}
+		if session.transport != nil {
+			session.closeErr = session.transport.Close()
+		}
 	})
 	return session.closeErr
+}
+
+// MediaStats returns safe, aggregate media diagnostics for this session.
+func (session *Session) MediaStats() MediaStats {
+	if session == nil || session.media == nil {
+		return MediaStats{}
+	}
+	return session.media.Snapshot()
 }
 
 // Encode serializes a full PLAF203 V3.0.30 Session16 client-start request.

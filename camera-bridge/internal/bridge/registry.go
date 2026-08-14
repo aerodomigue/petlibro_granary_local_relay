@@ -41,6 +41,11 @@ type Device struct {
 	LastError        string               `json:"last_error,omitempty"`
 	LastTransitionAt time.Time            `json:"last_transition_at"`
 	UpdatedAt        time.Time            `json:"updated_at"`
+	VideoCodec       string               `json:"video_codec,omitempty"`
+	AudioCodec       string               `json:"audio_codec,omitempty"`
+	FramesReceived   uint64               `json:"frames_received"`
+	BytesReceived    uint64               `json:"bytes_received"`
+	LastFrameAt      time.Time            `json:"last_frame_at,omitempty"`
 }
 
 type deviceRecord struct {
@@ -97,7 +102,7 @@ func (r *Registry) Upsert(deviceID string, uid string) (Device, error) {
 			UIDLearned:       true,
 			Stream:           streamPrefix + deviceID,
 			StreamAvailable:  false,
-			Reason:           "plaf203_media_not_implemented",
+			Reason:           "plaf203_h264_observation_only",
 			ConnectionState:  plaf203.StateIdle,
 			LastTransitionAt: now,
 		}
@@ -192,7 +197,16 @@ func (r *Registry) List() []Device {
 	r.mu.RLock()
 	devices := make([]Device, 0, len(r.devices))
 	for _, record := range r.devices {
-		devices = append(devices, record.device)
+		device := record.device
+		if record.session != nil {
+			stats := record.session.MediaStats()
+			device.VideoCodec = stats.VideoCodec
+			device.AudioCodec = stats.AudioCodec
+			device.FramesReceived = stats.FramesReceived
+			device.BytesReceived = stats.BytesReceived
+			device.LastFrameAt = stats.LastFrameAt
+		}
+		devices = append(devices, device)
 	}
 	r.mu.RUnlock()
 	sort.Slice(devices, func(left int, right int) bool {
@@ -222,17 +236,11 @@ func (r *Registry) connected(deviceID string, attemptID uint64, session *plaf203
 		}
 		return
 	}
-	now := time.Now().UTC()
 	record.session = session
 	record.cancel = nil
-	record.device.ConnectionState = plaf203.StateConnected
 	record.device.LastError = ""
-	record.device.LastTransitionAt = now
-	record.device.UpdatedAt = now
 	r.devices[deviceID] = record
 	r.mu.Unlock()
-	log.Printf("CAMERA LOGIN OK device=%s", deviceID)
-	log.Printf("CAMERA SESSION CONNECTED device=%s", deviceID)
 }
 
 func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.Event) {
@@ -263,6 +271,19 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 		} else {
 			log.Printf("CAMERA LOGIN STEP device=%s step=%s", deviceID, event.Step)
 		}
+	case plaf203.StateConnected:
+		log.Printf("CAMERA LOGIN OK device=%s", deviceID)
+		log.Printf("CAMERA SESSION CONNECTED device=%s", deviceID)
+	case plaf203.StateBootstrapping:
+		log.Printf("CAMERA BOOTSTRAP START device=%s", deviceID)
+	case plaf203.StateStreaming:
+		if event.Step != "media_stats" {
+			log.Printf("CAMERA BOOTSTRAP OK device=%s", deviceID)
+			log.Printf("CAMERA STREAM START device=%s codec=h264", deviceID)
+		}
+		if event.Frame != nil {
+			log.Printf("CAMERA VIDEO FRAME device=%s codec=%s keyframe=%t bytes=%d timestamp=%d", deviceID, event.Frame.Codec, event.Frame.Keyframe, len(event.Frame.Data), event.Frame.Timestamp)
+		}
 	}
 }
 
@@ -285,6 +306,8 @@ func (r *Registry) fail(deviceID string, attemptID uint64, connectionError error
 	r.mu.Unlock()
 	if failedState == plaf203.StateLoggingIn {
 		log.Printf("CAMERA LOGIN FAILED device=%s error=%v", deviceID, connectionError)
+	} else if failedState == plaf203.StateBootstrapping {
+		log.Printf("CAMERA BOOTSTRAP FAILED device=%s error=%v", deviceID, connectionError)
 	} else {
 		log.Printf("CAMERA SESSION FAILED device=%s stage=%s error=%v", deviceID, failedState, connectionError)
 	}

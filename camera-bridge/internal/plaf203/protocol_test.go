@@ -137,6 +137,22 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 			var sessionID [8]byte
 			copy(sessionID[:], decoded[20:28])
 			transport.addResponse(tutk.TransCodePartial(nil, testLoginSuccess(sessionID)), address)
+			return
+		}
+		if len(decoded) < sessionHeaderLength+controlInnerLength || binary.LittleEndian.Uint16(decoded[8:]) != clientSessionOpcode || decoded[sessionHeaderLength] != 0x0C {
+			return
+		}
+		body := decoded[sessionHeaderLength:]
+		controlType := binary.LittleEndian.Uint32(body[controlInnerLength:])
+		var sessionID [8]byte
+		copy(sessionID[:], decoded[20:28])
+		switch controlType {
+		case controlGetFormat:
+			transport.addResponse(tutk.TransCodePartial(nil, testControlReply(sessionID, controlChannelStream, 0)), address)
+			transport.addResponse(tutk.TransCodePartial(nil, testControlReply(sessionID, controlChannelSystem, 1)), address)
+		case controlStartVideo:
+			transport.addResponse(tutk.TransCodePartial(nil, testVideoFragment(sessionID, 0x4000, 2, 0, false, 0, []byte{0, 0, 0, 1, 0x67, 1})), address)
+			transport.addResponse(tutk.TransCodePartial(nil, testVideoFragment(sessionID, 0x4001, 2, 1, true, 0, append([]byte{0, 0, 0, 1, 0x65, 2}, testMediaTrailer(42)...))), address)
 		}
 	}
 	connector := &DirectConnector{
@@ -159,7 +175,7 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 	if session.Address == nil || !session.Address.IP.Equal(net.ParseIP("192.0.2.25")) || session.Address.Port != 40238 {
 		t.Fatalf("session address=%v", session.Address)
 	}
-	want := []SessionState{StateDiscovering, StateKnocking, StateLoggingIn, StateLoggingIn, StateLoggingIn}
+	want := []SessionState{StateDiscovering, StateKnocking, StateLoggingIn, StateLoggingIn, StateLoggingIn, StateConnected, StateBootstrapping, StateStreaming}
 	if len(states) != len(want) {
 		t.Fatalf("states=%v want=%v", states, want)
 	}
@@ -168,9 +184,25 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 			t.Fatalf("states=%v want=%v", states, want)
 		}
 	}
-	if len(transport.sent) != 4 {
-		t.Fatalf("wire messages=%d want discovery, KNOCK_RR2, and login pair", len(transport.sent))
+	if len(transport.sent) != 11 {
+		t.Fatalf("wire messages=%d want discovery, knock, login, and bootstrap", len(transport.sent))
 	}
+	bootstrapPackets := make([][]byte, 0, 7)
+	for _, packet := range transport.sent[4:] {
+		bootstrapPackets = append(bootstrapPackets, tutk.ReverseTransCodePartial(nil, packet))
+	}
+	if len(bootstrapPackets) != 7 || len(bootstrapPackets[0]) != loginRequestLength || len(bootstrapPackets[1]) != loginRequestLength {
+		t.Fatalf("unexpected bootstrap login pair: %d packets", len(bootstrapPackets))
+	}
+	if body := bootstrapPackets[2][sessionHeaderLength:]; len(body) != 16 || body[0] != bootstrapHeartbeatMarker || body[2] != loginCommandVersion {
+		t.Fatalf("heartbeat=%x", body)
+	}
+	assertControlPacket(t, bootstrapPackets[3], controlChannelStream, controlSetStream, streamControlHD[:])
+	assertControlPacket(t, bootstrapPackets[4], controlChannelSystem, controlGetFormat, nil)
+	if body := bootstrapPackets[5][sessionHeaderLength:]; len(body) != 24 || body[0] != bootstrapAckMarker || binary.LittleEndian.Uint16(body[16:18]) != 1 {
+		t.Fatalf("ack=%x", body)
+	}
+	assertControlPacket(t, bootstrapPackets[6], controlChannelSystem, controlStartVideo, nil)
 	if transport.CloseCount() != 0 {
 		t.Fatalf("transport closed before session close count=%d", transport.CloseCount())
 	}
@@ -180,6 +212,92 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 	if transport.CloseCount() != 1 {
 		t.Fatalf("transport close count=%d want=1", transport.CloseCount())
 	}
+}
+
+func TestDirectConnectorTimesOutDuringBootstrapWithoutMedia(t *testing.T) {
+	transport := &fakeTransport{}
+	configureDiscoveryResponder(transport, func(packet []byte, address *net.UDPAddr) {
+		if len(packet) != loginRequestLength || binary.LittleEndian.Uint16(packet[8:]) != clientSessionOpcode || binary.LittleEndian.Uint16(packet[6:]) != 1 {
+			return
+		}
+		var sessionID [8]byte
+		copy(sessionID[:], packet[20:28])
+		transport.addResponse(tutk.TransCodePartial(nil, testLoginSuccess(sessionID)), address)
+	})
+	connector := testDirectConnector(transport, time.Second)
+	connector.BootstrapTimeout = 10 * time.Millisecond
+	states := make([]SessionState, 0, 6)
+	_, err := connector.Connect(context.Background(), protocolTestUID, func(event Event) {
+		states = append(states, event.State)
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(states) == 0 || states[len(states)-1] != StateBootstrapping {
+		t.Fatalf("states=%v", states)
+	}
+	if transport.CloseCount() != 1 {
+		t.Fatalf("transport close count=%d want=1", transport.CloseCount())
+	}
+}
+
+func assertControlPacket(t *testing.T, packet []byte, wantChannel uint16, wantType uint32, wantData []byte) {
+	t.Helper()
+	if len(packet) < sessionHeaderLength+controlInnerLength+4 {
+		t.Fatalf("control packet too short: %x", packet)
+	}
+	body := packet[sessionHeaderLength:]
+	if body[0] != 0x0C || body[2] != loginCommandVersion || binary.LittleEndian.Uint16(body[16:18]) != wantChannel || binary.LittleEndian.Uint32(body[controlInnerLength:]) != wantType {
+		t.Fatalf("unexpected control body: %x", body)
+	}
+	if got := body[controlInnerLength+4:]; string(got) != string(wantData) {
+		t.Fatalf("control data=%x want=%x", got, wantData)
+	}
+}
+
+func testControlReply(sessionID [8]byte, channel uint16, subsequence uint16) []byte {
+	body := encodeControlData(0, channel, 0, make([]byte, 8))
+	binary.LittleEndian.PutUint16(body[18:20], subsequence)
+	return encodeDeviceSessionPacket(sessionID, body)
+}
+
+func testVideoFragment(sessionID [8]byte, subsequence uint16, count uint8, index uint16, end bool, frameNumber uint32, payload []byte) []byte {
+	body := make([]byte, mediaHeaderLength+len(payload))
+	body[0] = 0x0C
+	body[2] = loginCommandVersion
+	if end {
+		body[1] = 0x01
+		body[17] = 0x01
+	}
+	body[16] = h264MainChannel
+	binary.LittleEndian.PutUint16(body[18:20], subsequence)
+	body[20] = count
+	binary.LittleEndian.PutUint16(body[22:24], index)
+	binary.LittleEndian.PutUint16(body[24:26], uint16(len(payload)))
+	binary.LittleEndian.PutUint32(body[28:32], frameNumber)
+	copy(body[mediaHeaderLength:], payload)
+	return encodeDeviceSessionPacket(sessionID, body)
+}
+
+func testMediaTrailer(timestamp uint32) []byte {
+	trailer := make([]byte, mediaMetadataLength)
+	trailer[0] = h264CodecMarker
+	binary.LittleEndian.PutUint32(trailer[len(trailer)-4:], timestamp)
+	return trailer
+}
+
+func encodeDeviceSessionPacket(sessionID [8]byte, body []byte) []byte {
+	packet := make([]byte, sessionHeaderLength+len(body))
+	packet[0] = 0x04
+	packet[1] = 0x02
+	packet[2] = deviceSessionMagicVersion
+	packet[3] = sessionFlags
+	binary.LittleEndian.PutUint16(packet[4:6], uint16(len(packet)-16))
+	binary.LittleEndian.PutUint16(packet[8:10], deviceSessionOpcode)
+	binary.LittleEndian.PutUint16(packet[10:12], deviceLoginSubtype)
+	copy(packet[12:28], sessionID16(sessionID))
+	copy(packet[sessionHeaderLength:], body)
+	return packet
 }
 
 func TestDirectConnectorRejectsUnexpectedLoginResponseAndTimesOut(t *testing.T) {

@@ -43,6 +43,9 @@ func TestDeviceRegistrationIsIdempotentAndDoesNotExposeUID(t *testing.T) {
 	if len(listing.Devices) != 1 || !listing.Devices[0].UIDLearned || listing.Devices[0].StreamAvailable {
 		t.Fatalf("unexpected listing: %+v", listing.Devices)
 	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"frames_received":0`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"bytes_received":0`)) {
+		t.Fatalf("safe media diagnostics missing: %s", response.Body.String())
+	}
 }
 
 func TestRegistrationRejectsInvalidInput(t *testing.T) {
@@ -73,7 +76,7 @@ func TestDeleteIsIdempotentAndHealthDoesNotClaimMediaIsAvailable(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"media_protocol":"not_implemented"`)) {
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"media_protocol":"plaf203_h264_observation"`)) {
 		t.Fatalf("unsafe health response: status=%d body=%s", response.Code, response.Body.String())
 	}
 

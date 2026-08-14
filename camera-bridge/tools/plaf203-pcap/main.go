@@ -22,6 +22,10 @@ const (
 	minimumIPv4Header  = 20
 	minimumUDPHeader   = 8
 	decodedPreviewSize = 48
+	sessionHeaderSize  = 28
+	sessionOpcodeSend  = 0x0407
+	sessionOpcodeRecv  = 0x0408
+	mediaHeaderSize    = 36
 )
 
 type pcapRecord struct {
@@ -32,19 +36,21 @@ type pcapRecord struct {
 func main() {
 	pcapPath := flag.String("pcap", "", "path to a classic libpcap file")
 	deviceAddress := flag.String("device-ip", "", "optional feeder IPv4 address filter")
+	directOnly := flag.Bool("direct-only", false, "exclude traffic that is not directly between the client and feeder")
+	sessionOnly := flag.Bool("session-only", false, "show only decoded Session16 0x0407/0x0408 datagrams")
 	full := flag.Bool("full", false, "include complete raw and decoded payload hex")
 	flag.Parse()
 	if *pcapPath == "" {
 		fmt.Fprintln(os.Stderr, "-pcap is required")
 		os.Exit(2)
 	}
-	if err := inspect(*pcapPath, *deviceAddress, *full); err != nil {
+	if err := inspect(*pcapPath, *deviceAddress, *directOnly, *sessionOnly, *full); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func inspect(pcapPath string, deviceAddress string, full bool) error {
+func inspect(pcapPath string, deviceAddress string, directOnly bool, sessionOnly bool, full bool) error {
 	file, err := os.Open(pcapPath)
 	if err != nil {
 		return fmt.Errorf("open pcap: %w", err)
@@ -71,7 +77,13 @@ func inspect(pcapPath string, deviceAddress string, full bool) error {
 		if !ok || (deviceAddress != "" && packet.source != deviceAddress && packet.destination != deviceAddress) {
 			continue
 		}
+		if directOnly && (packet.sourcePort == 10001 || packet.destinationPort == 10001) {
+			continue
+		}
 		decoded := tutk.ReverseTransCodePartial(nil, packet.payload)
+		if sessionOnly && !isSessionDatagram(decoded) {
+			continue
+		}
 		fmt.Printf("%s %s:%d -> %s:%d len=%d %s\n", record.timestamp.UTC().Format(time.RFC3339Nano), packet.source, packet.sourcePort, packet.destination, packet.destinationPort, len(packet.payload), packetSummary(decoded))
 		if full {
 			fmt.Printf("  raw=%s\n  decoded=%s\n", hex.EncodeToString(packet.payload), hex.EncodeToString(decoded))
@@ -150,9 +162,63 @@ func packetSummary(decoded []byte) string {
 	}
 	summary := fmt.Sprintf("decoded=%s", hex.EncodeToString(decoded[:previewLength]))
 	if len(decoded) >= 12 && decoded[0] == 0x04 && decoded[1] == 0x02 {
-		summary += fmt.Sprintf(" magic=0x%02x flags=0x%02x opcode=0x%04x", decoded[2], decoded[3], binary.LittleEndian.Uint16(decoded[8:10]))
+		opcode := binary.LittleEndian.Uint16(decoded[8:10])
+		summary += fmt.Sprintf(" magic=0x%02x flags=0x%02x seq=%d opcode=0x%04x", decoded[2], decoded[3], binary.LittleEndian.Uint16(decoded[6:8]), opcode)
+		if isSessionDatagram(decoded) {
+			summary += sessionSummary(decoded, opcode)
+		}
 	}
 	return summary
+}
+
+func isSessionDatagram(decoded []byte) bool {
+	if len(decoded) < sessionHeaderSize || decoded[0] != 0x04 || decoded[1] != 0x02 {
+		return false
+	}
+	opcode := binary.LittleEndian.Uint16(decoded[8:10])
+	return opcode == sessionOpcodeSend || opcode == sessionOpcodeRecv
+}
+
+func sessionSummary(decoded []byte, opcode uint16) string {
+	inner := decoded[sessionHeaderSize:]
+	if len(inner) < 4 {
+		return " inner=truncated"
+	}
+	summary := fmt.Sprintf(" inner=%02x%02x%02x%02x", inner[0], inner[1], inner[2], inner[3])
+	if len(inner) >= mediaHeaderSize && inner[0] == 0x0C {
+		payloadLength := binary.LittleEndian.Uint16(inner[24:26])
+		channelID := binary.LittleEndian.Uint16(inner[16:18])
+		summary += fmt.Sprintf(" channel=0x%04x sub=0x%04x fragments=%d index=%d payload=%d frame=%d", channelID, binary.LittleEndian.Uint16(inner[18:20]), inner[20], binary.LittleEndian.Uint16(inner[22:24]), payloadLength, binary.LittleEndian.Uint32(inner[28:32]))
+		if payloadLength > 0 && mediaHeaderSize+int(payloadLength) <= len(inner) {
+			payload := inner[mediaHeaderSize : mediaHeaderSize+payloadLength]
+			if opcode == sessionOpcodeRecv {
+				summary += h264Summary(payload)
+			} else {
+				summary += fmt.Sprintf(" payload_prefix=%s", hex.EncodeToString(payload[:min(len(payload), 12)]))
+			}
+		}
+	}
+	if opcode == sessionOpcodeRecv && len(inner) >= 3 && inner[0] == 0 && inner[1] == 0x21 && inner[2] == 0x0B {
+		summary += " login_ack"
+	}
+	return summary
+}
+
+func min(left int, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func h264Summary(payload []byte) string {
+	for index := 0; index+4 < len(payload); index++ {
+		if payload[index] == 0 && payload[index+1] == 0 && payload[index+2] == 0 && payload[index+3] == 1 {
+			nalType := payload[index+4] & 0x1F
+			return fmt.Sprintf(" h264_nal=%d", nalType)
+		}
+	}
+	return ""
 }
 
 func ipv4String(address []byte) string {

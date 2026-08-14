@@ -14,18 +14,21 @@ import (
 const (
 	defaultDiscoveryTimeout = 2 * time.Second
 	defaultLoginTimeout     = 3 * time.Second
+	mediaStatsLogInterval   = 5 * time.Second
 )
 
 // SessionState is the explicit lifecycle of one requested camera attempt.
 type SessionState string
 
 const (
-	StateIdle        SessionState = "idle"
-	StateDiscovering SessionState = "discovering"
-	StateKnocking    SessionState = "knocking"
-	StateLoggingIn   SessionState = "logging_in"
-	StateConnected   SessionState = "connected"
-	StateFailed      SessionState = "failed"
+	StateIdle          SessionState = "idle"
+	StateDiscovering   SessionState = "discovering"
+	StateKnocking      SessionState = "knocking"
+	StateLoggingIn     SessionState = "logging_in"
+	StateConnected     SessionState = "connected"
+	StateBootstrapping SessionState = "bootstrapping"
+	StateStreaming     SessionState = "streaming"
+	StateFailed        SessionState = "failed"
 )
 
 // Event reports an immutable protocol transition to the owning bridge.
@@ -33,6 +36,7 @@ type Event struct {
 	State   SessionState
 	Address *net.UDPAddr
 	Step    string
+	Frame   *VideoFrame
 }
 
 // Observer receives state transitions without receiving the UID or any secret.
@@ -55,6 +59,7 @@ type DirectConnector struct {
 	TransportFactory  TransportFactory
 	DiscoveryTimeout  time.Duration
 	LoginTimeout      time.Duration
+	BootstrapTimeout  time.Duration
 	DiscoveryTargeter func() ([]*net.UDPAddr, error)
 	Clock             func() time.Time
 }
@@ -65,6 +70,7 @@ func NewDirectConnector() *DirectConnector {
 		TransportFactory:  UDPTransportFactory{},
 		DiscoveryTimeout:  defaultDiscoveryTimeout,
 		LoginTimeout:      defaultLoginTimeout,
+		BootstrapTimeout:  defaultBootstrapTimeout,
 		DiscoveryTargeter: DiscoveryTargets,
 		Clock:             time.Now,
 	}
@@ -163,9 +169,62 @@ func (connector *DirectConnector) Connect(ctx context.Context, uid string, obser
 		if _, decodeErr := DecodeLoginResponse(decoded, nonce); decodeErr != nil {
 			continue
 		}
+		session := &Session{
+			ID:             nonce,
+			Address:        cloneUDPAddress(address),
+			transport:      transport,
+			clock:          clock,
+			sequence:       2,
+			controlCounter: 0,
+			media:          NewMediaReceiver(),
+			observer:       observe,
+		}
+		emit(observe, Event{State: StateConnected, Address: address})
+		emit(observe, Event{State: StateBootstrapping, Address: address})
+		bootstrapTimeout := connector.BootstrapTimeout
+		if bootstrapTimeout <= 0 {
+			bootstrapTimeout = defaultBootstrapTimeout
+		}
+		bootstrapContext, bootstrapCancel := context.WithTimeout(ctx, bootstrapTimeout)
+		frame, bootstrapErr := session.bootstrap(bootstrapContext)
+		bootstrapCancel()
+		if bootstrapErr != nil {
+			return nil, fmt.Errorf("bootstrap PLAF203 media: %w", bootstrapErr)
+		}
+		session.startMediaReceiver()
+		session.noteMediaEvent(clock())
 		keepTransport = true
-		return &Session{ID: nonce, Address: cloneUDPAddress(address), transport: transport}, nil
+		emit(observe, Event{State: StateStreaming, Address: address, Step: "bootstrap", Frame: frame})
+		return session, nil
 	}
+}
+
+func (session *Session) startMediaReceiver() {
+	receiveContext, cancel := context.WithCancel(context.Background())
+	session.cancelReceive = cancel
+	go func() {
+		for {
+			packet, _, err := session.transport.Receive(receiveContext)
+			if err != nil {
+				return
+			}
+			frame, parseErr := session.media.HandlePacket(tutk.ReverseTransCodePartial(nil, packet), session.ID, session.clock())
+			if parseErr != nil || frame == nil || !session.noteMediaEvent(session.clock()) {
+				continue
+			}
+			emit(session.observer, Event{State: StateStreaming, Address: session.Address, Step: "media_stats", Frame: frame})
+		}
+	}()
+}
+
+func (session *Session) noteMediaEvent(now time.Time) bool {
+	session.mediaMu.Lock()
+	defer session.mediaMu.Unlock()
+	if now.Sub(session.lastMediaEvent) < mediaStatsLogInterval {
+		return false
+	}
+	session.lastMediaEvent = now
+	return true
 }
 
 func cloneUDPAddress(address *net.UDPAddr) *net.UDPAddr {

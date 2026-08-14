@@ -143,5 +143,6 @@ func (connectedConnector) Connect(_ context.Context, _ string, observer plaf203.
 	observer(plaf203.Event{State: plaf203.StateDiscovering})
 	observer(plaf203.Event{State: plaf203.StateKnocking})
 	observer(plaf203.Event{State: plaf203.StateLoggingIn})
+	observer(plaf203.Event{State: plaf203.StateConnected})
 	return &plaf203.Session{}, nil
 }
