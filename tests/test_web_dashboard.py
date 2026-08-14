@@ -212,10 +212,10 @@ def test_camera_webrtc_proxy_is_device_scoped_and_accepts_only_sdp(
 ) -> None:
     """The player route cannot select a source, stream, or arbitrary payload."""
     context, _ = dashboard
-    calls: list[tuple[str, bytes]] = []
+    calls: list[tuple[str, str, bytes]] = []
 
-    def exchange(device_id: str, offer: bytes) -> WebRtcExchange:
-        calls.append((device_id, offer))
+    def exchange(device_id: str, viewer_id: str, offer: bytes) -> WebRtcExchange:
+        calls.append((device_id, viewer_id, offer))
         return WebRtcExchange(b"v=0\r\na=answer\r\n", "a" * 32)
 
     monkeypatch.setattr(context, "exchange_camera_webrtc", exchange)
@@ -224,14 +224,14 @@ def test_camera_webrtc_proxy_is_device_scoped_and_accepts_only_sdp(
     response = client.post(
         f"/api/devices/{DEVICE_A}/camera/webrtc",
         content=b"v=0\r\na=offer\r\n",
-        headers={"Content-Type": "application/sdp"},
+        headers={"Content-Type": "application/sdp", "X-Relay-Viewer-ID": "a" * 32},
     )
 
     assert response.status_code == 201
     assert response.headers["content-type"].startswith("application/sdp")
     assert response.headers["x-relay-webrtc-session"] == "a" * 32
     assert response.content == b"v=0\r\na=answer\r\n"
-    assert calls == [(DEVICE_A, b"v=0\r\na=offer\r\n")]
+    assert calls == [(DEVICE_A, "a" * 32, b"v=0\r\na=offer\r\n")]
     assert client.post(f"/api/devices/{DEVICE_A}/camera/webrtc", json={"src": "bad"}).status_code == 415
     assert client.post(
         "/api/devices/UNKNOWN/camera/webrtc",
@@ -460,6 +460,9 @@ def test_dashboard_exposes_only_narrow_confirmed_control_write_routes(
         ("/api/devices/{device_id}/controls/video", ("PATCH",)),
         ("/api/devices/{device_id}/camera/webrtc", ("POST",)),
         ("/api/devices/{device_id}/camera/webrtc/{session_id}", ("DELETE",)),
+        ("/api/devices/{device_id}/camera/viewers/{viewer_id}", ("DELETE",)),
+        ("/api/devices/{device_id}/camera/viewers/{viewer_id}", ("POST",)),
+        ("/api/devices/{device_id}/camera/viewers/{viewer_id}", ("PUT",)),
         ("/api/devices/{device_id}/schedule", ("POST",)),
         ("/api/devices/{device_id}/schedule/{plan_id}", ("DELETE",)),
         ("/api/devices/{device_id}/schedule/{plan_id}", ("PATCH",)),

@@ -45,6 +45,38 @@ def test_stream_names_are_deterministic_and_device_scoped() -> None:
     assert stream_name_for_device(DEVICE_A) != stream_name_for_device(DEVICE_B)
 
 
+def test_logical_viewer_is_idempotent_and_unknown_heartbeat_does_not_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The explicit viewer registry, rather than WHEP, owns lifecycle state."""
+    client = Go2RtcStreamClient(Go2RtcSettings(enabled=True))
+    monkeypatch.setattr(client, "ensure_stream", lambda _device_id: True)
+
+    assert client.activate_viewer(DEVICE_A, "a" * 32) is True
+    assert client.activate_viewer(DEVICE_A, "a" * 32) is True
+    assert len(client._viewers[DEVICE_A]) == 1  # noqa: SLF001
+    assert client.heartbeat_viewer(DEVICE_A, "b" * 32) is False
+    assert len(client._viewers[DEVICE_A]) == 1  # noqa: SLF001
+    assert client.deactivate_viewer(DEVICE_A, "a" * 32, "test") is True
+    assert client.deactivate_viewer(DEVICE_A, "a" * 32, "test") is False
+
+
+def test_viewer_watchdog_expires_last_viewer_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missed heartbeat follows the same idempotent last-viewer path as DELETE."""
+    client = Go2RtcStreamClient(Go2RtcSettings(enabled=True))
+    monkeypatch.setattr(client, "ensure_stream", lambda _device_id: True)
+    scheduled: list[str] = []
+    monkeypatch.setattr(client, "_schedule_idle_stream_stop", scheduled.append)
+    client.activate_viewer(DEVICE_A, "a" * 32)
+    client._viewers[DEVICE_A]["a" * 32] = 0.0  # noqa: SLF001
+
+    client._expire_viewer(DEVICE_A, "a" * 32)  # noqa: SLF001
+    client._expire_viewer(DEVICE_A, "a" * 32)  # noqa: SLF001
+
+    assert client._viewers[DEVICE_A] == {}  # noqa: SLF001
+    assert scheduled == [DEVICE_A]
+
+
 def test_disabled_go2rtc_does_not_make_an_http_request(monkeypatch: pytest.MonkeyPatch) -> None:
     """Disabled status checks stay inert and report no source configuration."""
     def unexpected_request(*_args: object, **_kwargs: object) -> object:

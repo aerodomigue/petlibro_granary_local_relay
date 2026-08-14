@@ -35,6 +35,7 @@ CACHE_SECONDS = 2.0
 REGISTRATION_QUEUE_MAXSIZE = 128
 REGISTRAR_POLL_TIMEOUT_SECONDS = 0.1
 WHEP_IDLE_CLOSE_SECONDS = 10.0
+VIEWER_TIMEOUT_SECONDS = 20.0
 
 CameraBridgeMapping = tuple[str, str, str | None]
 
@@ -484,6 +485,8 @@ class Go2RtcStreamClient:
         self._ensured_streams: set[str] = set()
         self._webrtc_sessions: dict[str, tuple[str, str | None]] = {}
         self._webrtc_stop_timers: dict[str, threading.Timer] = {}
+        self._viewers: dict[str, dict[str, float]] = {}
+        self._viewer_watchdogs: dict[tuple[str, str], threading.Timer] = {}
         self._lock = threading.Lock()
 
     def ensure_stream(self, device_id: str) -> bool:
@@ -519,9 +522,76 @@ class Go2RtcStreamClient:
                 self._ensured_streams.discard(stream_name)
             return stream_exists
 
-    def exchange_webrtc(self, device_id: str, offer: bytes) -> WebRtcExchange:
+    def activate_viewer(self, device_id: str, viewer_id: str) -> bool:
+        """Register or refresh one logical camera viewer."""
+        with self._lock:
+            viewers = self._viewers.setdefault(device_id, {})
+            viewers[viewer_id] = time.monotonic()
+            self._arm_viewer_watchdog_locked(device_id, viewer_id)
+            timer = self._webrtc_stop_timers.pop(device_id, None)
+            if timer is not None:
+                timer.cancel()
+            count = len(viewers)
+        _LOGGER.info("VIEWER CONNECT viewer=%s device=%s", viewer_id[:8], device_id)
+        _LOGGER.info("VIEWERS count=%d device=%s", count, device_id)
+        return self.ensure_stream(device_id)
+
+    def heartbeat_viewer(self, device_id: str, viewer_id: str) -> bool:
+        """Refresh an existing viewer without implicitly creating one."""
+        with self._lock:
+            viewer = self._viewers.get(device_id, {}).get(viewer_id)
+            if viewer is None:
+                return False
+            self._viewers[device_id][viewer_id] = time.monotonic()
+            self._arm_viewer_watchdog_locked(device_id, viewer_id)
+        return True
+
+    def deactivate_viewer(self, device_id: str, viewer_id: str, reason: str) -> bool:
+        """Remove one viewer and schedule stop only when it was the last one."""
+        with self._lock:
+            viewers = self._viewers.get(device_id)
+            if viewers is None or viewer_id not in viewers:
+                return False
+            viewers.pop(viewer_id)
+            watchdog = self._viewer_watchdogs.pop((device_id, viewer_id), None)
+            if watchdog is not None:
+                watchdog.cancel()
+            count = len(viewers)
+        _LOGGER.info("VIEWER DISCONNECT viewer=%s device=%s reason=%s", viewer_id[:8], device_id, reason)
+        _LOGGER.info("VIEWERS count=%d device=%s", count, device_id)
+        if count == 0:
+            self._schedule_idle_stream_stop(device_id)
+        return True
+
+    def _arm_viewer_watchdog_locked(self, device_id: str, viewer_id: str) -> None:
+        """Replace the inactivity watchdog for one explicitly registered viewer."""
+        key = (device_id, viewer_id)
+        watchdog = self._viewer_watchdogs.pop(key, None)
+        if watchdog is not None:
+            watchdog.cancel()
+        watchdog = threading.Timer(VIEWER_TIMEOUT_SECONDS, self._expire_viewer, args=key)
+        watchdog.daemon = True
+        self._viewer_watchdogs[key] = watchdog
+        watchdog.start()
+
+    def _expire_viewer(self, device_id: str, viewer_id: str) -> None:
+        """Apply the normal last-viewer path after a missed heartbeat."""
+        with self._lock:
+            viewers = self._viewers.get(device_id)
+            if viewers is None or viewer_id not in viewers:
+                return
+            age = time.monotonic() - viewers[viewer_id]
+            if age < VIEWER_TIMEOUT_SECONDS:
+                self._arm_viewer_watchdog_locked(device_id, viewer_id)
+                return
+        if self.deactivate_viewer(device_id, viewer_id, "heartbeat_expired"):
+            _LOGGER.info("CAMERA VIEWER EXPIRED viewer=%s device=%s", viewer_id[:8], device_id)
+
+    def exchange_webrtc(self, device_id: str, viewer_id: str, offer: bytes) -> WebRtcExchange:
         """Proxy one SDP offer to the device's fixed go2rtc WHEP endpoint."""
-        if not self._settings.enabled or not self.ensure_stream(device_id):
+        if not self._settings.enabled or not self.heartbeat_viewer(device_id, viewer_id):
+            raise RuntimeError("camera viewer is unavailable")
+        if not self.ensure_stream(device_id):
             raise RuntimeError("camera stream is unavailable")
         _LOGGER.info("CAMERA PLAYER CONNECTING device=%s", device_id)
         query = urlencode({"src": stream_name_for_device(device_id)})
@@ -536,7 +606,7 @@ class Go2RtcStreamClient:
                 answer = cast(bytes, response.read())
                 location = response.headers.get("Location")
             session_id = self._remember_webrtc_session(device_id, location)
-            _LOGGER.info("WEBRTC CONNECTED device=%s", device_id)
+            _LOGGER.info("WHEP START viewer=%s device=%s", viewer_id[:8], device_id)
             return WebRtcExchange(answer, session_id)
         except (HTTPError, URLError, OSError, TimeoutError) as error:
             raise RuntimeError("go2rtc WebRTC exchange failed") from error
@@ -554,8 +624,7 @@ class Go2RtcStreamClient:
             except (HTTPError, URLError, OSError, TimeoutError) as error:
                 _LOGGER.debug("WEBRTC CLOSE FAILED device=%s error=%s", device_id, error)
                 return False
-        self._schedule_idle_stream_stop(device_id)
-        _LOGGER.info("WEBRTC CLOSED device=%s", device_id)
+        _LOGGER.info("WHEP STOP device=%s", device_id)
         return True
 
     def _remember_webrtc_session(self, device_id: str, location: str | None) -> str | None:
@@ -574,7 +643,7 @@ class Go2RtcStreamClient:
     def _schedule_idle_stream_stop(self, device_id: str) -> None:
         """Stop the local producer only after the final viewer grace period."""
         with self._lock:
-            if any(session[0] == device_id for session in self._webrtc_sessions.values()):
+            if self._viewers.get(device_id):
                 return
             if device_id in self._webrtc_stop_timers:
                 return
@@ -587,7 +656,7 @@ class Go2RtcStreamClient:
         """Drop the go2rtc source after the grace period if no viewer returned."""
         with self._lock:
             self._webrtc_stop_timers.pop(device_id, None)
-            if any(session[0] == device_id for session in self._webrtc_sessions.values()):
+            if self._viewers.get(device_id):
                 return
             self._ensured_streams.discard(stream_name_for_device(device_id))
         self._delete_stream(stream_name_for_device(device_id))

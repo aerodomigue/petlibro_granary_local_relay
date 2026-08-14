@@ -282,12 +282,38 @@ def create_app(context: DashboardContext) -> FastAPI:
         offer = await request.body()
         if not offer or len(offer) > MAX_CAMERA_WEBRTC_OFFER_BYTES:
             raise HTTPException(status_code=400, detail="Invalid WebRTC offer")
+        viewer_id = request.headers.get("X-Relay-Viewer-ID", "")
+        if not WEBRTC_SESSION_ID_PATTERN.fullmatch(viewer_id):
+            raise HTTPException(status_code=409, detail="Camera viewer is unavailable")
         try:
-            exchange = context.exchange_camera_webrtc(device_id, offer)
+            exchange = context.exchange_camera_webrtc(device_id, viewer_id, offer)
         except RuntimeError as error:
             raise HTTPException(status_code=503, detail="Camera stream is unavailable") from error
         headers = {"X-Relay-WebRTC-Session": exchange.session_id} if exchange.session_id else None
         return Response(content=exchange.answer, status_code=201, media_type="application/sdp", headers=headers)
+
+    @app.post("/api/devices/{device_id}/camera/viewers/{viewer_id}", status_code=204)
+    def activate_camera_viewer(device_id: str, viewer_id: str) -> Response:
+        """Activate one explicit logical camera viewer."""
+        if not DEVICE_ID_PATTERN.fullmatch(device_id) or not WEBRTC_SESSION_ID_PATTERN.fullmatch(viewer_id):
+            raise HTTPException(status_code=404, detail="Unknown camera viewer")
+        if not context.activate_camera_viewer(device_id, viewer_id):
+            raise HTTPException(status_code=503, detail="Camera stream is unavailable")
+        return Response(status_code=204)
+
+    @app.put("/api/devices/{device_id}/camera/viewers/{viewer_id}", status_code=204)
+    def heartbeat_camera_viewer(device_id: str, viewer_id: str) -> Response:
+        """Refresh an existing logical camera viewer."""
+        if not context.heartbeat_camera_viewer(device_id, viewer_id):
+            raise HTTPException(status_code=404, detail="Unknown camera viewer")
+        return Response(status_code=204)
+
+    @app.delete("/api/devices/{device_id}/camera/viewers/{viewer_id}", status_code=204)
+    def deactivate_camera_viewer(device_id: str, viewer_id: str) -> Response:
+        """Deactivate one logical viewer."""
+        if not context.deactivate_camera_viewer(device_id, viewer_id, "client_closed"):
+            raise HTTPException(status_code=404, detail="Unknown camera viewer")
+        return Response(status_code=204)
 
     @app.delete("/api/devices/{device_id}/camera/webrtc/{session_id}", status_code=204)
     def close_camera_webrtc(device_id: str, session_id: str) -> Response:

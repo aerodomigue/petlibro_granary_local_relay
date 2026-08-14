@@ -170,9 +170,21 @@ class DashboardContext:
             "uid_learned": self._shadow.get_camera_uid(device_id) is not None,
         }
 
-    def exchange_camera_webrtc(self, device_id: str, offer: bytes) -> WebRtcExchange:
+    def activate_camera_viewer(self, device_id: str, viewer_id: str) -> bool:
+        """Register a logical viewer before WHEP negotiation."""
+        return self._camera_streams.activate_viewer(device_id, viewer_id)
+
+    def heartbeat_camera_viewer(self, device_id: str, viewer_id: str) -> bool:
+        """Refresh an existing logical viewer."""
+        return self._camera_streams.heartbeat_viewer(device_id, viewer_id)
+
+    def deactivate_camera_viewer(self, device_id: str, viewer_id: str, reason: str) -> bool:
+        """Remove one logical viewer."""
+        return self._camera_streams.deactivate_viewer(device_id, viewer_id, reason)
+
+    def exchange_camera_webrtc(self, device_id: str, viewer_id: str, offer: bytes) -> WebRtcExchange:
         """Proxy one validated device SDP offer without accepting arbitrary streams."""
-        return self._camera_streams.exchange_webrtc(device_id, offer)
+        return self._camera_streams.exchange_webrtc(device_id, viewer_id, offer)
 
     def close_camera_webrtc(self, device_id: str, session_id: str) -> bool:
         """Release one opaque browser WHEP session without exposing go2rtc."""
