@@ -7,7 +7,9 @@ that one device's metrics and state are not attributed to another.
 
 from __future__ import annotations
 
+import json
 import logging
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -482,6 +484,99 @@ def test_controls_and_schedule_use_conditional_human_friendly_components() -> No
     ):
         assert marker in DASHBOARD_HTML
     assert "Days (1=Mon … 7=Sun)" not in DASHBOARD_HTML
+
+
+def test_controls_render_and_condition_initialization_are_idempotent() -> None:
+    """Controls markup renders and does not self-trigger observer mutations."""
+    script = DASHBOARD_HTML.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+    controls_start = script.rindex("function effectiveValues")
+    controls_end = script.rindex("function readControlValue")
+    conditions_start = controls_end
+    conditions_end = script.rindex("function controlPayload")
+    fixture = {
+        "state": {
+            "desired": [
+                {"key": "soundSwitch", "value": True},
+                {"key": "soundAgingType", "value": 1},
+                {"key": "volume", "value": 37},
+                {"key": "motionDetectionSwitch", "value": False},
+            ],
+            "reported": [],
+            "local_confirmed": [],
+        },
+        "controls": {
+            "soundSwitch": {
+                "writable": True,
+                "device_online": True,
+                "pending": False,
+            },
+        },
+    }
+    node_test = f"""
+const runtime = {{ controlSaving: {{}}, controlFeedback: {{}} }};
+const escapeHtml = value => String(value ?? '—');
+const desiredValues = state => Object.fromEntries((state.desired || []).map(item => [item.key, item.value]));
+const confirmedValues = state => Object.fromEntries((state.local_confirmed || []).map(item => [item.key, item.value]));
+const reportedValues = state => Object.fromEntries((state.reported || []).map(item => [item.key, item.value]));
+const card = (title, content) => `<article><h2>${{title}}</h2>${{content}}</article>`;
+{script[controls_start:controls_end]}
+globalThis.CSS = {{ escape: value => value }};
+globalThis.HTMLInputElement = class {{}};
+globalThis.HTMLSelectElement = class {{}};
+{script[conditions_start:conditions_end]}
+const fixture = {json.dumps(fixture)};
+const markup = controlsMarkup(fixture.state, fixture.controls);
+if (!markup.includes('Enable device sound') || !markup.includes('value="37"')) {{
+  throw new Error('Controls markup did not render the realistic device fixture.');
+}}
+class FakeInput extends HTMLInputElement {{
+  constructor(name, type, value, checked) {{
+    super();
+    this.name = name;
+    this.type = type;
+    this.value = value;
+    this.checked = checked;
+  }}
+}}
+const soundSwitch = new FakeInput('soundSwitch', 'checkbox', '', true);
+const volume = new FakeInput('volume', 'range', '37', false);
+const visibility = {{
+  dataset: {{ showWhen: 'soundSwitch:true' }},
+  hidden: null,
+  classList: {{ toggle: (_name, hidden) => {{ visibility.hidden = hidden; }} }},
+}};
+const output = {{
+  writes: 0,
+  value: '0%',
+  get textContent() {{ return this.value; }},
+  set textContent(value) {{ this.writes += 1; this.value = value; }},
+}};
+const form = {{
+  querySelectorAll(selector) {{
+    if (selector === '[data-show-when]') return [visibility];
+    if (selector === 'input[type=range]') return [volume];
+    if (selector === '[name="soundSwitch"]') return [soundSwitch];
+    return [];
+  }},
+  querySelector(selector) {{
+    return selector === '[data-range-output="volume"]' ? output : null;
+  }},
+}};
+updateControlConditions(form);
+updateControlConditions(form);
+if (visibility.hidden !== false) throw new Error('Initial visibility state was not applied.');
+if (output.writes !== 1 || output.textContent !== '37%') {{
+  throw new Error(`Condition initialization was not idempotent: ${{output.writes}} writes.`);
+}}
+"""
+    result = subprocess.run(
+        ["node", "-e", node_test],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_sse_emits_new_sanitized_log(
