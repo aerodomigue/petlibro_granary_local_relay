@@ -395,6 +395,13 @@ def test_daily_projections_hide_diagnostics_but_keep_feeder_actions(client: Test
     daily = client.get(f"/api/devices/{DEVICE_A}/daily").json()
 
     assert isinstance(home["devices"][0]["schedule"], list)
+    assert set(home["devices"][0]["camera"]) == {
+        "available",
+        "online",
+        "webrtc",
+        "bridge_registered",
+        "go2rtc_reachable",
+    }
     assert {"ip", "mac", "username", "client_id", "firmware"}.isdisjoint(daily["device"])
     assert "raw_messages" not in daily["state"]
     assert "controls" in daily and "schedule_plans" in daily["state"]
@@ -559,7 +566,7 @@ def test_camera_lifecycle_is_singleton_and_navigation_safe() -> None:
     assert DASHBOARD_JAVASCRIPT.count("function closeCamera(") == 1
     assert "player.abort.abort()" in DASHBOARD_JAVASCRIPT
     assert "clearInterval(player.heartbeatTimer)" in DASHBOARD_JAVASCRIPT
-    assert "window.addEventListener('pagehide',closeCamera)" in DASHBOARD_JAVASCRIPT
+    assert "window.addEventListener('pagehide',()=>{closeCamera();closeHomeCameras()})" in DASHBOARD_JAVASCRIPT
     assert "document.addEventListener('visibilitychange'" in DASHBOARD_JAVASCRIPT
 
 
@@ -573,16 +580,25 @@ def test_polling_preserves_device_scoped_schedule_and_setting_drafts() -> None:
     assert "input.addEventListener('change'" in DASHBOARD_JAVASCRIPT
 
 
-def test_home_live_uses_a_single_accessible_route_link() -> None:
-    """The Home live action navigates to the auto-starting Camera tab."""
+def test_home_uses_a_persistent_auto_starting_camera_player() -> None:
+    """Home mounts the existing viewer lifecycle without a Camera route link."""
     from petlibro_relay.web.user_interface import DASHBOARD_JAVASCRIPT
 
-    assert 'class="live-link"' in DASHBOARD_JAVASCRIPT
-    assert 'data-route="/devices/${encodeURIComponent(device.device_id)}#camera"' in DASHBOARD_JAVASCRIPT
-    live_markup = DASHBOARD_JAVASCRIPT.split("function deviceCard", 1)[1].split(
+    home_markup = DASHBOARD_JAVASCRIPT.split("function deviceCard", 1)[1].split(
         "function renderHome", 1
     )[0]
-    assert "<button type=\"button\">▶ Live</button>" not in live_markup
+    assert "▶ Live" not in home_markup
+    assert "data-home-camera" in home_markup
+    assert "Open feeder settings" in home_markup
+    assert "deviceSettingsUrl(device.device_id)" in home_markup
+    assert "async function startHomeCamera(" in DASHBOARD_JAVASCRIPT
+    assert "async function startCameraPlayer(" in DASHBOARD_JAVASCRIPT
+    assert "updateHomeCard(device)" in DASHBOARD_JAVASCRIPT
+    assert "homeCameraElement" in DASHBOARD_JAVASCRIPT
+    update_source = DASHBOARD_JAVASCRIPT.split("function updateHomeCard", 1)[1].split(
+        "function homeCameraElement", 1
+    )[0]
+    assert "data-home-camera-slot" not in update_source
 
 
 def test_modal_shell_can_host_a_typed_action_form() -> None:

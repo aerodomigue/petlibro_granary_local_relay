@@ -174,7 +174,16 @@ class DashboardContext:
                         "local_mqtt": telemetry["local_mqtt"],
                         "devices": _summarize(rows, self._config.auto_enroll),
                     },
-                    "devices": [self._daily_row(row) for row in rows],
+                    "devices": [
+                        {
+                            **self._daily_row(row),
+                            "camera": self._daily_camera(
+                                str(row["device_id"]),
+                                cast(str | None, row["product_id"]),
+                            ),
+                        }
+                        for row in rows
+                    ],
                 }
             ),
         )

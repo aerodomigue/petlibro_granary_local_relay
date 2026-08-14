@@ -83,12 +83,15 @@ def test_global_navigation_releases_a_camera_viewer() -> None:
     node_test = f"""
 const state = {{ camera: {{ deviceId: 'DEVICE-A' }} }};
 let closed = 0;
+let homeClosed = 0;
 const closeCamera = () => {{ closed += 1; state.camera = null; }};
+const closeHomeCameras = () => {{ homeClosed += 1; }};
 const history = {{ pushState: () => undefined }};
 const refresh = () => undefined;
 {route_source}
 setRoute('/settings');
 if (closed !== 1) throw new Error('Camera was not released when leaving the device route.');
+if (homeClosed !== 1) throw new Error('Home viewers were not released when leaving Home.');
 state.camera = {{ deviceId: 'DEVICE-A' }};
 setRoute('/devices/DEVICE-A#camera');
 if (closed !== 1) throw new Error('Camera was unnecessarily restarted for the same device.');
