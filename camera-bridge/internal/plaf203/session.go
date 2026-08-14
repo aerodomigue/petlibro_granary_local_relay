@@ -13,6 +13,7 @@ import (
 
 const (
 	defaultDiscoveryTimeout = 2 * time.Second
+	defaultKnockTimeout     = 2 * time.Second
 	defaultLoginTimeout     = 3 * time.Second
 	mediaStatsLogInterval   = 5 * time.Second
 )
@@ -33,10 +34,12 @@ const (
 
 // Event reports an immutable protocol transition to the owning bridge.
 type Event struct {
-	State   SessionState
-	Address *net.UDPAddr
-	Step    string
-	Frame   *VideoFrame
+	State        SessionState
+	Address      *net.UDPAddr
+	Step         string
+	PacketLength int
+	Opcode       uint16
+	Frame        *VideoFrame
 }
 
 // Observer receives state transitions without receiving the UID or any secret.
@@ -58,6 +61,7 @@ type TransportFactory interface {
 type DirectConnector struct {
 	TransportFactory  TransportFactory
 	DiscoveryTimeout  time.Duration
+	KnockTimeout      time.Duration
 	LoginTimeout      time.Duration
 	BootstrapTimeout  time.Duration
 	BroadcastFallback bool
@@ -70,6 +74,7 @@ func NewDirectConnector() *DirectConnector {
 	return &DirectConnector{
 		TransportFactory:  UDPTransportFactory{},
 		DiscoveryTimeout:  defaultDiscoveryTimeout,
+		KnockTimeout:      defaultKnockTimeout,
 		LoginTimeout:      defaultLoginTimeout,
 		BootstrapTimeout:  defaultBootstrapTimeout,
 		BroadcastFallback: true,
@@ -113,12 +118,15 @@ func (connector *DirectConnector) Connect(ctx context.Context, uid string, feede
 	}
 
 	emit(observe, Event{State: StateKnocking, Address: address, Step: discoveryMode})
-	knockReply, err := EncodeKnockReply(uid, nonce)
+	knockTimeout := connector.KnockTimeout
+	if knockTimeout <= 0 {
+		knockTimeout = defaultKnockTimeout
+	}
+	knockContext, knockCancel := context.WithTimeout(ctx, knockTimeout)
+	address, err = CompleteKnock(knockContext, transport, address, uid, nonce, observe)
+	knockCancel()
 	if err != nil {
 		return nil, err
-	}
-	if err := transport.SendTo(tutk.TransCodePartial(nil, knockReply), address); err != nil {
-		return nil, fmt.Errorf("send PLAF203 KNOCK_RR2: %w", err)
 	}
 
 	emit(observe, Event{State: StateLoggingIn, Address: address})
@@ -195,7 +203,7 @@ func (connector *DirectConnector) discover(ctx context.Context, transport Datagr
 		target := (&net.UDPAddr{IP: ipv4, Port: LANPort}).String()
 		emit(observe, Event{State: StateDiscovering, Step: "unicast target=" + target})
 		unicastContext, cancel := context.WithTimeout(ctx, timeout)
-		address, err := DiscoverUnicast(unicastContext, transport, ipv4, uid, nonce)
+		address, err := discover(unicastContext, transport, uid, nonce, []*net.UDPAddr{{IP: ipv4, Port: LANPort}}, ipv4, observe)
 		cancel()
 		if err == nil {
 			return address, "unicast", nil
@@ -217,7 +225,7 @@ func (connector *DirectConnector) discover(ctx context.Context, transport Datagr
 	emit(observe, Event{State: StateDiscovering, Step: "broadcast"})
 	broadcastContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	address, err := Discover(broadcastContext, transport, uid, nonce, targets)
+	address, err := discover(broadcastContext, transport, uid, nonce, targets, nil, observe)
 	return address, "broadcast", err
 }
 

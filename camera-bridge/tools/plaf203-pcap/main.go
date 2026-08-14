@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/tutk"
+	"github.com/aerodomigue/petlibro-camera-bridge/internal/plaf203"
 )
 
 const (
@@ -164,11 +165,30 @@ func packetSummary(decoded []byte) string {
 	if len(decoded) >= 12 && decoded[0] == 0x04 && decoded[1] == 0x02 {
 		opcode := binary.LittleEndian.Uint16(decoded[8:10])
 		summary += fmt.Sprintf(" magic=0x%02x flags=0x%02x seq=%d opcode=0x%04x", decoded[2], decoded[3], binary.LittleEndian.Uint16(decoded[6:8]), opcode)
+		if opcode == 0x0602 {
+			summary += lanSearchResponseSummary(decoded)
+		}
 		if isSessionDatagram(decoded) {
 			summary += sessionSummary(decoded, opcode)
 		}
 	}
 	return summary
+}
+
+func lanSearchResponseSummary(decoded []byte) string {
+	const (
+		lanSearchResponseUIDOffset = 16
+		lanSearchResponseUIDLength = 20
+	)
+	if len(decoded) < lanSearchResponseUIDOffset+lanSearchResponseUIDLength {
+		return " lan_search_r=truncated"
+	}
+	uid := string(decoded[lanSearchResponseUIDOffset : lanSearchResponseUIDOffset+lanSearchResponseUIDLength])
+	response, err := plaf203.DecodeLANSearchResponse(decoded, uid)
+	if err != nil {
+		return fmt.Sprintf(" lan_search_r=invalid error=%v", err)
+	}
+	return fmt.Sprintf(" lan_search_r uid=%q uid_offset=16..35 nonce=unconfirmed endpoint=udp_source tail_marker=0x%08x token_offset=188..195 token=%s flags=0x%08x", response.UID, response.TailMarker, hex.EncodeToString(response.OpaqueToken[:]), response.ResponseFlags)
 }
 
 func isSessionDatagram(decoded []byte) bool {

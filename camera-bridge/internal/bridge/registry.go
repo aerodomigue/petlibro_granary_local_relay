@@ -283,6 +283,12 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 	switch event.State {
 	case plaf203.StateDiscovering:
 		switch event.Step {
+		case "response":
+			log.Printf("CAMERA DISCOVERY RESPONSE device=%s peer=%s bytes=%d opcode=0x%04x", deviceID, safeAddress(event.Address), event.PacketLength, event.Opcode)
+		case "valid":
+			log.Printf("CAMERA DISCOVERY VALID device=%s peer=%s bytes=%d opcode=0x%04x", deviceID, safeAddress(event.Address), event.PacketLength, event.Opcode)
+		case "reject_missing_peer", "reject_source_ip", "reject_uid_mismatch", "reject_invalid_length", "reject_invalid_packet":
+			log.Printf("DEBUG CAMERA DISCOVERY REJECT device=%s peer=%s bytes=%d opcode=0x%04x reason=%s", deviceID, safeAddress(event.Address), event.PacketLength, event.Opcode, event.Step)
 		case "unicast_timeout":
 			log.Printf("CAMERA DISCOVERY UNICAST TIMEOUT device=%s", deviceID)
 		case "broadcast_fallback":
@@ -293,6 +299,10 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 			log.Printf("CAMERA DISCOVERY START device=%s mode=%s", deviceID, event.Step)
 		}
 	case plaf203.StateKnocking:
+		if event.Step == "wait" {
+			log.Printf("CAMERA KNOCK WAIT device=%s peer=%s", deviceID, safeAddress(event.Address))
+			return
+		}
 		mode := event.Step
 		if mode != "unicast" && mode != "broadcast" {
 			mode = "broadcast"
