@@ -95,6 +95,13 @@ CREATE TABLE IF NOT EXISTS raw_messages (
     PRIMARY KEY (device_id, topic)
 )
 """
+_CREATE_CAMERA_UIDS_SQL = """
+CREATE TABLE IF NOT EXISTS camera_uids (
+    device_id TEXT PRIMARY KEY,
+    uid TEXT NOT NULL,
+    updated_at REAL NOT NULL
+)
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +119,15 @@ class SchedulePlan:
 
     plan: dict[str, Any]
     source: str
+    updated_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class CameraUID:
+    """A camera UID learned from the feeder's device-start event."""
+
+    device_id: str
+    uid: str
     updated_at: float
 
 
@@ -136,6 +152,7 @@ class StateShadow:
                 _CREATE_PLANS_SQL,
                 _CREATE_SCHEDULE_PLANS_SQL,
                 _CREATE_RAW_SQL,
+                _CREATE_CAMERA_UIDS_SQL,
             ):
                 self._connection.execute(statement)
 
@@ -150,6 +167,31 @@ class StateShadow:
             "payload = excluded.payload, cmd = excluded.cmd, updated_at = excluded.updated_at",
             (device_id, topic, payload, command, time.time()),
         )
+
+    def record_camera_uid(self, device_id: str, uid: str) -> bool:
+        """Persist a validated camera UID and return whether it changed.
+
+        The UID remains out of dashboard snapshots and logs. It is stored only
+        so the relay can re-register a known camera bridge mapping after a
+        restart without waiting for another feeder boot event.
+        """
+        now = time.time()
+        with self._lock:
+            try:
+                previous = self._connection.execute(
+                    "SELECT uid FROM camera_uids WHERE device_id = ?", (device_id,)
+                ).fetchone()
+                with self._connection:
+                    self._connection.execute(
+                        "INSERT INTO camera_uids (device_id, uid, updated_at) VALUES (?, ?, ?) "
+                        "ON CONFLICT(device_id) DO UPDATE SET uid = excluded.uid, "
+                        "updated_at = excluded.updated_at",
+                        (device_id, uid, now),
+                    )
+            except sqlite3.Error:
+                _LOGGER.exception("Failed to record camera UID for %s", device_id)
+                raise
+        return previous is None or previous[0] != uid
 
     def update_reported(self, device_id: str, values: dict[str, Any]) -> None:
         """Record physical facts the device reported about itself."""
@@ -341,6 +383,27 @@ class StateShadow:
         """Return settings the feeder confirmed from a local interactive write."""
         return self._read_kv("local_confirmed", device_id)
 
+    def get_camera_uid(self, device_id: str) -> CameraUID | None:
+        """Return one stored camera UID for internal bridge registration only."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT uid, updated_at FROM camera_uids WHERE device_id = ?", (device_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return CameraUID(device_id=device_id, uid=str(row[0]), updated_at=float(row[1]))
+
+    def get_camera_uids(self) -> list[CameraUID]:
+        """Return stored UIDs for relay-to-bridge startup reconciliation only."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT device_id, uid, updated_at FROM camera_uids ORDER BY device_id"
+            ).fetchall()
+        return [
+            CameraUID(device_id=str(device_id), uid=str(uid), updated_at=float(updated_at))
+            for device_id, uid, updated_at in rows
+        ]
+
     def _read_kv(self, table: str, device_id: str) -> dict[str, Any]:
         with self._lock:
             try:
@@ -444,7 +507,7 @@ class StateShadow:
                 {
                     "topic": topic,
                     "cmd": command,
-                    "payload": _decode_raw_payload(payload),
+                    "payload": _decode_raw_payload(payload, command),
                     "updated_at": float(updated_at),
                 }
                 for topic, payload, command, updated_at in raw_rows
@@ -464,9 +527,12 @@ class StateShadow:
             self._connection.close()
 
 
-def _decode_raw_payload(payload: bytes) -> Any:
-    """Decode JSON raw traffic when possible; otherwise expose a safe text form."""
+def _decode_raw_payload(payload: bytes, command: str | None = None) -> Any:
+    """Decode raw traffic while keeping learned camera UIDs internal to the relay."""
     try:
-        return json.loads(payload)
+        decoded = json.loads(payload)
     except (json.JSONDecodeError, UnicodeDecodeError):
         return payload.decode("utf-8", errors="replace")
+    if command == "DEVICE_START_EVENT" and isinstance(decoded, dict) and "uuid" in decoded:
+        return {**decoded, "uuid": "<redacted>"}
+    return decoded

@@ -29,11 +29,13 @@ import logging
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from enum import Enum, auto
 from typing import Any
 
 from . import protocol
+from .camera_uid import is_camera_uid
 from .dst_schedule import compute as compute_dst_schedule
 from .state_shadow import StateShadow
 
@@ -118,7 +120,11 @@ class LocalResponder:
     """Decides whether a feeder request can be answered from local knowledge."""
 
     def __init__(
-        self, settings: LocalResponderSettings, shadow: StateShadow, handled_msg_id_ttl_seconds: float
+        self,
+        settings: LocalResponderSettings,
+        shadow: StateShadow,
+        handled_msg_id_ttl_seconds: float,
+        camera_uid_observer: Callable[[str, str], None] | None = None,
     ) -> None:
         """Initialize the responder.
 
@@ -127,10 +133,13 @@ class LocalResponder:
             shadow: Persistent state shadow to read last-known-good from.
             handled_msg_id_ttl_seconds: How long a locally answered msgId is
                 remembered so a late cloud answer to it can be suppressed.
+            camera_uid_observer: Non-blocking callback that registers a
+                validated UID with the local camera bridge.
         """
         self._settings = settings
         self._shadow = shadow
         self._handled_msg_id_ttl_seconds = handled_msg_id_ttl_seconds
+        self._camera_uid_observer = camera_uid_observer
         # Keyed by (device_id, msgId), never by msgId alone: two feeders can
         # legitimately mint the same identifier, and suppressing one device's
         # cloud response because another answered that id locally would drop
@@ -311,6 +320,12 @@ class LocalResponder:
                     "mac": body.get("mac"),
                 },
             )
+            uid = body.get("uuid")
+            if is_camera_uid(uid):
+                if self._shadow.record_camera_uid(device_id, uid):
+                    _LOGGER.info("CAMERA UID LEARNED device_id=%s uid_length=%d", device_id, len(uid))
+                if self._camera_uid_observer is not None:
+                    self._camera_uid_observer(device_id, uid)
 
     # -- response builders --------------------------------------------------------
 

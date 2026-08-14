@@ -1,25 +1,36 @@
-"""Read-only go2rtc camera status for the PLAF203 dashboard POC.
+"""Safe integration points for the optional PLAF203 camera sidecars.
 
-The relay deliberately does not construct a TUTK source here. go2rtc v1.9.14
-contains a generic TUTK transport, but no PLAF203 producer or source dialect.
-This module only reports the state of a deterministically named stream.
+The relay learns a camera UID from a feeder-owned MQTT event, stores it in the
+state shadow, and can register it with our local camera bridge. The bridge is
+the only component allowed to attempt camera transport work. This module does
+not manufacture a TUTK session, source URL, or credentials.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import queue
 import threading
 import time
-from dataclasses import asdict, dataclass
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .config import Go2RtcSettings
+from .config import CameraBridgeSettings, Go2RtcSettings
+from .camera_uid import is_camera_uid
+
+_LOGGER = logging.getLogger(__name__)
 
 PLAF203_PRODUCT_ID = "PLAF203"
 GO2RTC_STREAMS_PATH = "/api/streams"
+CAMERA_BRIDGE_DEVICES_PATH = "/devices"
 CACHE_SECONDS = 2.0
+REGISTRATION_QUEUE_MAXSIZE = 128
+REGISTRAR_JOIN_TIMEOUT_SECONDS = 2.0
+REGISTRAR_POLL_TIMEOUT_SECONDS = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +44,9 @@ class CameraStatus:
     webrtc: bool
     go2rtc_reachable: bool
     reason: str | None
+    bridge_reachable: bool = False
+    bridge_registered: bool = False
+    uid_learned: bool = False
 
     def snapshot(self) -> dict[str, object]:
         """Return a JSON-ready status that contains no source or credential."""
@@ -44,6 +58,141 @@ class CameraStatusProvider(Protocol):
 
     def status(self, device_id: str, product_id: str | None) -> CameraStatus:
         """Return the safe status for one device."""
+
+
+class CameraBridgeRegistrationClient(Protocol):
+    """Register a feeder UID with the internal camera bridge."""
+
+    def register(self, device_id: str, uid: str) -> bool:
+        """Register one UID and return whether the bridge accepted it."""
+
+
+class CameraBridgeClient:
+    """Constrained client for the local camera bridge registration API."""
+
+    def __init__(self, settings: CameraBridgeSettings) -> None:
+        self._settings = settings
+
+    def register(self, device_id: str, uid: str) -> bool:
+        """PUT one learned UID without exposing it in diagnostics.
+
+        This operation is only called from the registrar worker, never from an
+        MQTT callback thread.
+        """
+        if not self._settings.enabled:
+            return False
+        payload = json.dumps({"uid": uid}).encode()
+        request = Request(
+            f"{self._base_url()}{CAMERA_BRIDGE_DEVICES_PATH}/{device_id}",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="PUT",
+        )
+        try:
+            with urlopen(request, timeout=self._settings.timeout_seconds) as response:  # noqa: S310
+                status = getattr(response, "status", 200)
+                return isinstance(status, int) and 200 <= status < 300
+        except (HTTPError, URLError, OSError, TimeoutError):
+            return False
+
+    def status(self, device_id: str) -> tuple[bool, bool]:
+        """Return `(reachable, registered)` without returning a UID."""
+        if not self._settings.enabled:
+            return False, False
+        request = Request(f"{self._base_url()}{CAMERA_BRIDGE_DEVICES_PATH}", method="GET")
+        try:
+            with urlopen(request, timeout=self._settings.timeout_seconds) as response:  # noqa: S310
+                payload = json.load(response)
+        except (HTTPError, URLError, OSError, TimeoutError, json.JSONDecodeError):
+            return False, False
+        devices = payload.get("devices") if isinstance(payload, dict) else None
+        registered = isinstance(devices, list) and any(
+            isinstance(item, dict) and item.get("device_id") == device_id for item in devices
+        )
+        return True, registered
+
+    def _base_url(self) -> str:
+        return f"http://{self._settings.host}:{self._settings.port}"
+
+
+class CameraBridgeRegistrar:
+    """Queue bridge registration work away from MQTT callback threads."""
+
+    def __init__(self, settings: CameraBridgeSettings, client: CameraBridgeRegistrationClient) -> None:
+        self._settings = settings
+        self._client = client
+        self._registered: set[tuple[str, str]] = set()
+        self._lock = threading.Lock()
+        self._pending: queue.Queue[tuple[str, str] | None] = queue.Queue(REGISTRATION_QUEUE_MAXSIZE)
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        if settings.enabled:
+            self._thread = threading.Thread(
+                target=self._run, name="camera-bridge-register", daemon=True
+            )
+            self._thread.start()
+
+    def register(self, device_id: str, uid: str) -> None:
+        """Schedule idempotent registration after the UID is safely persisted."""
+        if self._stop_event.is_set() or not self._settings.enabled or not is_camera_uid(uid):
+            return
+        registration = (device_id, uid)
+        with self._lock:
+            if registration in self._registered:
+                return
+            self._registered.add(registration)
+        try:
+            self._pending.put_nowait(registration)
+        except queue.Full:
+            with self._lock:
+                self._registered.discard(registration)
+            _LOGGER.warning("CAMERA BRIDGE REGISTER queue full device_id=%s", device_id)
+
+    def reconcile(self, mappings: Iterable[tuple[str, str]]) -> None:
+        """Re-register persisted UID mappings after a relay restart."""
+        for device_id, uid in mappings:
+            self.register(device_id, uid)
+
+    def close(self) -> None:
+        """Stop the optional registration worker without touching cameras."""
+        if self._thread is None:
+            return
+        self._stop_event.set()
+        self._thread.join(timeout=REGISTRAR_JOIN_TIMEOUT_SECONDS)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                registration = self._pending.get(timeout=REGISTRAR_POLL_TIMEOUT_SECONDS)
+            except queue.Empty:
+                continue
+            if registration is None:
+                continue
+            device_id, uid = registration
+            if self._client.register(device_id, uid):
+                _LOGGER.info("CAMERA BRIDGE REGISTER device_id=%s result=accepted", device_id)
+                continue
+            with self._lock:
+                self._registered.discard(registration)
+            _LOGGER.warning("CAMERA BRIDGE REGISTER device_id=%s result=unavailable", device_id)
+
+
+class CameraStatusService:
+    """Combine safe go2rtc and bridge readiness diagnostics for one camera."""
+
+    def __init__(self, go2rtc: Go2RtcSettings, bridge: CameraBridgeSettings) -> None:
+        self._go2rtc = Go2RtcCameraClient(go2rtc)
+        self._bridge = CameraBridgeClient(bridge)
+
+    def status(self, device_id: str, product_id: str | None) -> CameraStatus:
+        """Return sidecar state without exposing source URLs or camera UIDs."""
+        status = self._go2rtc.status(device_id, product_id)
+        bridge_reachable, bridge_registered = self._bridge.status(device_id)
+        return replace(
+            status,
+            bridge_reachable=bridge_reachable,
+            bridge_registered=bridge_registered,
+        )
 
 
 class Go2RtcCameraClient:

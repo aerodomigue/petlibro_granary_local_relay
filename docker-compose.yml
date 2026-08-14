@@ -25,9 +25,15 @@ services:
       - mosquitto-data:/mosquitto/data
       - mosquitto-log:/mosquitto/log
 
-  # Internal-only video sidecar. The PLAF203 TUTK AV source is deliberately
-  # empty until its device-specific protocol has been documented; the relay
-  # only reads go2rtc's stream status API on this Docker network.
+  # Internal-only registry for relay-learned PLAF203 camera UIDs. It never
+  # opens a TUTK session until the device-specific AV protocol is implemented.
+  camera-bridge:
+    build:
+      context: ./camera-bridge
+    container_name: petlibro-relay-camera-bridge
+    restart: unless-stopped
+
+  # Internal-only media sidecar. No unverified PLAF203 source is configured.
   go2rtc:
     image: alexxit/go2rtc:1.9.14
     container_name: petlibro-relay-go2rtc
@@ -41,6 +47,7 @@ services:
     restart: unless-stopped
     depends_on:
       - mosquitto
+      - camera-bridge
       - go2rtc
     env_file:
       - .env

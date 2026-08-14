@@ -8,7 +8,7 @@ import threading
 from types import FrameType
 
 from .config import RelayConfig
-from .camera import Go2RtcCameraClient
+from .camera import CameraBridgeClient, CameraBridgeRegistrar, CameraStatusService
 from .credential_capture_proxy import CredentialCaptureProxy, DeviceSessionListener
 from .device_manager import DeviceManager
 from .device_presence import DevicePresenceTracker
@@ -138,6 +138,12 @@ def main() -> None:
 
     state_cache = StateCache(config.state_cache_path)
     shadow = StateShadow(config.state_shadow_db_path)
+    camera_registrar = CameraBridgeRegistrar(
+        config.camera_bridge, CameraBridgeClient(config.camera_bridge)
+    )
+    camera_registrar.reconcile(
+        (entry.device_id, entry.uid) for entry in shadow.get_camera_uids()
+    )
     queue = MessageQueue(config.queue_db_path, config.max_queue_size)
     telemetry = RelayTelemetry()
     registry = DeviceRegistry(
@@ -149,7 +155,16 @@ def main() -> None:
     _seed_manual_identity(config, registry)
 
     presence = DevicePresenceTracker()
-    devices = DeviceManager(config, registry, queue, shadow, state_cache, telemetry, presence)
+    devices = DeviceManager(
+        config,
+        registry,
+        queue,
+        shadow,
+        state_cache,
+        telemetry,
+        presence,
+        camera_registrar=camera_registrar,
+    )
     bridge_holder = BridgeHolder()
     bridge = MqttBridge(config, devices, queue, telemetry)
     sound_switch_control = SoundSwitchController(
@@ -172,7 +187,7 @@ def main() -> None:
         devices,
         presence,
         sound_switch_control,
-        Go2RtcCameraClient(config.go2rtc),
+        CameraStatusService(config.go2rtc, config.camera_bridge),
     )
 
     dashboard_server: DashboardServer | None = None
@@ -214,6 +229,7 @@ def main() -> None:
             dashboard_server.stop()
         queue.close()
         registry.close()
+        camera_registrar.close()
         shadow.close()
         _LOGGER.info("Relay stopped")
 

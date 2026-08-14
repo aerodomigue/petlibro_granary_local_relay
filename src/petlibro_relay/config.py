@@ -38,6 +38,10 @@ DEFAULT_GO2RTC_ENABLED = False
 DEFAULT_GO2RTC_HOST = "go2rtc"
 DEFAULT_GO2RTC_PORT = 1984
 DEFAULT_GO2RTC_TIMEOUT_SECONDS = 1.0
+DEFAULT_CAMERA_BRIDGE_ENABLED = False
+DEFAULT_CAMERA_BRIDGE_HOST = "camera-bridge"
+DEFAULT_CAMERA_BRIDGE_PORT = 8081
+DEFAULT_CAMERA_BRIDGE_TIMEOUT_SECONDS = 1.0
 
 _LOOPBACK_UPSTREAM_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "0.0.0.0", "::"})
 UNSAFE_UPSTREAM_CONFIGURATION_MESSAGE = (
@@ -54,6 +58,16 @@ class Go2RtcSettings:
     host: str = DEFAULT_GO2RTC_HOST
     port: int = DEFAULT_GO2RTC_PORT
     timeout_seconds: float = DEFAULT_GO2RTC_TIMEOUT_SECONDS
+
+
+@dataclass(frozen=True, slots=True)
+class CameraBridgeSettings:
+    """Connection settings for the internal PLAF203 camera-bridge sidecar."""
+
+    enabled: bool = DEFAULT_CAMERA_BRIDGE_ENABLED
+    host: str = DEFAULT_CAMERA_BRIDGE_HOST
+    port: int = DEFAULT_CAMERA_BRIDGE_PORT
+    timeout_seconds: float = DEFAULT_CAMERA_BRIDGE_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +117,7 @@ class RelayConfig:
     log_upstream_service_payloads: bool
     log_device_start_event: bool
     go2rtc: Go2RtcSettings
+    camera_bridge: CameraBridgeSettings
 
     @classmethod
     def from_env(cls) -> "RelayConfig":
@@ -174,6 +189,19 @@ class RelayConfig:
                     os.environ.get("PETLIBRO_GO2RTC_TIMEOUT_SECONDS", DEFAULT_GO2RTC_TIMEOUT_SECONDS)
                 ),
             ),
+            camera_bridge=CameraBridgeSettings(
+                enabled=_env_flag("PETLIBRO_CAMERA_BRIDGE_ENABLED", DEFAULT_CAMERA_BRIDGE_ENABLED),
+                host=os.environ.get("PETLIBRO_CAMERA_BRIDGE_HOST", DEFAULT_CAMERA_BRIDGE_HOST),
+                port=int(
+                    os.environ.get("PETLIBRO_CAMERA_BRIDGE_PORT", DEFAULT_CAMERA_BRIDGE_PORT)
+                ),
+                timeout_seconds=float(
+                    os.environ.get(
+                        "PETLIBRO_CAMERA_BRIDGE_TIMEOUT_SECONDS",
+                        DEFAULT_CAMERA_BRIDGE_TIMEOUT_SECONDS,
+                    )
+                ),
+            ),
         )
 
     def manually_configured_identity(self) -> tuple[str, str, str] | None:
@@ -216,6 +244,10 @@ class RelayConfig:
             raise ValueError("go2rtc port must be between 1 and 65535")
         if self.go2rtc.timeout_seconds <= 0:
             raise ValueError("go2rtc timeout must be greater than zero")
+        if self.camera_bridge.port <= 0 or self.camera_bridge.port > 65535:
+            raise ValueError("camera bridge port must be between 1 and 65535")
+        if self.camera_bridge.timeout_seconds <= 0:
+            raise ValueError("camera bridge timeout must be greater than zero")
 
 
 def _env_flag(name: str, default: bool = False) -> bool:

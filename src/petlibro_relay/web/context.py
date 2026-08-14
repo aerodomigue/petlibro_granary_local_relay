@@ -163,7 +163,11 @@ class DashboardContext:
             if entry is None:
                 return {}
             product_id = entry.product_id
-        return self._camera.status(device_id, product_id).snapshot()
+        status = self._camera.status(device_id, product_id)
+        return {
+            **status.snapshot(),
+            "uid_learned": self._shadow.get_camera_uid(device_id) is not None,
+        }
 
     def queues(self, device_id: str, limit: int) -> dict[str, Any]:
         """Return bounded metadata for one device's two durable directions."""

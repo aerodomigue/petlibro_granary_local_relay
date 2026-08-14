@@ -31,6 +31,7 @@ import logging
 import threading
 from collections.abc import Callable
 
+from .camera import CameraBridgeRegistrar
 from .config import RelayConfig
 from .device_context import DeviceContext
 from .device_presence import DevicePresenceTracker
@@ -62,6 +63,7 @@ class DeviceManager:
         state_cache: StateCache,
         telemetry: RelayTelemetry,
         presence: DevicePresenceTracker,
+        camera_registrar: CameraBridgeRegistrar | None = None,
         supervisor_interval_seconds: float = SUPERVISOR_INTERVAL_SECONDS,
     ) -> None:
         """Initialize the manager without starting any device.
@@ -74,6 +76,8 @@ class DeviceManager:
             state_cache: Shared last-payload-per-topic cache.
             telemetry: Relay-wide telemetry, which vends per-device metrics.
             presence: Which devices currently hold a local session.
+            camera_registrar: Optional non-blocking registration service for
+                camera UIDs learned from device-start events.
             supervisor_interval_seconds: How often sessions are reconciled
                 against presence.
         """
@@ -84,6 +88,7 @@ class DeviceManager:
         self._state_cache = state_cache
         self._telemetry = telemetry
         self._presence = presence
+        self._camera_registrar = camera_registrar
         self._supervisor_interval_seconds = supervisor_interval_seconds
         self._lock = threading.Lock()
         self._contexts: dict[str, DeviceContext] = {}
@@ -217,7 +222,10 @@ class DeviceManager:
         must keep receiving cloud settings and schedules in pure-pipe mode.
         """
         return LocalResponder(
-            self._config.local_responder, self._shadow, self._config.handled_msg_id_ttl_seconds
+            self._config.local_responder,
+            self._shadow,
+            self._config.handled_msg_id_ttl_seconds,
+            self._camera_registrar.register if self._camera_registrar is not None else None,
         )
 
     def remove_device(self, device_id: str) -> None:

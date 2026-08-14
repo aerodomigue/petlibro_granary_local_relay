@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from petlibro_relay.config import Go2RtcSettings, RelayConfig
+from petlibro_relay.config import CameraBridgeSettings, Go2RtcSettings, RelayConfig
 from petlibro_relay.local_responder import LocalResponderSettings
 
 RelayConfigFactory = Callable[..., RelayConfig]
@@ -61,6 +61,7 @@ def make_config(tmp_path: Path) -> RelayConfigFactory:
             "log_upstream_service_payloads": False,
             "log_device_start_event": False,
             "go2rtc": Go2RtcSettings(enabled=False),
+            "camera_bridge": CameraBridgeSettings(enabled=False),
         }
         defaults.update(overrides)
         return RelayConfig(**defaults)  # type: ignore[arg-type]
