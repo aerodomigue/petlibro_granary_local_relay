@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
+	"github.com/AlexxIT/go2rtc/pkg/h264/annexb"
 	"github.com/AlexxIT/go2rtc/pkg/rtsp"
 	"github.com/aerodomigue/petlibro-camera-bridge/internal/plaf203"
 	"github.com/pion/rtp"
@@ -157,6 +158,10 @@ func (publisher *mediaPublisher) publish(frame *plaf203.VideoFrame) {
 	if publisher == nil || frame == nil || len(frame.Data) == 0 {
 		return
 	}
+	avcc := annexb.EncodeToAVCC(frame.Data)
+	if len(avcc) == 0 {
+		return
+	}
 	publisher.mu.Lock()
 	if frame.Keyframe {
 		publisher.latestFrame = cloneFrame(frame)
@@ -165,7 +170,7 @@ func (publisher *mediaPublisher) publish(frame *plaf203.VideoFrame) {
 	publisher.mu.Unlock()
 	publisher.track.WriteRTP(&rtp.Packet{
 		Header:  rtp.Header{Version: 2, Marker: true, Timestamp: timestamp},
-		Payload: frame.Data,
+		Payload: avcc,
 	})
 }
 

@@ -23,20 +23,21 @@ func TestDeviceIDFromMediaPathOnlyAcceptsOneDeviceScopedRTSPPath(t *testing.T) {
 	}
 }
 
-func TestMediaPublisherAcceptsVerifiedH264FrameWithoutReencoding(t *testing.T) {
+func TestMediaPublisherConvertsVerifiedAnnexBFrameToAVCCWithoutReencoding(t *testing.T) {
 	publisher := newMediaPublisher()
 	frame := &plaf203.VideoFrame{
 		Codec:    "h264",
 		Keyframe: true,
-		Data:     []byte{0, 0, 0, 1, 0x67, 0x42, 0, 0x29},
+		Data:     []byte{0, 0, 1, 0x67, 0x42, 0, 0x29},
 	}
 	publisher.publish(frame)
 
 	if publisher.track.Packets != 1 {
 		t.Fatalf("packets=%d want=1", publisher.track.Packets)
 	}
-	if publisher.track.Bytes != len(frame.Data) {
-		t.Fatalf("bytes=%d want=%d", publisher.track.Bytes, len(frame.Data))
+	const expectedAVCCBytes = 8
+	if publisher.track.Bytes != expectedAVCCBytes {
+		t.Fatalf("bytes=%d want=%d", publisher.track.Bytes, expectedAVCCBytes)
 	}
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()
