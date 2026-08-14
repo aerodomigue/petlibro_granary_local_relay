@@ -336,6 +336,14 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 		t.Fatalf("ack=%x", body)
 	}
 	assertControlPacket(t, bootstrapPackets[6], controlChannelSystem, controlStartVideo, nil)
+	startWire := transport.sent[len(transport.sent)-1]
+	startDecoded := tutk.ReverseTransCodePartial(nil, startWire)
+	if len(startWire) != 68 || len(startDecoded) != 68 || binary.LittleEndian.Uint16(startDecoded[8:10]) != clientSessionOpcode || binary.LittleEndian.Uint16(startDecoded[10:12]) != clientSessionSubtype || binary.LittleEndian.Uint16(startDecoded[6:8]) != 8 {
+		t.Fatalf("unexpected IPCAM_START Session16 envelope: wire=%x decoded=%x", startWire, startDecoded)
+	}
+	if body := startDecoded[sessionHeaderLength:]; len(body) != 40 || binary.LittleEndian.Uint16(body[:2]) != 0x000C || binary.LittleEndian.Uint16(body[16:18]) != controlChannelSystem || binary.LittleEndian.Uint32(body[controlInnerLength:]) != controlStartVideo {
+		t.Fatalf("unexpected IPCAM_START body: %x", body)
+	}
 	if transport.CloseCount() != 0 {
 		t.Fatalf("transport closed before session close count=%d", transport.CloseCount())
 	}

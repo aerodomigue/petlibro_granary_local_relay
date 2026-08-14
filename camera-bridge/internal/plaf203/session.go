@@ -38,6 +38,7 @@ type Event struct {
 	LocalAddress   *net.UDPAddr
 	Step           string
 	PacketLength   int
+	BodyLength     int
 	Opcode         uint16
 	Sequence       uint16
 	SessionChannel uint16
@@ -49,6 +50,8 @@ type Event struct {
 	Types          string
 	Rejected       string
 	Error          string
+	DecodedHex     string
+	WireHex        string
 	Frame          *VideoFrame
 }
 

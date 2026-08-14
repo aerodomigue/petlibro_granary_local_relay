@@ -3,6 +3,7 @@ package plaf203
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -58,16 +59,44 @@ func (session *Session) bootstrap(ctx context.Context) (_ *VideoFrame, returnErr
 	if err := session.waitForControlReplies(ctx, diagnostics); err != nil {
 		return nil, err
 	}
+	if err := session.sendStartVideo(); err != nil {
+		return nil, err
+	}
+	return session.waitForVideo(ctx, diagnostics)
+}
+
+// sendStartVideo builds and reports the complete IPCAM_START datagram before
+// applying the same TUTK transform used by every PLAF203 Session16 send.
+func (session *Session) sendStartVideo() error {
+	payload := make([]byte, 4)
+	binary.LittleEndian.PutUint32(payload, controlStartVideo)
+	body := encodeControlData(session.nextControlCounter(), controlChannelSystem, 2, payload)
+	packet := encodeClientSessionPacket(session.ID, session.nextSequence(), body)
+	wire := tutk.TransCodePartial(nil, packet)
+	emit(session.observer, Event{
+		State:          StateBootstrapping,
+		Address:        cloneUDPAddress(session.Address),
+		Step:           "stream_start_packet",
+		PacketLength:   len(wire),
+		BodyLength:     len(body),
+		Opcode:         binary.LittleEndian.Uint16(packet[8:10]),
+		Sequence:       binary.LittleEndian.Uint16(packet[6:8]),
+		SessionChannel: binary.LittleEndian.Uint16(body[16:18]),
+		SessionCommand: binary.LittleEndian.Uint16(body[:2]),
+		ControlType:    controlStartVideo,
+		DecodedHex:     hex.EncodeToString(packet),
+		WireHex:        hex.EncodeToString(wire),
+	})
+	if err := session.transport.SendTo(wire, session.Address); err != nil {
+		return fmt.Errorf("send PLAF203 bootstrap control type=0x%04x: %w", controlStartVideo, err)
+	}
 	emit(session.observer, Event{
 		State:       StateBootstrapping,
 		Address:     cloneUDPAddress(session.Address),
 		Step:        "stream_start_tx",
 		ControlType: controlStartVideo,
 	})
-	if err := session.sendControl(controlChannelSystem, 2, controlStartVideo, nil); err != nil {
-		return nil, err
-	}
-	return session.waitForVideo(ctx, diagnostics)
+	return nil
 }
 
 func (session *Session) sendLoginPair(timestampMillis uint32) error {
