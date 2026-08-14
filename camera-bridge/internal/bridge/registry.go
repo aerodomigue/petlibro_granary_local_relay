@@ -345,6 +345,14 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 		case "stream_start_packet":
 			log.Printf("CAMERA STREAM START PACKET device=%s bytes=%d outer_opcode=0x%04x channel=0x%04x session_cmd=0x%04x control_type=0x%04x seq=%d body_bytes=%d", deviceID, event.PacketLength, event.Opcode, event.SessionChannel, event.SessionCommand, event.ControlType, event.Sequence, event.BodyLength)
 			log.Printf("DEBUG CAMERA STREAM START PACKET device=%s decoded_hex=%s wire_hex=%s", deviceID, event.DecodedHex, event.WireHex)
+		case "keepalive_rx":
+			log.Printf("CAMERA KEEPALIVE RX device=%s peer=%s bytes=%d opcode=0x%04x", deviceID, safeAddress(event.Address), event.PacketLength, event.Opcode)
+		case "keepalive_tx":
+			log.Printf("CAMERA KEEPALIVE TX device=%s peer=%s bytes=%d opcode=0x%04x", deviceID, safeAddress(event.Address), event.PacketLength, event.Opcode)
+		case "session_heartbeat_rx":
+			log.Printf("CAMERA SESSION HEARTBEAT RX device=%s peer=%s bytes=%d", deviceID, safeAddress(event.Address), event.PacketLength)
+		case "session_heartbeat_tx":
+			log.Printf("CAMERA SESSION HEARTBEAT TX device=%s peer=%s bytes=%d", deviceID, safeAddress(event.Address), event.PacketLength)
 		case "stream_start_tx":
 			log.Printf("CAMERA STREAM START TX device=%s channel=0x%04x control_type=0x%04x", deviceID, 0x7000, event.ControlType)
 		case "stream_start_ack":

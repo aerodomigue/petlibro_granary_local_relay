@@ -13,3 +13,8 @@ stored in wire-transcoded form. After `ReverseTransCodePartial`, it has a
 field confirmed as an echoed request nonce. The dynamic UDP source address is
 the peer endpoint. The direct-LAN sequence continues with a client-emitted
 `LAN_SEARCH3` phase 2 carrying the original nonce before LOGIN.
+
+`keepalive_response_wire.hex` is the complete 24-byte `0x0428` keepalive
+response captured during the V3.0.30 post-LOGIN bootstrap. Tests decrypt it,
+preserve its envelope and echo payload, and verify the corresponding
+`0x0427`/`0x0021` reply through the official TUTK transform.

@@ -6,26 +6,35 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/tutk"
 )
 
 const (
-	defaultBootstrapTimeout  = 5 * time.Second
-	bootstrapReplyTimeout    = 750 * time.Millisecond
-	controlInnerLength       = 36
-	controlChannelStream     = 0x1000
-	controlChannelSystem     = 0x7000
-	controlSetStream         = 0x0024
-	controlSetStreamReply    = controlSetStream + 1
-	controlGetFormat         = 0x032A
-	controlGetFormatReply    = controlGetFormat + 1
-	controlStartVideo        = 0x01FF
-	controlStartVideoReply   = controlStartVideo + 1
-	bootstrapAckMarker       = 0x09
-	bootstrapHeartbeatMarker = 0x0A
-	formatControlIndex       = 1
+	defaultBootstrapTimeout   = 5 * time.Second
+	bootstrapReplyTimeout     = 750 * time.Millisecond
+	controlInnerLength        = 36
+	controlChannelStream      = 0x1000
+	controlChannelSystem      = 0x7000
+	controlSetStream          = 0x0024
+	controlSetStreamReply     = controlSetStream + 1
+	controlGetFormat          = 0x032A
+	controlGetFormatReply     = controlGetFormat + 1
+	controlStartVideo         = 0x01FF
+	controlStartVideoReply    = controlStartVideo + 1
+	streamStartArgumentSize   = 8
+	keepaliveResponseOpcode   = 0x0428
+	keepaliveRequestOpcode    = 0x0427
+	keepaliveResponseSubtype  = 0x0012
+	keepaliveRequestSubtype   = 0x0021
+	keepalivePacketLength     = 24
+	sessionHeartbeatLength    = 16
+	sessionHeartbeatAckLength = 20
+	bootstrapAckMarker        = 0x09
+	bootstrapHeartbeatMarker  = 0x0A
+	formatControlIndex        = 1
 )
 
 var streamControlHD = [8]byte{0x01, 0x00, 0xFF, 0x3F, 0x00, 0x00, 0x00, 0x00}
@@ -68,7 +77,11 @@ func (session *Session) bootstrap(ctx context.Context) (_ *VideoFrame, returnErr
 // sendStartVideo builds and reports the complete IPCAM_START datagram before
 // applying the same TUTK transform used by every PLAF203 Session16 send.
 func (session *Session) sendStartVideo() error {
-	payload := make([]byte, 4)
+	// IOTYPE_USER_IPCAM_START uses SMsgAVIoctrlAVStream: an unsigned
+	// 32-bit channel followed by four reserved bytes. Both are zero for the
+	// primary stream. The IOCtrl framing adds controlStartVideo before this
+	// eight-byte command argument.
+	payload := make([]byte, 4+streamStartArgumentSize)
 	binary.LittleEndian.PutUint32(payload, controlStartVideo)
 	body := encodeControlData(session.nextControlCounter(), controlChannelSystem, 2, payload)
 	packet := encodeClientSessionPacket(session.ID, session.nextSequence(), body)
@@ -168,6 +181,16 @@ func (session *Session) waitForVideo(ctx context.Context, diagnostics *bootstrap
 			return nil, fmt.Errorf("receive PLAF203 bootstrap media: %w", err)
 		}
 		decoded, details := diagnostics.observe(packet, peer)
+		if handled, keepaliveErr := session.replyKeepalive(decoded, peer); keepaliveErr != nil {
+			return nil, keepaliveErr
+		} else if handled {
+			continue
+		}
+		if handled, heartbeatErr := session.replySessionHeartbeat(decoded, peer, diagnostics); heartbeatErr != nil {
+			return nil, heartbeatErr
+		} else if handled {
+			continue
+		}
 		if inner, decodeErr := decodeDeviceSession(decoded, session.ID); decodeErr == nil {
 			if reply, valid := parseControlReply(inner); valid && reply.channel == controlChannelSystem && reply.controlType == controlStartVideoReply {
 				emit(session.observer, Event{
@@ -196,6 +219,89 @@ func (session *Session) waitForVideo(ctx context.Context, diagnostics *bootstrap
 		diagnostics.media(details)
 		return frame, nil
 	}
+}
+
+// replySessionHeartbeat acknowledges the short Session25-compatible 0A08
+// packet emitted by PLAF203 V3.0.30 after login. The body layout follows the
+// generic TUTK Session25 msgAck0A08 exchange and was verified against the
+// captured PLAF203 packet before applying the device-specific Session16 wrap.
+func (session *Session) replySessionHeartbeat(packet []byte, peer *net.UDPAddr, diagnostics *bootstrapDiagnostics) (bool, error) {
+	inner, decodeErr := decodeDeviceSession(packet, session.ID)
+	if decodeErr != nil {
+		return false, nil
+	}
+	ack, recognized := encodeSessionHeartbeatAck(inner)
+	if !recognized {
+		return false, nil
+	}
+	diagnostics.emitOnce("session_heartbeat_rx", Event{
+		State:        StateBootstrapping,
+		Address:      cloneUDPAddress(peer),
+		Step:         "session_heartbeat_rx",
+		PacketLength: len(inner),
+		Opcode:       deviceSessionOpcode,
+	})
+	if sendErr := session.sendBody(ack); sendErr != nil {
+		return true, fmt.Errorf("send PLAF203 session heartbeat acknowledgement: %w", sendErr)
+	}
+	diagnostics.emitOnce("session_heartbeat_tx", Event{
+		State:        StateBootstrapping,
+		Address:      cloneUDPAddress(session.Address),
+		Step:         "session_heartbeat_tx",
+		PacketLength: len(ack),
+		Opcode:       clientSessionOpcode,
+	})
+	return true, nil
+}
+
+// replyKeepalive handles the 24-byte IOTC keepalive response by preserving
+// the PLAF203 envelope and echo payload while changing only opcode/subtype.
+func (session *Session) replyKeepalive(packet []byte, peer *net.UDPAddr) (bool, error) {
+	reply, recognized := encodeKeepaliveReply(packet)
+	if !recognized {
+		return false, nil
+	}
+	emit(session.observer, Event{
+		State:        StateBootstrapping,
+		Address:      cloneUDPAddress(peer),
+		Step:         "keepalive_rx",
+		PacketLength: len(packet),
+		Opcode:       keepaliveResponseOpcode,
+	})
+	if err := session.transport.SendTo(tutk.TransCodePartial(nil, reply), session.Address); err != nil {
+		return true, fmt.Errorf("send PLAF203 keepalive reply: %w", err)
+	}
+	emit(session.observer, Event{
+		State:        StateBootstrapping,
+		Address:      cloneUDPAddress(session.Address),
+		Step:         "keepalive_tx",
+		PacketLength: len(reply),
+		Opcode:       keepaliveRequestOpcode,
+	})
+	return true, nil
+}
+
+func encodeKeepaliveReply(packet []byte) ([]byte, bool) {
+	if len(packet) != keepalivePacketLength || packet[0] != 0x04 || packet[1] != 0x02 || packet[2] != deviceSessionMagicVersion || packet[3] != sessionFlags || binary.LittleEndian.Uint16(packet[4:6]) != 8 || binary.LittleEndian.Uint16(packet[8:10]) != keepaliveResponseOpcode || binary.LittleEndian.Uint16(packet[10:12]) != keepaliveResponseSubtype {
+		return nil, false
+	}
+	reply := append([]byte(nil), packet...)
+	binary.LittleEndian.PutUint16(reply[8:10], keepaliveRequestOpcode)
+	binary.LittleEndian.PutUint16(reply[10:12], keepaliveRequestSubtype)
+	return reply, true
+}
+
+func encodeSessionHeartbeatAck(inner []byte) ([]byte, bool) {
+	if len(inner) != sessionHeartbeatLength || inner[0] != bootstrapHeartbeatMarker || inner[1] != 0x08 || inner[2] != loginCommandVersion {
+		return nil, false
+	}
+	ack := make([]byte, sessionHeartbeatAckLength)
+	copy(ack[:4], "\x0b\x00\x0b\x00")
+	ack[6] = 1
+	copy(ack[8:10], inner[8:10])
+	ack[10] = 3
+	ack[12] = 3
+	return ack, true
 }
 
 func (session *Session) sendBody(body []byte) error {

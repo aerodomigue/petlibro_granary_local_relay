@@ -52,6 +52,82 @@ func capturedLANSearchResponseWire(t *testing.T) []byte {
 	return wire
 }
 
+func capturedKeepaliveResponseWire(t *testing.T) []byte {
+	t.Helper()
+	wireHex, err := os.ReadFile("testdata/keepalive_response_wire.hex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := hex.DecodeString(strings.Join(strings.Fields(string(wireHex)), ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
+}
+
+func TestCapturedKeepaliveResponseGetsPLAF203Reply(t *testing.T) {
+	wire := capturedKeepaliveResponseWire(t)
+	decoded := tutk.ReverseTransCodePartial(nil, wire)
+	reply, recognized := encodeKeepaliveReply(decoded)
+	if !recognized {
+		t.Fatalf("captured keepalive was rejected: %x", decoded)
+	}
+	if len(reply) != keepalivePacketLength || binary.LittleEndian.Uint16(reply[8:10]) != keepaliveRequestOpcode || binary.LittleEndian.Uint16(reply[10:12]) != keepaliveRequestSubtype || string(reply[12:]) != string(decoded[12:]) {
+		t.Fatalf("unexpected keepalive reply: %x", reply)
+	}
+	if got := tutk.ReverseTransCodePartial(nil, tutk.TransCodePartial(nil, reply)); string(got) != string(reply) {
+		t.Fatalf("keepalive transform did not round-trip: got=%x want=%x", got, reply)
+	}
+}
+
+func TestCapturedSessionHeartbeatGetsSession25Acknowledgement(t *testing.T) {
+	inner := []byte{0x0A, 0x08, 0x0B, 0x00, 0x45, 0x01, 0x00, 0x00, 0x7A, 0xDD, 0x7D, 0x16, 0x00, 0x00, 0x00, 0x00}
+	ack, recognized := encodeSessionHeartbeatAck(inner)
+	if !recognized {
+		t.Fatalf("captured session heartbeat was rejected: %x", inner)
+	}
+	want := []byte{0x0B, 0x00, 0x0B, 0x00, 0x00, 0x00, 0x01, 0x00, 0x7A, 0xDD, 0x03, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	if string(ack) != string(want) {
+		t.Fatalf("session heartbeat acknowledgement=%x want=%x", ack, want)
+	}
+}
+
+func TestSessionHeartbeatAcknowledgementContinuesToMedia(t *testing.T) {
+	transport := &fakeTransport{}
+	sessionID := [8]byte{0x7A, 0x0B, 0x76, 0xB2, 0x0B, 0x77, 0xC9, 0xB6}
+	peer := &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 41135}
+	heartbeat := []byte{0x0A, 0x08, 0x0B, 0x00, 0x45, 0x01, 0x00, 0x00, 0x7A, 0xDD, 0x7D, 0x16, 0x00, 0x00, 0x00, 0x00}
+	transport.addResponse(tutk.TransCodePartial(nil, encodeDeviceSessionPacket(sessionID, heartbeat)), peer)
+	transport.addResponse(tutk.TransCodePartial(nil, testVideoFragment(sessionID, 0x4000, 1, 0, true, 0, append([]byte{0, 0, 0, 1, 0x65, 0x01}, testMediaTrailer(42)...))), peer)
+	session := &Session{
+		ID:        sessionID,
+		Address:   peer,
+		transport: transport,
+		clock:     time.Now,
+		sequence:  9,
+		media:     NewMediaReceiver(),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	frame, err := session.waitForVideo(ctx, newBootstrapDiagnostics(sessionID, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil || !frame.Keyframe {
+		t.Fatalf("frame=%+v", frame)
+	}
+	if len(transport.sent) != 1 {
+		t.Fatalf("heartbeat acknowledgements=%d", len(transport.sent))
+	}
+	packet := tutk.ReverseTransCodePartial(nil, transport.sent[0])
+	if binary.LittleEndian.Uint16(packet[8:10]) != clientSessionOpcode || binary.LittleEndian.Uint16(packet[6:8]) != 9 {
+		t.Fatalf("session heartbeat packet=%x", packet)
+	}
+	if body := packet[sessionHeaderLength:]; string(body) != string([]byte{0x0B, 0x00, 0x0B, 0x00, 0x00, 0x00, 0x01, 0x00, 0x7A, 0xDD, 0x03, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}) {
+		t.Fatalf("session heartbeat body=%x", body)
+	}
+}
+
 func TestEncodeLANSearch3MatchesVerifiedLayout(t *testing.T) {
 	nonce := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
 	packet, err := EncodeLANSearch3(protocolTestUID, nonce)
@@ -335,13 +411,13 @@ func TestDirectConnectorCompletesVerifiedLoginAndKeepsSessionOpen(t *testing.T) 
 	if body := bootstrapPackets[5][sessionHeaderLength:]; len(body) != 24 || body[0] != bootstrapAckMarker || binary.LittleEndian.Uint16(body[16:18]) != 1 {
 		t.Fatalf("ack=%x", body)
 	}
-	assertControlPacket(t, bootstrapPackets[6], controlChannelSystem, controlStartVideo, nil)
+	assertControlPacket(t, bootstrapPackets[6], controlChannelSystem, controlStartVideo, make([]byte, streamStartArgumentSize))
 	startWire := transport.sent[len(transport.sent)-1]
 	startDecoded := tutk.ReverseTransCodePartial(nil, startWire)
-	if len(startWire) != 68 || len(startDecoded) != 68 || binary.LittleEndian.Uint16(startDecoded[8:10]) != clientSessionOpcode || binary.LittleEndian.Uint16(startDecoded[10:12]) != clientSessionSubtype || binary.LittleEndian.Uint16(startDecoded[6:8]) != 8 {
+	if len(startWire) != 76 || len(startDecoded) != 76 || binary.LittleEndian.Uint16(startDecoded[8:10]) != clientSessionOpcode || binary.LittleEndian.Uint16(startDecoded[10:12]) != clientSessionSubtype || binary.LittleEndian.Uint16(startDecoded[6:8]) != 8 {
 		t.Fatalf("unexpected IPCAM_START Session16 envelope: wire=%x decoded=%x", startWire, startDecoded)
 	}
-	if body := startDecoded[sessionHeaderLength:]; len(body) != 40 || binary.LittleEndian.Uint16(body[:2]) != 0x000C || binary.LittleEndian.Uint16(body[16:18]) != controlChannelSystem || binary.LittleEndian.Uint32(body[controlInnerLength:]) != controlStartVideo {
+	if body := startDecoded[sessionHeaderLength:]; len(body) != 48 || binary.LittleEndian.Uint16(body[:2]) != 0x000C || binary.LittleEndian.Uint16(body[16:18]) != controlChannelSystem || binary.LittleEndian.Uint32(body[controlInnerLength:]) != controlStartVideo || string(body[controlInnerLength+4:]) != string(make([]byte, streamStartArgumentSize)) {
 		t.Fatalf("unexpected IPCAM_START body: %x", body)
 	}
 	if transport.CloseCount() != 0 {
