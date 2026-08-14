@@ -106,6 +106,25 @@ class DashboardContext:
             ),
         )
 
+    def home(self) -> dict[str, Any]:
+        """Return the minimal projection required by the everyday home screen."""
+        rows = [self._device_row(entry) for entry in self._registry.entries()]
+        rows.sort(key=lambda row: str(row["device_id"]))
+        telemetry = self._telemetry.snapshot()
+        return cast(
+            dict[str, Any],
+            sanitize_value(
+                {
+                    "status": {
+                        "relay": {"status": "running", "uptime_seconds": telemetry["uptime_seconds"]},
+                        "local_mqtt": telemetry["local_mqtt"],
+                        "devices": _summarize(rows, self._config.auto_enroll),
+                    },
+                    "devices": [self._daily_row(row) for row in rows],
+                }
+            ),
+        )
+
     def queue_totals(self) -> dict[str, Any]:
         """Return queue depth across every device, for the header and overview."""
         depth_by_device = self._queue.depth_by_device()
@@ -151,6 +170,38 @@ class DashboardContext:
                     "local_responder": self.responder(device_id),
                     "controls": self.controls(device_id),
                     "camera": self.camera(device_id, entry.product_id),
+                }
+            ),
+        )
+
+    def daily_device_detail(self, device_id: str) -> dict[str, Any] | None:
+        """Return user-facing data without credentials or raw diagnostics."""
+        entry = next((item for item in self._registry.entries() if item.client_id == device_id), None)
+        if entry is None:
+            return None
+        row = self._daily_row(self._device_row(entry))
+        return cast(
+            dict[str, Any],
+            sanitize_value(
+                {
+                    "device": row,
+                    "state": {
+                        "desired": [
+                            {"key": key, "value": value}
+                            for key, value in self._shadow.get_desired(device_id).items()
+                        ],
+                        "local_confirmed": [
+                            {"key": key, "value": value}
+                            for key, value in self._shadow.get_local_confirmed(device_id).items()
+                        ],
+                        "schedule_plans": [
+                            {"plan": plan.plan, "source": plan.source, "updated_at": plan.updated_at}
+                            for plan in self._shadow.get_schedule_plans(device_id)
+                        ],
+                    },
+                    "controls": self.controls(device_id),
+                    "camera": self._daily_camera(device_id, entry.product_id),
+                    "activity": self._daily_activity(device_id),
                 }
             ),
         )
@@ -364,6 +415,46 @@ class DashboardContext:
             ),
             "availability": metrics["upstream"]["availability"],
         }
+
+    def _daily_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Reduce a device row to fields useful in normal dashboard views."""
+        device_id = str(row["device_id"])
+        return {
+            "device_id": device_id,
+            "product_id": row["product_id"],
+            "local_state": row["local_state"],
+            "last_seen_at": row["last_seen_at"],
+            "rssi": row["rssi"],
+            "schedule": [
+                {
+                    "execution_time": plan.plan.get("executionTime"),
+                    "grain_num": plan.plan.get("grainNum"),
+                    "repeat_day": plan.plan.get("repeatDay", []),
+                }
+                for plan in self._shadow.get_schedule_plans(device_id)
+                if isinstance(plan.plan.get("executionTime"), str)
+                and isinstance(plan.plan.get("grainNum"), int)
+                and isinstance(plan.plan.get("repeatDay", []), list)
+            ],
+        }
+
+    def _daily_camera(self, device_id: str, product_id: str | None) -> dict[str, Any]:
+        """Return only the availability values required by the player."""
+        camera = self.camera(device_id, product_id)
+        return {
+            "available": camera.get("available", False),
+            "online": camera.get("online", False),
+            "webrtc": camera.get("webrtc", False),
+            "bridge_registered": camera.get("bridge_registered", False),
+            "go2rtc_reachable": camera.get("go2rtc_reachable", False),
+        }
+
+    def _daily_activity(self, device_id: str) -> list[dict[str, Any]]:
+        """Project activity without a raw protocol payload."""
+        return [
+            {"timestamp": event.get("timestamp"), "cmd": event.get("cmd")}
+            for event in self._telemetry.events(30, device_id=device_id)
+        ]
 
 
 def _summarize(rows: list[dict[str, Any]], auto_enroll: bool) -> dict[str, Any]:

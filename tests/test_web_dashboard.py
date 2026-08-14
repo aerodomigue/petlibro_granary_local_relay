@@ -369,6 +369,18 @@ def test_devices_api_contract_supports_one_and_many_device_fleet_rendering(clien
     assert isinstance(payload["summary"], dict)
     assert [row["device_id"] for row in payload["devices"]] == [DEVICE_A, DEVICE_B, DEVICE_C]
     assert all("queue_pending" in row and "cloud_state" in row for row in payload["devices"])
+    assert "schedule" not in payload["devices"][0]
+
+
+def test_daily_projections_hide_diagnostics_but_keep_feeder_actions(client: TestClient) -> None:
+    """The normal UI API contains daily state without identity or raw payloads."""
+    home = client.get("/api/home").json()
+    daily = client.get(f"/api/devices/{DEVICE_A}/daily").json()
+
+    assert isinstance(home["devices"][0]["schedule"], list)
+    assert {"ip", "mac", "username", "client_id", "firmware"}.isdisjoint(daily["device"])
+    assert "raw_messages" not in daily["state"]
+    assert "controls" in daily and "schedule_plans" in daily["state"]
 
 
 def test_empty_devices_api_contract_is_renderable(

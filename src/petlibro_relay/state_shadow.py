@@ -542,9 +542,24 @@ def _decode_raw_payload(payload: bytes, command: str | None = None) -> Any:
         decoded = json.loads(payload)
     except (json.JSONDecodeError, UnicodeDecodeError):
         return payload.decode("utf-8", errors="replace")
-    if command == "DEVICE_START_EVENT" and isinstance(decoded, dict) and "uuid" in decoded:
-        return {**decoded, "uuid": "<redacted>"}
-    return decoded
+    return _redact_raw_identity(decoded)
+
+
+_RAW_IDENTITY_KEYWORDS = ("uid", "uuid", "tutk", "kalay", "username")
+
+
+def _redact_raw_identity(value: Any) -> Any:
+    """Remove camera and identity values from dashboard raw-message previews."""
+    if isinstance(value, list):
+        return [_redact_raw_identity(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: "<redacted>"
+        if any(keyword in key.lower() for keyword in _RAW_IDENTITY_KEYWORDS)
+        else _redact_raw_identity(item)
+        for key, item in value.items()
+    }
 
 
 def _optional_string(value: object) -> str | None:

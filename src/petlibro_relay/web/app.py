@@ -208,6 +208,7 @@ def create_app(context: DashboardContext) -> FastAPI:
     @app.get("/ntp", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/logs", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/system", response_class=HTMLResponse, include_in_schema=False)
+    @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
     def global_dashboard_route() -> str:
         """Serve the shell for a deep link to a global dashboard view."""
         return DASHBOARD_HTML
@@ -254,6 +255,21 @@ def create_app(context: DashboardContext) -> FastAPI:
         """Return one row per known device plus aggregate counts."""
         return context.devices()
 
+    @app.get("/api/home")
+    def home() -> dict[str, object]:
+        """Return the compact, non-diagnostic home-screen projection."""
+        return context.home()
+
+    @app.get("/api/devices/{device_id}/daily")
+    def daily_device_detail(device_id: str) -> dict[str, object]:
+        """Return normal user-facing data without raw state or credentials."""
+        if not DEVICE_ID_PATTERN.fullmatch(device_id):
+            raise HTTPException(status_code=404, detail="Unknown device")
+        detail = context.daily_device_detail(device_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        return detail
+
     @app.get("/api/devices/{device_id}")
     def device_detail(
         device_id: str, raw_limit: int = Query(100, ge=1, le=MAX_PAGE_SIZE)
@@ -295,7 +311,11 @@ def create_app(context: DashboardContext) -> FastAPI:
     @app.post("/api/devices/{device_id}/camera/viewers/{viewer_id}", status_code=204)
     def activate_camera_viewer(device_id: str, viewer_id: str) -> Response:
         """Activate one explicit logical camera viewer."""
-        if not DEVICE_ID_PATTERN.fullmatch(device_id) or not WEBRTC_SESSION_ID_PATTERN.fullmatch(viewer_id):
+        if (
+            not DEVICE_ID_PATTERN.fullmatch(device_id)
+            or context.device_detail(device_id, 1) is None
+            or not WEBRTC_SESSION_ID_PATTERN.fullmatch(viewer_id)
+        ):
             raise HTTPException(status_code=404, detail="Unknown camera viewer")
         if not context.activate_camera_viewer(device_id, viewer_id):
             raise HTTPException(status_code=503, detail="Camera stream is unavailable")
@@ -304,14 +324,22 @@ def create_app(context: DashboardContext) -> FastAPI:
     @app.put("/api/devices/{device_id}/camera/viewers/{viewer_id}", status_code=204)
     def heartbeat_camera_viewer(device_id: str, viewer_id: str) -> Response:
         """Refresh an existing logical camera viewer."""
-        if not context.heartbeat_camera_viewer(device_id, viewer_id):
+        if (
+            not DEVICE_ID_PATTERN.fullmatch(device_id)
+            or context.device_detail(device_id, 1) is None
+            or not context.heartbeat_camera_viewer(device_id, viewer_id)
+        ):
             raise HTTPException(status_code=404, detail="Unknown camera viewer")
         return Response(status_code=204)
 
     @app.delete("/api/devices/{device_id}/camera/viewers/{viewer_id}", status_code=204)
     def deactivate_camera_viewer(device_id: str, viewer_id: str) -> Response:
         """Deactivate one logical viewer."""
-        if not context.deactivate_camera_viewer(device_id, viewer_id, "client_closed"):
+        if (
+            not DEVICE_ID_PATTERN.fullmatch(device_id)
+            or context.device_detail(device_id, 1) is None
+            or not context.deactivate_camera_viewer(device_id, viewer_id, "client_closed")
+        ):
             raise HTTPException(status_code=404, detail="Unknown camera viewer")
         return Response(status_code=204)
 
