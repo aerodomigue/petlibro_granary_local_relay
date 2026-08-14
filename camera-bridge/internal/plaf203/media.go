@@ -37,6 +37,14 @@ type MediaStats struct {
 	LastFrameAt    time.Time
 }
 
+// MediaObservation describes a non-video media packet without retaining its
+// payload. It is used only for rate-limited codec discovery diagnostics.
+type MediaObservation struct {
+	ChannelID     uint16
+	PayloadLength int
+	FrameNumber   uint32
+}
+
 type mediaAssembly struct {
 	frameNumber       uint32
 	expectedFragments uint8
@@ -149,6 +157,33 @@ func (receiver *MediaReceiver) HandlePacket(packet []byte, expectedSessionID [8]
 	receiver.stats.BytesReceived += uint64(len(frame.Data))
 	receiver.stats.LastFrameAt = now.UTC()
 	return frame, nil
+}
+
+// ObserveNonVideoPacket extracts safe metadata for a Session16 media packet
+// that is not one of the two H.264 channels. It deliberately does not infer an
+// audio codec from a channel number or retain any camera payload.
+func (receiver *MediaReceiver) ObserveNonVideoPacket(packet []byte, expectedSessionID [8]byte) (*MediaObservation, error) {
+	inner, err := decodeDeviceSession(packet, expectedSessionID)
+	if err != nil {
+		return nil, err
+	}
+	if len(inner) < mediaHeaderLength || inner[0] != 0x0C || inner[2] != loginCommandVersion {
+		return nil, nil
+	}
+	channelID := binary.LittleEndian.Uint16(inner[16:18])
+	channel := uint8(channelID)
+	if channel == h264MainChannel || channel == h264SubChannel {
+		return nil, nil
+	}
+	payloadLength := int(binary.LittleEndian.Uint16(inner[24:26]))
+	if payloadLength == 0 || mediaHeaderLength+payloadLength > len(inner) {
+		return nil, fmt.Errorf("invalid PLAF203 non-video media payload length %d", payloadLength)
+	}
+	return &MediaObservation{
+		ChannelID:     channelID,
+		PayloadLength: payloadLength,
+		FrameNumber:   binary.LittleEndian.Uint32(inner[28:32]),
+	}, nil
 }
 
 // Snapshot returns immutable diagnostic counters for one session.

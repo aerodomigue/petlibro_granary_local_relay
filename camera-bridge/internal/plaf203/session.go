@@ -50,6 +50,7 @@ type Event struct {
 	Session25SeqRecvPkt0 uint16
 	Session25SeqRecvPkt1 uint16
 	Session25SeqSendCnt  uint16
+	FrameNumber          uint32
 	Reason               string
 	PacketCount          uint64
 	ByteCount            uint64
@@ -277,6 +278,14 @@ func (session *Session) startMediaReceiver() {
 		for {
 			packet, peer, err := session.transport.Receive(receiveContext)
 			if err != nil {
+				if !errors.Is(err, context.Canceled) {
+					emit(session.observer, Event{
+						State:   StateFailed,
+						Address: cloneUDPAddress(session.Address),
+						Step:    "media_receive_failed",
+						Error:   err.Error(),
+					})
+				}
 				return
 			}
 			decoded := tutk.ReverseTransCodePartial(nil, packet)
@@ -298,7 +307,21 @@ func (session *Session) startMediaReceiver() {
 				}
 			}
 			frame, parseErr := session.media.HandlePacket(decoded, session.ID, session.clock())
-			if parseErr != nil || frame == nil {
+			if parseErr != nil {
+				continue
+			}
+			if frame == nil {
+				if observation, observationErr := session.media.ObserveNonVideoPacket(decoded, session.ID); observationErr == nil && observation != nil && session.noteUnknownMediaEvent(session.clock()) {
+					emit(session.observer, Event{
+						State:          StateStreaming,
+						Address:        session.Address,
+						Step:           "media_unknown",
+						PacketLength:   len(packet),
+						BodyLength:     observation.PayloadLength,
+						SessionChannel: observation.ChannelID,
+						FrameNumber:    observation.FrameNumber,
+					})
+				}
 				continue
 			}
 			session.noteSession25Media(decoded)
@@ -309,6 +332,16 @@ func (session *Session) startMediaReceiver() {
 			emit(session.observer, Event{State: StateStreaming, Address: session.Address, Step: "media_stats", Frame: frame})
 		}
 	}()
+}
+
+func (session *Session) noteUnknownMediaEvent(now time.Time) bool {
+	session.mediaMu.Lock()
+	defer session.mediaMu.Unlock()
+	if now.Sub(session.lastUnknownMediaEvent) < mediaStatsLogInterval {
+		return false
+	}
+	session.lastUnknownMediaEvent = now
+	return true
 }
 
 func (session *Session) noteMediaEvent(now time.Time) bool {

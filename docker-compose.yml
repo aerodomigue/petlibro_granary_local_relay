@@ -36,6 +36,7 @@ services:
     network_mode: host
     environment:
       PETLIBRO_CAMERA_DISCOVERY_BROADCAST_FALLBACK: ${PETLIBRO_CAMERA_DISCOVERY_BROADCAST_FALLBACK:-true}
+      PETLIBRO_CAMERA_IDLE_TIMEOUT_SECONDS: ${PETLIBRO_CAMERA_IDLE_TIMEOUT_SECONDS:-10}
 
   # Official go2rtc consumes the bridge's local RTSP source and exposes WebRTC.
   # Host networking gives browser ICE candidates the VM's reachable LAN address.

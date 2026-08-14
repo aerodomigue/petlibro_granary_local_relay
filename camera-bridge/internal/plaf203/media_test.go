@@ -101,6 +101,26 @@ func TestMediaReceiverRejectsUnexpectedSessionAndIncompleteFrame(t *testing.T) {
 	}
 }
 
+func TestMediaReceiverObservesUnknownMediaWithoutInventingAnAudioCodec(t *testing.T) {
+	sessionID := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+	receiver := NewMediaReceiver()
+	packet := testVideoFragment(sessionID, 0x4000, 1, 0, true, 9, []byte{0x12, 0x34})
+	inner := packet[sessionHeaderLength:]
+	inner[16] = 0x06
+	inner[17] = 0x00
+
+	observation, err := receiver.ObserveNonVideoPacket(packet, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation == nil || observation.ChannelID != 0x0006 || observation.PayloadLength != 2 || observation.FrameNumber != 9 {
+		t.Fatalf("observation=%+v", observation)
+	}
+	if receiver.Snapshot().AudioCodec != "" {
+		t.Fatalf("unconfirmed channel was incorrectly classified as audio: %+v", receiver.Snapshot())
+	}
+}
+
 func TestMediaReceiversKeepDeviceSessionsIsolated(t *testing.T) {
 	firstID := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
 	secondID := [8]byte{8, 7, 6, 5, 4, 3, 2, 1}

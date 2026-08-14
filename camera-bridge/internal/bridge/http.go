@@ -59,7 +59,7 @@ func healthHandler(writer http.ResponseWriter, request *http.Request) {
 		"healthy":          true,
 		"media_protocol":   "plaf203_h264_observation",
 		"tutk_dependency":  "github.com/AlexxIT/go2rtc/pkg/tutk",
-		"stream_on_demand": false,
+		"stream_on_demand": true,
 	})
 }
 

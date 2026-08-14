@@ -17,8 +17,11 @@ import (
 )
 
 const (
-	petlibroUIDLength = 20
-	streamPrefix      = "plaf203_"
+	petlibroUIDLength  = 20
+	streamPrefix       = "plaf203_"
+	defaultIdleTimeout = 10 * time.Second
+	reconnectMinDelay  = time.Second
+	reconnectMaxDelay  = 10 * time.Second
 )
 
 var (
@@ -54,23 +57,28 @@ type Device struct {
 }
 
 type deviceRecord struct {
-	device           Device
-	uid              string
-	ip               net.IP
-	cancel           context.CancelFunc
-	session          *plaf203.Session
-	media            *mediaPublisher
-	mediaUnsubscribe func()
-	attemptID        uint64
-	connectActive    bool
+	device            Device
+	uid               string
+	ip                net.IP
+	cancel            context.CancelFunc
+	session           *plaf203.Session
+	media             *mediaPublisher
+	mediaUnsubscribe  func()
+	idleTimer         *time.Timer
+	reconnectTimer    *time.Timer
+	reconnectAttempts uint
+	attemptID         uint64
+	connectActive     bool
 }
 
 // Registry keeps device registrations isolated by device ID and owns one
 // bounded, explicitly requested PLAF203 preamble attempt per device.
 type Registry struct {
-	mu        sync.RWMutex
-	devices   map[string]deviceRecord
-	connector plaf203.Connector
+	mu             sync.RWMutex
+	devices        map[string]deviceRecord
+	connector      plaf203.Connector
+	idleTimeout    time.Duration
+	reconnectDelay func(uint) time.Duration
 }
 
 // NewRegistry creates an empty in-memory registry. Durable UID storage is owned
@@ -89,9 +97,22 @@ func NewRegistryWithBroadcastFallback(broadcastFallback bool) *Registry {
 
 // NewRegistryWithConnector allows protocol behavior to be isolated by fakes in tests.
 func NewRegistryWithConnector(connector plaf203.Connector) *Registry {
+	return NewRegistryWithConnectorAndIdleTimeout(connector, defaultIdleTimeout)
+}
+
+// NewRegistryWithConnectorAndIdleTimeout configures the bounded grace period
+// between the final RTSP consumer disconnecting and closing the feeder session.
+// It is intentionally public so tests can validate lifecycle behavior without
+// waiting for the production default.
+func NewRegistryWithConnectorAndIdleTimeout(connector plaf203.Connector, idleTimeout time.Duration) *Registry {
+	if idleTimeout <= 0 {
+		idleTimeout = defaultIdleTimeout
+	}
 	return &Registry{
-		devices:   make(map[string]deviceRecord),
-		connector: connector,
+		devices:        make(map[string]deviceRecord),
+		connector:      connector,
+		idleTimeout:    idleTimeout,
+		reconnectDelay: reconnectDelay,
 	}
 }
 
@@ -147,6 +168,12 @@ func (r *Registry) Delete(deviceID string) bool {
 	record, found := r.devices[deviceID]
 	delete(r.devices, deviceID)
 	r.mu.Unlock()
+	if found && record.idleTimer != nil {
+		record.idleTimer.Stop()
+	}
+	if found && record.reconnectTimer != nil {
+		record.reconnectTimer.Stop()
+	}
 	if found && record.cancel != nil {
 		record.cancel()
 	}
@@ -201,29 +228,9 @@ func (r *Registry) Disconnect(deviceID string) bool {
 		r.mu.Unlock()
 		return false
 	}
-	cancel := record.cancel
-	session := record.session
-	record.attemptID++
-	record.connectActive = false
-	record.cancel = nil
-	record.session = nil
-	mediaUnsubscribe := record.mediaUnsubscribe
-	record.mediaUnsubscribe = nil
-	record.device.ConnectionState = plaf203.StateIdle
-	record.device.LastError = ""
-	record.device.LastTransitionAt = time.Now().UTC()
-	record.device.UpdatedAt = record.device.LastTransitionAt
-	r.devices[deviceID] = record
+	resources := r.disconnectLocked(deviceID, record, plaf203.StateIdle, "")
 	r.mu.Unlock()
-	if mediaUnsubscribe != nil {
-		mediaUnsubscribe()
-	}
-	if cancel != nil {
-		cancel()
-	}
-	if session != nil {
-		_ = session.Close()
-	}
+	resources.close()
 	return true
 }
 
@@ -282,6 +289,7 @@ func (r *Registry) connected(deviceID string, attemptID uint64, session *plaf203
 }
 
 func (r *Registry) addMediaConsumer(deviceID string, consumer *rtsp.Conn) (func(), error) {
+	r.cancelIdleDisconnect(deviceID)
 	_, _, connectErr := r.Connect(deviceID)
 	if connectErr != nil {
 		return nil, connectErr
@@ -303,17 +311,24 @@ func (r *Registry) addMediaConsumer(deviceID string, consumer *rtsp.Conn) (func(
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			r.mu.Lock()
-			record, found := r.devices[deviceID]
-			if found && record.device.MediaConsumers > 0 {
-				record.device.MediaConsumers--
-				record.device.UpdatedAt = time.Now().UTC()
-				r.devices[deviceID] = record
-			}
-			r.mu.Unlock()
-			log.Printf("CAMERA MEDIA CLIENT DISCONNECTED device=%s", deviceID)
+			r.releaseMediaConsumer(deviceID)
 		})
 	}, nil
+}
+
+func (r *Registry) releaseMediaConsumer(deviceID string) {
+	r.mu.Lock()
+	record, found := r.devices[deviceID]
+	if found && record.device.MediaConsumers > 0 {
+		record.device.MediaConsumers--
+		record.device.UpdatedAt = time.Now().UTC()
+		if record.device.MediaConsumers == 0 {
+			r.scheduleIdleDisconnectLocked(deviceID, &record)
+		}
+		r.devices[deviceID] = record
+	}
+	r.mu.Unlock()
+	log.Printf("CAMERA MEDIA CLIENT DISCONNECTED device=%s", deviceID)
 }
 
 func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.Event) {
@@ -324,11 +339,24 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 		return
 	}
 	now := time.Now().UTC()
+	if event.State == plaf203.StateFailed && event.Step == "media_receive_failed" {
+		resources := r.disconnectLocked(deviceID, record, plaf203.StateFailed, event.Error)
+		record = r.devices[deviceID]
+		if record.device.MediaConsumers > 0 {
+			r.scheduleReconnectLocked(deviceID, &record)
+			r.devices[deviceID] = record
+		}
+		r.mu.Unlock()
+		resources.close()
+		log.Printf("CAMERA SESSION LOST device=%s error=%s", deviceID, event.Error)
+		return
+	}
 	record.device.ConnectionState = event.State
 	record.device.LastError = ""
 	if event.State == plaf203.StateStreaming {
 		record.device.StreamAvailable = true
 		record.device.Reason = ""
+		record.reconnectAttempts = 0
 	}
 	record.device.LastTransitionAt = now
 	record.device.UpdatedAt = now
@@ -429,7 +457,145 @@ func (r *Registry) transition(deviceID string, attemptID uint64, event plaf203.E
 		if event.Frame != nil {
 			log.Printf("CAMERA VIDEO FRAME device=%s codec=%s keyframe=%t bytes=%d timestamp=%d", deviceID, event.Frame.Codec, event.Frame.Keyframe, len(event.Frame.Data), event.Frame.Timestamp)
 		}
+		if event.Step == "media_unknown" {
+			log.Printf("DEBUG CAMERA MEDIA UNKNOWN device=%s channel=0x%04x bytes=%d frame=%d", deviceID, event.SessionChannel, event.BodyLength, event.FrameNumber)
+		}
 	}
+}
+
+type sessionResources struct {
+	cancel      context.CancelFunc
+	session     *plaf203.Session
+	unsubscribe func()
+}
+
+func (resources sessionResources) close() {
+	if resources.unsubscribe != nil {
+		resources.unsubscribe()
+	}
+	if resources.cancel != nil {
+		resources.cancel()
+	}
+	if resources.session != nil {
+		_ = resources.session.Close()
+	}
+}
+
+func (r *Registry) disconnectLocked(deviceID string, record deviceRecord, state plaf203.SessionState, lastError string) sessionResources {
+	if record.idleTimer != nil {
+		record.idleTimer.Stop()
+		record.idleTimer = nil
+	}
+	if record.reconnectTimer != nil {
+		record.reconnectTimer.Stop()
+		record.reconnectTimer = nil
+	}
+	resources := sessionResources{
+		cancel:      record.cancel,
+		session:     record.session,
+		unsubscribe: record.mediaUnsubscribe,
+	}
+	now := time.Now().UTC()
+	record.attemptID++
+	record.connectActive = false
+	record.cancel = nil
+	record.session = nil
+	record.mediaUnsubscribe = nil
+	record.device.ConnectionState = state
+	record.device.StreamAvailable = false
+	record.device.LastError = lastError
+	record.device.Reason = ""
+	if state == plaf203.StateFailed {
+		record.device.Reason = "camera_session_lost"
+	}
+	record.device.LastTransitionAt = now
+	record.device.UpdatedAt = now
+	r.devices[deviceID] = record
+	return resources
+}
+
+func (r *Registry) cancelIdleDisconnect(deviceID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, found := r.devices[deviceID]
+	if !found || record.idleTimer == nil {
+		return
+	}
+	record.idleTimer.Stop()
+	record.idleTimer = nil
+	r.devices[deviceID] = record
+	log.Printf("CAMERA IDLE STOP CANCELED device=%s", deviceID)
+}
+
+func (r *Registry) scheduleIdleDisconnectLocked(deviceID string, record *deviceRecord) {
+	if record.idleTimer != nil || r.idleTimeout <= 0 {
+		return
+	}
+	record.idleTimer = time.AfterFunc(r.idleTimeout, func() {
+		r.disconnectIfIdle(deviceID)
+	})
+	log.Printf("CAMERA IDLE STOP SCHEDULED device=%s delay=%s", deviceID, r.idleTimeout)
+}
+
+func (r *Registry) disconnectIfIdle(deviceID string) {
+	r.mu.Lock()
+	record, found := r.devices[deviceID]
+	if !found || record.device.MediaConsumers != 0 {
+		r.mu.Unlock()
+		return
+	}
+	resources := r.disconnectLocked(deviceID, record, plaf203.StateIdle, "")
+	r.mu.Unlock()
+	resources.close()
+	log.Printf("CAMERA STREAM STOP device=%s reason=idle", deviceID)
+}
+
+func (r *Registry) scheduleReconnectLocked(deviceID string, record *deviceRecord) {
+	if record.reconnectTimer != nil || record.device.MediaConsumers == 0 {
+		return
+	}
+	record.reconnectAttempts++
+	delayProvider := r.reconnectDelay
+	if delayProvider == nil {
+		delayProvider = reconnectDelay
+	}
+	delay := delayProvider(record.reconnectAttempts)
+	record.reconnectTimer = time.AfterFunc(delay, func() {
+		r.reconnectIfConsumed(deviceID)
+	})
+	log.Printf("CAMERA RECONNECT SCHEDULED device=%s attempt=%d delay=%s", deviceID, record.reconnectAttempts, delay)
+}
+
+func (r *Registry) reconnectIfConsumed(deviceID string) {
+	r.mu.Lock()
+	record, found := r.devices[deviceID]
+	if !found {
+		r.mu.Unlock()
+		return
+	}
+	record.reconnectTimer = nil
+	r.devices[deviceID] = record
+	consumed := record.device.MediaConsumers > 0
+	r.mu.Unlock()
+	if !consumed {
+		return
+	}
+	if _, started, err := r.Connect(deviceID); err != nil {
+		log.Printf("CAMERA RECONNECT FAILED device=%s error=%v", deviceID, err)
+	} else if started {
+		log.Printf("CAMERA RECONNECT device=%s", deviceID)
+	}
+}
+
+func reconnectDelay(attempt uint) time.Duration {
+	delay := reconnectMinDelay
+	for retry := uint(1); retry < attempt && delay < reconnectMaxDelay; retry++ {
+		delay *= 2
+	}
+	if delay > reconnectMaxDelay {
+		return reconnectMaxDelay
+	}
+	return delay
 }
 
 func (r *Registry) fail(deviceID string, attemptID uint64, connectionError error) {
@@ -450,6 +616,10 @@ func (r *Registry) fail(deviceID string, attemptID uint64, connectionError error
 	record.device.LastTransitionAt = now
 	record.device.UpdatedAt = now
 	r.devices[deviceID] = record
+	if record.device.MediaConsumers > 0 {
+		r.scheduleReconnectLocked(deviceID, &record)
+		r.devices[deviceID] = record
+	}
 	r.mu.Unlock()
 	if failedState == plaf203.StateLoggingIn {
 		log.Printf("CAMERA LOGIN FAILED device=%s error=%v", deviceID, connectionError)

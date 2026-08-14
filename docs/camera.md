@@ -20,9 +20,14 @@ after a sidecar restart. The browser exchanges SDP only with the relay at
 source URL. H.264 is packetized and forwarded unchanged: no decoder, FFmpeg,
 or transcoder is started.
 
-The bridge now implements the bounded, explicit connection preamble exposed by
+The bridge implements the bounded, explicit connection preamble exposed by
 `POST /devices/{device_id}/connect` and cancelled by
-`POST /devices/{device_id}/disconnect`. It is never retried automatically.
+`POST /devices/{device_id}/disconnect`. RTSP is on-demand: the first go2rtc
+consumer starts one feeder session, all WebRTC viewers share that producer, and
+the final RTSP consumer schedules a bounded idle disconnect. A new consumer
+cancels the pending idle stop. If an established feeder UDP session fails while
+consumers remain, the bridge retries with a bounded 1, 2, 4, 8, then 10-second
+backoff; it never retries an idle camera.
 `GET /devices` exposes a safe per-device state only: `idle`, `discovering`,
 `knocking`, `logging_in`, `connected`, `bootstrapping`, `streaming`, or
 `failed`, plus the most recent safe error and transition timestamp. During a
@@ -65,7 +70,8 @@ confirmed in the local capture:
    AAC, so audio is intentionally not parsed or claimed.
 
 `POST /devices/{device_id}/disconnect` closes that authenticated transport.
-No automatic retry occurs. Bootstrap and H.264 reassembly have fixed
+`PETLIBRO_CAMERA_IDLE_TIMEOUT_SECONDS` controls the last-consumer grace period
+and defaults to 10 seconds. Bootstrap and H.264 reassembly have fixed
 timeouts, strict Session16 ID matching, bounded fragment/frame sizes, and
 per-session isolation. Duplicate UDP fragments are ignored; incomplete or
 malformed frames never create a streaming state.
@@ -153,6 +159,7 @@ PETLIBRO_CAMERA_BRIDGE_PORT=8081
 PETLIBRO_CAMERA_BRIDGE_TIMEOUT_SECONDS=1
 PETLIBRO_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS=5
 PETLIBRO_CAMERA_DISCOVERY_BROADCAST_FALLBACK=true
+PETLIBRO_CAMERA_IDLE_TIMEOUT_SECONDS=10
 ```
 
 `PETLIBRO_CAMERA_DISCOVERY_BROADCAST_FALLBACK` defaults to `true`. Broadcast
@@ -177,7 +184,12 @@ password, or cloud contract.
 For a configured device, the deterministic stream name is
 `plaf203_<device_id>`. One go2rtc producer pulls one bridge RTSP session; any
 number of dashboard WebRTC consumers share it, so opening a second browser
-does not open a second feeder session. The current bridge keeps that verified
-session alive after consumers disconnect; lazy teardown can be added later
-without changing the RTSP or WebRTC contracts. Audio remains intentionally out
-of scope until an AAC payload is captured and validated.
+does not open a second feeder session. When the last go2rtc RTSP consumer
+disappears, the bridge stops the feeder session after the configurable idle
+grace. The dashboard closes its `RTCPeerConnection` on page navigation and
+after 15 seconds in a hidden tab; its reconnect delays are 1, 2, 5, then 10
+seconds. Audio remains intentionally out of scope: the current live capture
+does not contain an identifiable audio stream, and the incomplete channel-6
+fragments in the official capture do not establish a codec or an audio-start
+command. The bridge logs only rate-limited channel/size diagnostics for future
+offline identification and never labels an unconfirmed channel as AAC.

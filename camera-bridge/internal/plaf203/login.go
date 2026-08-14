@@ -73,24 +73,25 @@ type LoginResponse struct {
 // Session owns one authenticated UDP transport and its bounded, diagnostic
 // H.264 observation state. It never decodes or publishes media.
 type Session struct {
-	ID             [8]byte
-	Address        *net.UDPAddr
-	transport      DatagramTransport
-	clock          func() time.Time
-	sequence       uint16
-	session25      session25State
-	media          *MediaReceiver
-	observer       Observer
-	sendMu         sync.Mutex
-	mediaMu        sync.Mutex
-	frameMu        sync.Mutex
-	frameCallbacks map[uint64]FrameCallback
-	latestKeyframe *VideoFrame
-	nextFrameID    uint64
-	cancelReceive  context.CancelFunc
-	lastMediaEvent time.Time
-	closeOnce      sync.Once
-	closeErr       error
+	ID                    [8]byte
+	Address               *net.UDPAddr
+	transport             DatagramTransport
+	clock                 func() time.Time
+	sequence              uint16
+	session25             session25State
+	media                 *MediaReceiver
+	observer              Observer
+	sendMu                sync.Mutex
+	mediaMu               sync.Mutex
+	frameMu               sync.Mutex
+	frameCallbacks        map[uint64]FrameCallback
+	latestKeyframe        *VideoFrame
+	nextFrameID           uint64
+	cancelReceive         context.CancelFunc
+	lastMediaEvent        time.Time
+	lastUnknownMediaEvent time.Time
+	closeOnce             sync.Once
+	closeErr              error
 }
 
 // FrameCallback receives one complete H.264 access unit. Implementations must

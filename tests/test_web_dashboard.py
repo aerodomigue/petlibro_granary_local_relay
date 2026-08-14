@@ -539,6 +539,19 @@ def test_camera_player_survives_device_status_refreshes() -> None:
     assert "video.onloadeddata=()=>{if(runtime.cameraPlayer===player)setCameraPlayerState('Live','live')}" in DASHBOARD_HTML
 
 
+def test_camera_player_closes_cleanly_and_retries_with_backoff() -> None:
+    """Camera UI owns one peer connection and releases it when no longer visible."""
+    for marker in (
+        "CAMERA_HIDDEN_CLOSE_DELAY_MS=15000",
+        "CAMERA_RETRY_DELAYS_MS=[1000,2000,5000,10000]",
+        "stream.getTracks().forEach(track=>track.stop())",
+        "window.addEventListener('pagehide',closeCameraPlayer)",
+        "document.addEventListener('visibilitychange',handleCameraVisibility)",
+        "setCameraPlayerState('Starting stream…','waiting')",
+    ):
+        assert marker in DASHBOARD_HTML
+
+
 def test_controls_and_schedule_use_conditional_human_friendly_components() -> None:
     """The device UI hides protocol details behind explicit control components."""
     for marker in (
