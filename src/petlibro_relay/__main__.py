@@ -14,7 +14,6 @@ from .camera import (
     CameraBridgeRegistrar,
     CameraStatusService,
     Go2RtcStreamClient,
-    Go2RtcStreamReconciler,
 )
 from .credential_capture_proxy import CredentialCaptureProxy, DeviceSessionListener
 from .device_manager import DeviceManager
@@ -154,11 +153,6 @@ def main() -> None:
         camera_registrar,
         lambda: ((entry.device_id, entry.uid, entry.feeder_ip) for entry in shadow.get_camera_uids()),
     )
-    go2rtc_reconciler = Go2RtcStreamReconciler(
-        config.go2rtc,
-        Go2RtcStreamClient(config.go2rtc),
-        lambda: ((entry.device_id, entry.uid, entry.feeder_ip) for entry in shadow.get_camera_uids()),
-    )
     queue = MessageQueue(config.queue_db_path, config.max_queue_size)
     telemetry = RelayTelemetry()
     registry = DeviceRegistry(
@@ -228,7 +222,6 @@ def main() -> None:
     bridge_holder.bridge = bridge
     try:
         camera_reconciler.start()
-        go2rtc_reconciler.start()
         # Every already-enrolled device comes up here; anything learned later
         # is started by DeviceEnroller as soon as it connects.
         devices.start()
@@ -247,7 +240,6 @@ def main() -> None:
         queue.close()
         registry.close()
         camera_reconciler.close()
-        go2rtc_reconciler.close()
         camera_registrar.close()
         shadow.close()
         _LOGGER.info("Relay stopped")
