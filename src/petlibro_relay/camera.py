@@ -154,6 +154,8 @@ class CameraBridgeClient:
         return registrations
 
     def _base_url(self) -> str:
+        if self._settings.url is not None:
+            return self._settings.url.rstrip("/")
         return f"http://{self._settings.host}:{self._settings.port}"
 
 
@@ -223,8 +225,8 @@ class CameraBridgeRegistrar:
                     )
                     self._in_flight.discard(registration)
                     self._registered.add(registration)
-                operation = "UPDATE" if updating else "REGISTER"
-                _LOGGER.info("CAMERA BRIDGE %s device_id=%s result=accepted", operation, device_id)
+                operation = "UPDATED" if updating else "REGISTERED"
+                _LOGGER.info("CAMERA BRIDGE %s device=%s", operation, device_id)
                 continue
             with self._lock:
                 self._in_flight.discard(registration)
@@ -288,7 +290,11 @@ class CameraBridgeReconciler:
             if mapping[0] not in bridge_registry or bridge_registry[mapping[0]] != mapping[2]
         ]
         targets = persisted if recovered_from_unavailable else missing
-        scheduled = self._registrar.reconcile(targets, force=bool(targets))
+        scheduled = 0
+        for device_id, uid, feeder_ip in targets:
+            if self._registrar.register(device_id, uid, feeder_ip, force=True):
+                scheduled += 1
+                _LOGGER.info("CAMERA BRIDGE RECONCILE device=%s action=register", device_id)
         if targets:
             _LOGGER.info(
                 "CAMERA BRIDGE RECONCILE persisted=%d registered=%d missing=%d",
@@ -322,6 +328,7 @@ class CameraBridgeReconciler:
     def _mark_offline(self) -> None:
         if self._available is not False:
             _LOGGER.warning("CAMERA BRIDGE OFFLINE")
+            _LOGGER.warning("CAMERA BRIDGE RECONCILE FAILED reason=unreachable")
         self._available = False
 
 

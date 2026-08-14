@@ -39,6 +39,27 @@ def test_camera_bridge_reconcile_interval_is_bounded_from_environment(
     )
 
 
+def test_explicit_camera_bridge_url_overrides_legacy_host_and_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host-network deployments configure one authoritative bridge endpoint."""
+    monkeypatch.setenv("PETLIBRO_CAMERA_BRIDGE_URL", "http://host.docker.internal:8081")
+    monkeypatch.setenv("PETLIBRO_CAMERA_BRIDGE_HOST", "camera-bridge")
+    monkeypatch.setenv("PETLIBRO_CAMERA_BRIDGE_PORT", "9999")
+
+    config = RelayConfig.from_env()
+
+    assert config.camera_bridge.url == "http://host.docker.internal:8081"
+
+
+def test_invalid_explicit_camera_bridge_url_fails_startup(make_config: RelayConfigFactory) -> None:
+    """An endpoint with paths or credentials cannot silently target the wrong service."""
+    config = make_config(camera_bridge=CameraBridgeSettings(enabled=True, url="https://bridge.invalid/api"))
+
+    with pytest.raises(ValueError, match="camera bridge URL"):
+        config.validate_startup_configuration()
+
+
 def test_invalid_direct_camera_bridge_reconcile_interval_fails_startup(
     make_config: RelayConfigFactory,
 ) -> None:

@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Iterator
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +79,20 @@ class FakeHttpResponse:
         """Close nothing because the response has no resources."""
 
 
+class FakeJsonHttpResponse(BytesIO):
+    """Minimal JSON response used for constrained internal HTTP tests."""
+
+    status = 200
+
+    def __enter__(self) -> "FakeJsonHttpResponse":
+        """Enter the in-memory response context."""
+        return self
+
+    def __exit__(self, exception_type: object, exception: object, traceback: object) -> None:
+        """Close the temporary in-memory response."""
+        self.close()
+
+
 def test_camera_bridge_client_sends_uid_and_known_feeder_ip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -98,6 +113,39 @@ def test_camera_bridge_client_sends_uid_and_known_feeder_ip(
     assert getattr(request, "method") == "PUT"
     assert getattr(request, "full_url").endswith(f"/devices/{DEVICE_ID}")
     assert json.loads(getattr(request, "data")) == {"uid": CAMERA_UID, "ip": "10.3.100.90"}
+
+
+def test_camera_bridge_client_uses_explicit_url_for_every_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The host-network bridge URL overrides the legacy Compose service hostname."""
+    requests: list[object] = []
+
+    def capture_request(request: object, timeout: float) -> FakeHttpResponse | FakeJsonHttpResponse:
+        """Return a bounded fake response for health, registry, and registration calls."""
+        requests.append(request)
+        if getattr(request, "method") == "GET" and getattr(request, "full_url").endswith("/devices"):
+            return FakeJsonHttpResponse(b'{"devices": []}')
+        return FakeHttpResponse()
+
+    monkeypatch.setattr("petlibro_relay.camera.urlopen", capture_request)
+    client = CameraBridgeClient(
+        CameraBridgeSettings(
+            enabled=True,
+            url="http://host.docker.internal:8081",
+            host="camera-bridge",
+            port=9999,
+        )
+    )
+
+    assert client.health() is True
+    assert client.registrations() == {}
+    assert client.register(DEVICE_ID, CAMERA_UID, "10.3.100.90") is True
+    assert [getattr(request, "full_url") for request in requests] == [
+        "http://host.docker.internal:8081/healthz",
+        "http://host.docker.internal:8081/devices",
+        f"http://host.docker.internal:8081/devices/{DEVICE_ID}",
+    ]
 
 
 def test_camera_uid_ip_is_migrated_and_persisted(tmp_path: Path) -> None:

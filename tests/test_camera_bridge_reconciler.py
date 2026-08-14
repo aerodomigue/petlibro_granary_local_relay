@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +15,7 @@ from petlibro_relay.camera import (
     CameraBridgeRegistrar,
 )
 from petlibro_relay.config import CameraBridgeSettings
+from petlibro_relay.state_shadow import StateShadow
 
 DEVICE_A = "AF03040302A2B5B2CD60"
 DEVICE_B = "AF03040302A2B5B2CD61"
@@ -32,10 +35,12 @@ class FakeReconciliationClient:
         self.online = online
         self.registry: dict[str, str | None] = {}
         self.calls: list[CameraBridgeMapping] = []
+        self.health_calls = 0
         self._lock = threading.Lock()
 
     def health(self) -> bool:
         """Return the configured reachability state."""
+        self.health_calls += 1
         return self.online
 
     def registrations(self) -> dict[str, str | None] | None:
@@ -89,19 +94,28 @@ def test_startup_online_registers_persisted_mapping(caplog: pytest.LogCaptureFix
         registrar.close()
 
 
-def test_startup_offline_then_online_recovers_persisted_mapping() -> None:
+def test_startup_offline_then_online_recovers_persisted_mapping(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """An unavailable bridge does not block startup and recovers on a later pass."""
     client = FakeReconciliationClient(online=False)
     registrar, reconciler = _make_reconciler(client, [(DEVICE_A, UID_A, IP_A)])
     try:
-        reconciler.reconcile_once()
-        assert client.calls == []
+        with caplog.at_level(logging.INFO, logger="petlibro_relay.camera"):
+            reconciler.reconcile_once()
+            assert client.calls == []
 
-        client.online = True
-        reconciler.reconcile_once()
-        _wait_for_calls(client, 1)
+            client.online = True
+            reconciler.reconcile_once()
+            _wait_for_calls(client, 1)
 
         assert client.registry == {DEVICE_A: IP_A}
+        assert client.health_calls == 2
+        assert "CAMERA BRIDGE OFFLINE" in caplog.text
+        assert "CAMERA BRIDGE RECONCILE FAILED reason=unreachable" in caplog.text
+        assert "CAMERA BRIDGE ONLINE" in caplog.text
+        assert f"CAMERA BRIDGE RECONCILE device={DEVICE_A} action=register" in caplog.text
+        assert f"CAMERA BRIDGE REGISTERED device={DEVICE_A}" in caplog.text
     finally:
         reconciler.close()
         registrar.close()
@@ -178,6 +192,39 @@ def test_reconcile_registers_multiple_persisted_devices() -> None:
     finally:
         reconciler.close()
         registrar.close()
+
+
+def test_relay_restart_reloads_persisted_camera_uid_mapping(tmp_path: Path) -> None:
+    """A new relay process restores registrations from SQLite without a device event."""
+    database_path = tmp_path / "state_shadow.sqlite3"
+    initial_shadow = StateShadow(str(database_path))
+    try:
+        assert initial_shadow.record_camera_uid(DEVICE_A, UID_A, IP_A) is True
+    finally:
+        initial_shadow.close()
+
+    restarted_shadow = StateShadow(str(database_path))
+    client = FakeReconciliationClient()
+    settings = CameraBridgeSettings(enabled=True, reconcile_interval_seconds=1.0)
+    registrar = CameraBridgeRegistrar(settings, client)
+    reconciler = CameraBridgeReconciler(
+        settings,
+        client,
+        registrar,
+        lambda: [
+            (mapping.device_id, mapping.uid, mapping.feeder_ip)
+            for mapping in restarted_shadow.get_camera_uids()
+        ],
+    )
+    try:
+        reconciler.reconcile_once()
+        _wait_for_calls(client, 1)
+
+        assert client.registry == {DEVICE_A: IP_A}
+    finally:
+        reconciler.close()
+        registrar.close()
+        restarted_shadow.close()
 
 
 def test_reconciler_worker_stops_cleanly() -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from .local_responder import LocalResponderSettings
 
@@ -68,6 +69,7 @@ class CameraBridgeSettings:
     """Connection settings for the internal PLAF203 camera-bridge sidecar."""
 
     enabled: bool = DEFAULT_CAMERA_BRIDGE_ENABLED
+    url: str | None = None
     host: str = DEFAULT_CAMERA_BRIDGE_HOST
     port: int = DEFAULT_CAMERA_BRIDGE_PORT
     timeout_seconds: float = DEFAULT_CAMERA_BRIDGE_TIMEOUT_SECONDS
@@ -195,6 +197,7 @@ class RelayConfig:
             ),
             camera_bridge=CameraBridgeSettings(
                 enabled=_env_flag("PETLIBRO_CAMERA_BRIDGE_ENABLED", DEFAULT_CAMERA_BRIDGE_ENABLED),
+                url=_optional_http_url_from_env("PETLIBRO_CAMERA_BRIDGE_URL"),
                 host=os.environ.get("PETLIBRO_CAMERA_BRIDGE_HOST", DEFAULT_CAMERA_BRIDGE_HOST),
                 port=int(
                     os.environ.get("PETLIBRO_CAMERA_BRIDGE_PORT", DEFAULT_CAMERA_BRIDGE_PORT)
@@ -253,6 +256,8 @@ class RelayConfig:
             raise ValueError("camera bridge port must be between 1 and 65535")
         if self.camera_bridge.timeout_seconds <= 0:
             raise ValueError("camera bridge timeout must be greater than zero")
+        if self.camera_bridge.url is not None:
+            _validate_camera_bridge_url(self.camera_bridge.url)
         if (
             not math.isfinite(self.camera_bridge.reconcile_interval_seconds)
             or self.camera_bridge.reconcile_interval_seconds < MINIMUM_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS
@@ -272,6 +277,27 @@ def _camera_bridge_reconcile_interval_from_env() -> float:
         )
     )
     return max(MINIMUM_CAMERA_BRIDGE_RECONCILE_INTERVAL_SECONDS, configured)
+
+
+def _optional_http_url_from_env(name: str) -> str | None:
+    """Read an optional HTTP base URL without accepting whitespace-only input."""
+    configured = os.environ.get(name, "").strip()
+    return configured or None
+
+
+def _validate_camera_bridge_url(url: str) -> None:
+    """Validate the explicit internal camera-bridge endpoint."""
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "http"
+        or not parsed.netloc
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError("camera bridge URL must be an absolute http://host[:port] endpoint")
 
 
 def _env_flag(name: str, default: bool = False) -> bool:

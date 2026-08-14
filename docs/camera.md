@@ -141,6 +141,8 @@ PETLIBRO_GO2RTC_HOST=go2rtc
 PETLIBRO_GO2RTC_PORT=1984
 PETLIBRO_GO2RTC_TIMEOUT_SECONDS=1
 PETLIBRO_CAMERA_BRIDGE_ENABLED=true
+# Use this instead of HOST/PORT when camera-bridge uses host networking.
+PETLIBRO_CAMERA_BRIDGE_URL=http://host.docker.internal:8081
 PETLIBRO_CAMERA_BRIDGE_HOST=camera-bridge
 PETLIBRO_CAMERA_BRIDGE_PORT=8081
 PETLIBRO_CAMERA_BRIDGE_TIMEOUT_SECONDS=1
@@ -157,6 +159,9 @@ The relay also reconciles its persisted camera mappings against the bridge
 registry every five seconds by default. This is optional with the bridge,
 uses no camera UID from the bridge API, and makes a restarted sidecar converge
 without requiring the feeder to reconnect.
+`PETLIBRO_CAMERA_BRIDGE_URL`, when set, is the exclusive endpoint used for
+health checks, registry reads, and registrations; it takes precedence over the
+legacy `HOST` and `PORT` pair.
 
 The API returns only safe state: `available`, `configured`, `online`,
 `stream`, `webrtc`, `go2rtc_reachable`, `bridge_reachable`,
