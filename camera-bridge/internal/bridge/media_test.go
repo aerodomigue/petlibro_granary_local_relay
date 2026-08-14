@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AlexxIT/go2rtc/pkg/rtsp"
 	"github.com/AlexxIT/go2rtc/pkg/tcp"
 	"github.com/aerodomigue/petlibro-camera-bridge/internal/plaf203"
 )
@@ -78,6 +79,64 @@ func TestRTSPConsumerRemainsOpenAfterPlay(t *testing.T) {
 	case <-serverDone:
 	case <-time.After(time.Second):
 		t.Fatal("RTSP server did not close after client disconnect")
+	}
+}
+
+func TestGo2RtcRTSPClientKeepsMediaSessionOpen(t *testing.T) {
+	registry := NewRegistryWithConnector(connectedConnector{})
+	if _, err := registry.Upsert(testDeviceID, testUID, "192.0.2.10"); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server := &MediaServer{registry: registry}
+	serverDone := make(chan struct{})
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			server.handleConnection(connection)
+		}
+		close(serverDone)
+	}()
+
+	client := rtsp.NewClient("rtsp://" + listener.Addr().String() + "/device/" + testDeviceID)
+	client.Backchannel = true
+	if err = client.Dial(); err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if err = client.Options(); err != nil {
+		t.Fatal(err)
+	}
+	if err = client.Describe(); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.Medias) != 1 {
+		t.Fatalf("media count=%d want=1", len(client.Medias))
+	}
+	if _, err = client.SetupMedia(client.Medias[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err = client.Play(); err != nil {
+		t.Fatal(err)
+	}
+	clientDone := make(chan error, 1)
+	go func() {
+		clientDone <- client.Handle()
+	}()
+	select {
+	case handleErr := <-clientDone:
+		t.Fatalf("go2rtc RTSP client closed immediately after PLAY: %v", handleErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+	_ = client.Close()
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("RTSP server did not close after go2rtc client disconnect")
 	}
 }
 

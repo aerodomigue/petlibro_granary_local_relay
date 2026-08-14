@@ -272,16 +272,36 @@ func (connector *DirectConnector) discover(ctx context.Context, transport Datagr
 func (session *Session) startMediaReceiver() {
 	receiveContext, cancel := context.WithCancel(context.Background())
 	session.cancelReceive = cancel
+	diagnostics := newBootstrapDiagnostics(session.ID, session.observer)
 	go func() {
 		for {
-			packet, _, err := session.transport.Receive(receiveContext)
+			packet, peer, err := session.transport.Receive(receiveContext)
 			if err != nil {
 				return
 			}
-			frame, parseErr := session.media.HandlePacket(tutk.ReverseTransCodePartial(nil, packet), session.ID, session.clock())
+			decoded := tutk.ReverseTransCodePartial(nil, packet)
+			if handled, keepaliveErr := session.replyKeepalive(decoded, peer); keepaliveErr != nil {
+				return
+			} else if handled {
+				continue
+			}
+			if handled, heartbeatErr := session.replySessionHeartbeat(decoded, peer, diagnostics); heartbeatErr != nil {
+				return
+			} else if handled {
+				continue
+			}
+			if inner, decodeErr := decodeDeviceSession(decoded, session.ID); decodeErr == nil {
+				if handled, countersErr := session.replySession25Counters(inner, peer, diagnostics); countersErr != nil {
+					return
+				} else if handled {
+					continue
+				}
+			}
+			frame, parseErr := session.media.HandlePacket(decoded, session.ID, session.clock())
 			if parseErr != nil || frame == nil {
 				continue
 			}
+			session.noteSession25Media(decoded)
 			session.publishFrame(frame)
 			if !session.noteMediaEvent(session.clock()) {
 				continue

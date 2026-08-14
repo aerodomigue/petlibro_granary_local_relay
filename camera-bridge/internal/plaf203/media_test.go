@@ -4,8 +4,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"net"
 	"testing"
 	"time"
+
+	"github.com/AlexxIT/go2rtc/pkg/tutk"
 )
 
 // v303CapturedFirstH264Header is the decoded prefix of the first direct-LAN
@@ -144,4 +147,48 @@ func TestSessionFansOutEveryFrameAndReplaysLatestKeyframe(t *testing.T) {
 	if len(firstFrames) != 2 || len(lateFrames) != 2 {
 		t.Fatalf("multi-consumer fan-out first=%d late=%d", len(firstFrames), len(lateFrames))
 	}
+}
+
+func TestStreamingReceiverAcknowledgesCountersAndForwardsFrames(t *testing.T) {
+	transport := &fakeTransport{}
+	sessionID := [8]byte{0x59, 0x33, 0x60, 0x8D, 0xC8, 0xD1, 0xD8, 0x9E}
+	peer := &net.UDPAddr{IP: net.ParseIP("192.0.2.25"), Port: 41135}
+	transport.addResponse(tutk.TransCodePartial(nil, capturedSession25Counters(t, "session25_counters_device_decoded.hex")), peer)
+	transport.addResponse(tutk.TransCodePartial(nil, testVideoFragment(sessionID, 0x4000, 1, 0, true, 0, append([]byte{0, 0, 0, 1, 0x65, 0x01}, testMediaTrailer(42)...))), peer)
+	session := &Session{
+		ID:        sessionID,
+		Address:   peer,
+		transport: transport,
+		clock:     time.Now,
+		sequence:  15,
+		session25: newSession25State(),
+		media:     NewMediaReceiver(),
+	}
+	frames := make(chan *VideoFrame, 1)
+	unsubscribe := session.SubscribeFrames(func(frame *VideoFrame) {
+		frames <- frame
+	})
+	defer unsubscribe()
+	session.startMediaReceiver()
+	defer session.cancelReceive()
+
+	select {
+	case frame := <-frames:
+		if frame == nil || !frame.Keyframe {
+			t.Fatalf("frame=%+v", frame)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("streaming receiver did not forward the media frame")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		transport.mu.Lock()
+		sentCount := len(transport.sent)
+		transport.mu.Unlock()
+		if sentCount == 1 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("streaming receiver did not acknowledge Session25 counters")
 }
