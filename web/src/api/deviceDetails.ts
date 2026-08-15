@@ -1,12 +1,13 @@
 import { request } from "./client";
+import { parseAdvancedDeviceDetail, parseDailyDeviceDetail } from "./contracts";
 import type { AdvancedDeviceDetail, DailyDeviceDetail, SettingValue } from "../types/api";
 
-export function getDailyDevice(deviceId: string, signal?: AbortSignal): Promise<DailyDeviceDetail> {
-  return request<DailyDeviceDetail>(`/api/devices/${encodeURIComponent(deviceId)}/daily`, { signal });
+export async function getDailyDevice(deviceId: string, signal?: AbortSignal): Promise<DailyDeviceDetail> {
+  return parseDailyDeviceDetail(await request<unknown>(`/api/devices/${encodeURIComponent(deviceId)}/daily`, { signal }));
 }
 
-export function getAdvancedDevice(deviceId: string, signal?: AbortSignal): Promise<AdvancedDeviceDetail> {
-  return request<AdvancedDeviceDetail>(`/api/devices/${encodeURIComponent(deviceId)}/advanced`, { signal });
+export async function getAdvancedDevice(deviceId: string, signal?: AbortSignal): Promise<AdvancedDeviceDetail> {
+  return parseAdvancedDeviceDetail(await request<unknown>(`/api/devices/${encodeURIComponent(deviceId)}/advanced`, { signal }));
 }
 
 export type ControlGroup = "motion" | "sound-detection" | "sound" | "light" | "camera" | "video" | "feeding-video" | "bowl";

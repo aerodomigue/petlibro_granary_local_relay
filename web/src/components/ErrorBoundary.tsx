@@ -2,6 +2,7 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
+  resetKey?: string;
 }
 
 interface ErrorBoundaryState {
@@ -17,6 +18,12 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
     console.error("React dashboard error", error, errorInfo);
+  }
+
+  public componentDidUpdate(previousProps: ErrorBoundaryProps): void {
+    if (this.state.hasError && previousProps.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false });
+    }
   }
 
   public render(): ReactNode {

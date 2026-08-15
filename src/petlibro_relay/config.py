@@ -30,7 +30,6 @@ DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_WEB_ENABLED = False
 DEFAULT_WEB_HOST = "0.0.0.0"
 DEFAULT_WEB_PORT = 8080
-DEFAULT_WEB_FRONTEND = "legacy"
 DEFAULT_REPLAY_RATE_PER_DEVICE = 5.0
 DEFAULT_REPLAY_RATE_GLOBAL = 20.0
 DEFAULT_REPLAY_START_DELAY_SECONDS = 1.5
@@ -121,7 +120,6 @@ class RelayConfig:
     web_enabled: bool
     web_host: str
     web_port: int
-    web_frontend: str
     max_queue_size: int
     log_level: str
     replay_rate_per_device: float
@@ -175,7 +173,6 @@ class RelayConfig:
             web_enabled=_env_flag("PETLIBRO_WEB_ENABLED", DEFAULT_WEB_ENABLED),
             web_host=os.environ.get("PETLIBRO_WEB_HOST", DEFAULT_WEB_HOST),
             web_port=int(os.environ.get("PETLIBRO_WEB_PORT", DEFAULT_WEB_PORT)),
-            web_frontend=os.environ.get("PETLIBRO_WEB_FRONTEND", DEFAULT_WEB_FRONTEND),
             max_queue_size=int(os.environ.get("PETLIBRO_MAX_QUEUE_SIZE", DEFAULT_MAX_QUEUE_SIZE)),
             log_level=os.environ.get("PETLIBRO_LOG_LEVEL", DEFAULT_LOG_LEVEL),
             replay_rate_per_device=float(
@@ -261,8 +258,6 @@ class RelayConfig:
                 parameters are outside their safe operating range.
         """
         self.validate_upstream_safety()
-        if self.web_frontend not in {"legacy", "react"}:
-            raise ValueError("PETLIBRO_WEB_FRONTEND must be either 'legacy' or 'react'")
         if self.replay_rate_per_device <= 0 or self.replay_rate_global <= 0:
             raise ValueError("Replay rates must be greater than zero")
         if self.replay_start_delay_seconds < 0:

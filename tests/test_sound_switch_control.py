@@ -239,7 +239,7 @@ def test_capability_model_exposes_only_explicitly_confirmed_controls_as_writable
     """The API exposes only its small, explicit write allowlist."""
     client, _, _, _, _ = control_environment
 
-    controls = client.get(f"/api/devices/{DEVICE_A}").json()["controls"]
+    controls = client.get(f"/api/devices/{DEVICE_A}/daily").json()["controls"]
 
     assert controls["soundSwitch"]["writable"] is True
     assert controls["soundSwitch"]["cloud_sync_confirmed"] is True

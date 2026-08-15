@@ -36,7 +36,7 @@ Verify the mapped dashboard port and the Compose service:
 
 ```bash
 docker compose ps relay
-curl -fsS http://127.0.0.1:8080/api/status
+curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 If it works on the host but not another LAN device, review the VM/network

@@ -7,7 +7,7 @@ function dailyResponse(activity: object[] = []): object {
     activity,
     camera: { available: false, bridge_registered: false, go2rtc_reachable: false, media_consumers: 0, online: false },
     controls: { soundSwitch: { cloud_sync_confirmed: true, control: "soundSwitch", device_ack_confirmed: true, device_online: true, pending: false, required_state_available: true, writable: true } },
-    device: { camera: { available: false, bridge_registered: false, go2rtc_reachable: false, media_consumers: 0, online: false }, device_id: DEVICE_ID, last_seen_at: 1, local_state: "LOCAL_ONLINE", product_id: "PLAF203", rssi: -42, schedule: [] },
+    device: { device_id: DEVICE_ID, last_seen_at: 1, local_state: "LOCAL_ONLINE", product_id: "PLAF203", rssi: -42, schedule: [] },
     state: { desired: [{ key: "soundSwitch", value: false }, { key: "soundAgingType", value: 1 }], local_confirmed: [], schedule_plans: [] },
   };
 }

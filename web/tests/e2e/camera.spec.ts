@@ -53,7 +53,7 @@ async function mockRelay(page: Page): Promise<RelayCalls> {
     const url = new URL(request.url());
     const json = (body: unknown, status = 200): Promise<void> => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
     if (url.pathname === "/api/home") return json({ status: { relay: { status: "running", uptime_seconds: 1 }, local_mqtt: { connected: true }, devices: { known: 1, local_online: 1, cloud_online: 1 } }, devices: [{ device_id: DEVICE_ID, product_id: "PLAF203", local_state: "LOCAL_ONLINE", last_seen_at: 1, rssi: -42, schedule: [{ execution_time: "07:30", grain_num: 3, repeat_day: [1] }], camera: { available: true, bridge_registered: true, go2rtc_reachable: true, online: true, media_consumers: 0 } }] });
-    if (url.pathname === `/api/devices/${DEVICE_ID}/daily`) return json({ device: { device_id: DEVICE_ID, product_id: "PLAF203", local_state: "LOCAL_ONLINE", last_seen_at: 1, rssi: -42, schedule: [{ execution_time: "07:30", grain_num: 3, repeat_day: [1, 2, 3, 4, 5, 6, 7] }], camera: { available: true, bridge_registered: true, go2rtc_reachable: true, online: true, media_consumers: 0 } }, state: { desired: [], local_confirmed: [], schedule_plans: [] }, controls: {}, activity: [] });
+    if (url.pathname === `/api/devices/${DEVICE_ID}/daily`) return json({ camera: { available: true, bridge_registered: true, go2rtc_reachable: true, online: true, media_consumers: 0 }, device: { device_id: DEVICE_ID, product_id: "PLAF203", local_state: "LOCAL_ONLINE", last_seen_at: 1, rssi: -42, schedule: [{ execution_time: "07:30", grain_num: 3, repeat_day: [1, 2, 3, 4, 5, 6, 7] }] }, state: { desired: [], local_confirmed: [], schedule_plans: [] }, controls: {}, activity: [] });
     if (url.pathname === `/api/devices/${DEVICE_ID}/camera`) return json({ available: true, bridge_registered: true, go2rtc_reachable: true, online: true, media_consumers: 0 });
     if (url.pathname.includes("/camera/viewers/")) {
       if (request.method() === "POST") registrations.push(url.pathname);
@@ -161,7 +161,7 @@ test("Camera keeps its viewer dormant when the relay reports it unavailable", as
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === `/api/devices/${DEVICE_ID}/camera`) {
-      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ available: false, online: false, bridge_registered: false, go2rtc_reachable: false, reason: "Camera bridge offline" }) });
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ available: false, online: false, bridge_registered: false, go2rtc_reachable: false, media_consumers: 0, reason: "Camera bridge offline" }) });
     }
     if (url.pathname.includes("/camera/viewers/") && request.method() === "POST") registrations.push(url.pathname);
     return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });

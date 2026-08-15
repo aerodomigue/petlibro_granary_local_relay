@@ -7,15 +7,13 @@ validated exclusively by the control service after device-local ACK.
 
 from __future__ import annotations
 
-import json
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -28,19 +26,12 @@ from ..sound_switch_control import (
     ControlStateUnavailableError,
 )
 from .context import DashboardContext
-from .static import DASHBOARD_HTML
 
-DEFAULT_LOG_LIMIT = 500
-MAX_PAGE_SIZE = 500
 MAX_CAMERA_WEBRTC_OFFER_BYTES = 256_000
-SSE_WAIT_SECONDS = 15.0
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 WEBRTC_SESSION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
-REACT_FRONTEND = "react"
-REACT_DEVICE_ROUTES = frozenset({"activity", "advanced", "camera", "overview", "schedule", "settings"})
 FRONTEND_DIST_DIRECTORY = Path(__file__).with_name("dist")
-LEGACY_FRONTEND_QUERY_VALUE = "legacy"
-LEGACY_FRONTEND_QUERY_KEY = "ui"
+LEGACY_GLOBAL_ROUTE_ALIASES = frozenset({"cloud", "devices", "logs", "ntp", "queues", "state", "system"})
 
 
 class ControlRequest(BaseModel):
@@ -202,61 +193,48 @@ class ScheduleUpdateRequest(_StrictRequest):
         return value
 
 
-def create_app(context: DashboardContext, frontend: str = "legacy") -> FastAPI:
-    """Create the dashboard app with the one narrow sound write route."""
-    app = FastAPI(title="PETLIBRO Local Relay", version="0.1.0", docs_url=None, redoc_url=None)
-    react_enabled = frontend == REACT_FRONTEND and FRONTEND_DIST_DIRECTORY.is_dir()
-    if frontend == REACT_FRONTEND and not react_enabled:
-        raise RuntimeError("React dashboard was selected but the static bundle is unavailable")
-    if react_enabled:
+def create_app(context: DashboardContext) -> FastAPI:
+    """Create the React dashboard app with narrow typed feeder controls."""
+    app = FastAPI(
+        title="PETLIBRO Local Relay",
+        version="0.1.0",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+    bundle_available = FRONTEND_DIST_DIRECTORY.is_dir()
+    if bundle_available:
         app.mount("/assets", StaticFiles(directory=FRONTEND_DIST_DIRECTORY / "assets"), name="assets")
 
-    def dashboard_shell(request: Request) -> Response:
-        """Return the selected dashboard shell without affecting API routes."""
-        if react_enabled and request.query_params.get(LEGACY_FRONTEND_QUERY_KEY) != LEGACY_FRONTEND_QUERY_VALUE:
-            return FileResponse(
-                FRONTEND_DIST_DIRECTORY / "index.html",
-                headers={"Cache-Control": "no-cache"},
-            )
-        return HTMLResponse(DASHBOARD_HTML)
+    def dashboard_shell() -> FileResponse:
+        """Return the single React shell without affecting API routes."""
+        if not bundle_available:
+            raise HTTPException(status_code=503, detail="React dashboard bundle is unavailable")
+        return FileResponse(FRONTEND_DIST_DIRECTORY / "index.html", headers={"Cache-Control": "no-cache"})
 
-    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    def dashboard(request: Request) -> Response:
-        """Serve the self-contained dashboard UI."""
-        return dashboard_shell(request)
+    @app.get("/", include_in_schema=False)
+    @app.get("/settings", include_in_schema=False)
+    def dashboard() -> FileResponse:
+        """Serve the React dashboard for canonical global routes."""
+        return dashboard_shell()
 
-    @app.get("/devices", response_class=HTMLResponse, include_in_schema=False)
-    def devices_dashboard(request: Request) -> Response:
-        """Serve the fleet view of the dashboard."""
-        if react_enabled and request.query_params.get(LEGACY_FRONTEND_QUERY_KEY) != LEGACY_FRONTEND_QUERY_VALUE:
-            return RedirectResponse(
-                url=f"/devices?{LEGACY_FRONTEND_QUERY_KEY}={LEGACY_FRONTEND_QUERY_VALUE}", status_code=302
-            )
-        return dashboard_shell(request)
+    @app.get("/devices", include_in_schema=False)
+    @app.get("/cloud", include_in_schema=False)
+    @app.get("/queues", include_in_schema=False)
+    @app.get("/state", include_in_schema=False)
+    @app.get("/ntp", include_in_schema=False)
+    @app.get("/logs", include_in_schema=False)
+    @app.get("/system", include_in_schema=False)
+    def legacy_global_route() -> RedirectResponse:
+        """Canonicalize former global dashboard routes to the React home view."""
+        return RedirectResponse(url="/", status_code=308)
 
-    @app.get("/cloud", response_class=HTMLResponse, include_in_schema=False)
-    @app.get("/queues", response_class=HTMLResponse, include_in_schema=False)
-    @app.get("/state", response_class=HTMLResponse, include_in_schema=False)
-    @app.get("/ntp", response_class=HTMLResponse, include_in_schema=False)
-    @app.get("/logs", response_class=HTMLResponse, include_in_schema=False)
-    @app.get("/system", response_class=HTMLResponse, include_in_schema=False)
-    @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
-    def global_dashboard_route(request: Request) -> Response:
-        """Serve the shell for a deep link to a global dashboard view."""
-        if react_enabled and request.url.path == "/settings":
-            return dashboard_shell(request)
-        if react_enabled and request.query_params.get(LEGACY_FRONTEND_QUERY_KEY) != LEGACY_FRONTEND_QUERY_VALUE:
-            return RedirectResponse(
-                url=f"{request.url.path}?{LEGACY_FRONTEND_QUERY_KEY}={LEGACY_FRONTEND_QUERY_VALUE}", status_code=302
-            )
-        return dashboard_shell(request)
-
-    @app.get("/devices/{device_id}", response_class=HTMLResponse, include_in_schema=False)
-    def device_dashboard(device_id: str, request: Request) -> Response:
+    @app.get("/devices/{device_id}", include_in_schema=False)
+    def device_dashboard(device_id: str) -> FileResponse:
         """Serve a device-scoped dashboard only for a known safe device id."""
         if not DEVICE_ID_PATTERN.fullmatch(device_id) or context.device_detail(device_id, 1) is None:
             raise HTTPException(status_code=404, detail="Unknown device")
-        return dashboard_shell(request)
+        return dashboard_shell()
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:
@@ -278,21 +256,6 @@ def create_app(context: DashboardContext, frontend: str = "legacy") -> FastAPI:
         }
         return JSONResponse(payload, status_code=200)
 
-    @app.get("/api/status")
-    def status() -> dict[str, object]:
-        """Return compact relay status aggregated over every device."""
-        return context.status()
-
-    @app.get("/api/cloud")
-    def cloud() -> dict[str, object]:
-        """Return each device's PETLIBRO MQTT state and recent upstream events."""
-        return context.cloud()
-
-    @app.get("/api/devices")
-    def devices() -> dict[str, object]:
-        """Return one row per known device plus aggregate counts."""
-        return context.devices()
-
     @app.get("/api/home")
     def home() -> dict[str, object]:
         """Return the compact, non-diagnostic home-screen projection."""
@@ -304,16 +267,6 @@ def create_app(context: DashboardContext, frontend: str = "legacy") -> FastAPI:
         if not DEVICE_ID_PATTERN.fullmatch(device_id):
             raise HTTPException(status_code=404, detail="Unknown device")
         detail = context.daily_device_detail(device_id)
-        if detail is None:
-            raise HTTPException(status_code=404, detail="Unknown device")
-        return detail
-
-    @app.get("/api/devices/{device_id}")
-    def device_detail(
-        device_id: str, raw_limit: int = Query(100, ge=1, le=MAX_PAGE_SIZE)
-    ) -> dict[str, object]:
-        """Return the full per-device view: cloud, queues, state, NTP."""
-        detail = context.device_detail(device_id, raw_limit)
         if detail is None:
             raise HTTPException(status_code=404, detail="Unknown device")
         return detail
@@ -481,63 +434,14 @@ def create_app(context: DashboardContext, frontend: str = "legacy") -> FastAPI:
     def delete_schedule(device_id: str, plan_id: int) -> dict[str, object]:
         return _schedule_endpoint(context, device_id, lambda control: control.delete_schedule(device_id, plan_id))
 
-    @app.get("/api/queues")
-    def queues(
-        device_id: str, limit: int = Query(DEFAULT_LOG_LIMIT, ge=1, le=MAX_PAGE_SIZE)
-    ) -> dict[str, object]:
-        """Return bounded durable queue details for one device."""
-        return context.queues(device_id, limit)
-
-    @app.get("/api/state")
-    def state(
-        device_id: str, raw_limit: int = Query(100, ge=1, le=MAX_PAGE_SIZE)
-    ) -> dict[str, object]:
-        """Return one device's shadow state."""
-        return context.state(device_id, raw_limit)
-
-    @app.get("/api/ntp")
-    def ntp(device_id: str) -> dict[str, object]:
-        """Return one device's NTP session-establishment observations."""
-        return context.ntp(device_id)
-
-    @app.get("/api/logs")
-    def logs(limit: int = Query(DEFAULT_LOG_LIMIT, ge=1, le=MAX_PAGE_SIZE)) -> dict[str, object]:
-        """Return recent sanitized logs from the process-local ring buffer."""
-        return {"entries": context.logs.snapshot(limit)}
-
-    @app.get("/api/logs/stream")
-    def logs_stream(after: int = Query(0, ge=0)) -> StreamingResponse:
-        """Stream sanitized log records with Server-Sent Events."""
-        return StreamingResponse(
-            _stream_logs(context, after),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache"},
-        )
-
-    @app.get("/api/system")
-    def system() -> dict[str, object]:
-        """Return process and local database metadata."""
-        return context.system()
-
-    if react_enabled:
-
-        @app.get("/{frontend_path:path}", include_in_schema=False)
-        def react_spa_fallback(frontend_path: str, request: Request) -> Response:
-            """Serve the React shell for browser routes, never for missing APIs."""
-            if frontend_path == "api" or frontend_path.startswith("api/"):
-                raise HTTPException(status_code=404, detail="Unknown API route")
-            device_route = re.fullmatch(r"devices/([^/]+)/([^/]+)", frontend_path)
-            if device_route is not None and device_route.group(2) not in REACT_DEVICE_ROUTES:
-                device_id, tab = device_route.groups()
-                return RedirectResponse(
-                    url=f"/devices/{quote(device_id)}?{LEGACY_FRONTEND_QUERY_KEY}={LEGACY_FRONTEND_QUERY_VALUE}#{quote(tab)}",
-                    status_code=302,
-                )
-            if frontend_path in {"cloud", "queues", "state", "ntp", "logs", "system", "settings"}:
-                return RedirectResponse(
-                    url=f"/{frontend_path}?{LEGACY_FRONTEND_QUERY_KEY}={LEGACY_FRONTEND_QUERY_VALUE}", status_code=302
-                )
-            return dashboard_shell(request)
+    @app.get("/{frontend_path:path}", include_in_schema=False)
+    def react_spa_fallback(frontend_path: str) -> Response:
+        """Serve browser routes from the SPA while API misses remain HTTP 404."""
+        if frontend_path == "api" or frontend_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Unknown API route")
+        if frontend_path in LEGACY_GLOBAL_ROUTE_ALIASES:
+            return RedirectResponse(url="/", status_code=308)
+        return dashboard_shell()
 
     return app
 
@@ -587,17 +491,3 @@ def _run_control(
         raise HTTPException(status_code=504, detail=str(error)) from error
     except ControlAckRejectedError as error:
         raise HTTPException(status_code=502, detail={"message": str(error), "device_ack": True, "code": error.code}) from error
-
-
-def _stream_logs(context: DashboardContext, after: int) -> Iterator[str]:
-    """Yield a bounded live log sequence with keepalives for idle clients."""
-    sequence = after
-    while True:
-        entries = context.logs.wait_after(sequence, SSE_WAIT_SECONDS)
-        if not entries:
-            yield ": keepalive\n\n"
-            continue
-        for entry in entries:
-            sequence = int(entry["sequence"])
-            encoded = json.dumps(entry, separators=(",", ":"))
-            yield f"id: {sequence}\nevent: log\ndata: {encoded}\n\n"

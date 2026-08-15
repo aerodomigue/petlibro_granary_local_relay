@@ -13,8 +13,11 @@ interface Plan {
 
 function scheduleResponse(plans: Plan[]): object {
   return {
-    device: { camera: { available: false, bridge_registered: false, go2rtc_reachable: false, media_consumers: 0, online: false }, device_id: DEVICE_ID, last_seen_at: 1, local_state: "LOCAL_ONLINE", product_id: "PLAF203", rssi: -42, schedule: [] },
-    state: { schedule_plans: plans.map((plan) => ({ plan, source: "local", updated_at: 1 })) },
+    activity: [],
+    camera: { available: false, bridge_registered: false, go2rtc_reachable: false, media_consumers: 0, online: false },
+    controls: {},
+    device: { device_id: DEVICE_ID, last_seen_at: 1, local_state: "LOCAL_ONLINE", product_id: "PLAF203", rssi: -42, schedule: [] },
+    state: { desired: [], local_confirmed: [], schedule_plans: plans.map((plan) => ({ plan, source: "local", updated_at: 1 })) },
   };
 }
 

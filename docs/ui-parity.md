@@ -64,7 +64,8 @@ remain horizontally scrollable rather than clipping content.
 
 ## Advanced data
 
-Advanced mode is for diagnostics, not for secrets. It may show redacted device
-identifiers, queue state, logs and raw cached messages. It must not reveal MQTT
-passwords, TUTK UIDs, tokens, RTSP URLs, internal credentials or arbitrary
-payloads containing those values. Keep the dashboard on a trusted LAN.
+Advanced mode is for bounded diagnostics, not for secrets. It may show safe
+connectivity counters, local presence, camera availability, state counts and a
+small sanitized device-log projection. It never exposes MQTT payloads, queue
+payloads, TUTK UIDs, tokens, RTSP URLs, internal paths or credentials. Keep
+the dashboard on a trusted LAN.

@@ -117,8 +117,9 @@ not bridged automatically.
 The dashboard is LAN-only by design. It provides Home, per-device Overview,
 Camera, Schedule, Activity, Settings, and an optional Advanced view.
 
-The API deliberately exposes typed actions only. It never accepts arbitrary
-MQTT topics, commands, or payloads. A supported local action succeeds only
+The public dashboard API deliberately exposes only bounded screen projections
+and typed actions. It never exposes raw MQTT/queue payloads or accepts
+arbitrary MQTT topics, commands, or payloads. A supported local action succeeds only
 after the feeder sends the matching acknowledgement; actions are not placed in
 the durable cloud replay queue.
 

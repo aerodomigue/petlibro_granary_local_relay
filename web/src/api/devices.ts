@@ -1,8 +1,9 @@
 import { request } from "./client";
+import { parseCameraAvailability, parseHomeResponse } from "./contracts";
 import type { CameraAvailability, HomeResponse } from "../types/api";
 
-export function getHome(signal?: AbortSignal): Promise<HomeResponse> {
-  return request<HomeResponse>("/api/home", { signal });
+export async function getHome(signal?: AbortSignal): Promise<HomeResponse> {
+  return parseHomeResponse(await request<unknown>("/api/home", { signal }));
 }
 
 export function dispense(deviceId: string, grainNum: number): Promise<void> {
@@ -13,6 +14,6 @@ export function dispense(deviceId: string, grainNum: number): Promise<void> {
   });
 }
 
-export function getCameraStatus(deviceId: string, signal?: AbortSignal): Promise<CameraAvailability> {
-  return request<CameraAvailability>(`/api/devices/${encodeURIComponent(deviceId)}/camera`, { signal });
+export async function getCameraStatus(deviceId: string, signal?: AbortSignal): Promise<CameraAvailability> {
+  return parseCameraAvailability(await request<unknown>(`/api/devices/${encodeURIComponent(deviceId)}/camera`, { signal }));
 }

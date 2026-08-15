@@ -29,6 +29,7 @@ interface ActiveViewer {
   heartbeatTimer: number | null;
   loadedDataHandler: (() => void) | null;
   peerConnection: RTCPeerConnection | null;
+  released: boolean;
   sessionId: string | null;
   viewerId: string;
 }
@@ -41,7 +42,10 @@ interface TimedSignal {
 function createViewerId(): string {
   const generated = globalThis.crypto?.randomUUID?.();
   if (generated) return generated.replaceAll("-", "");
-  return Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues === undefined) throw new Error("Secure viewer identifiers are unavailable");
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function abortError(): DOMException {
@@ -112,7 +116,8 @@ export function useCameraViewer(deviceId: string, videoRef: RefObject<HTMLVideoE
       retryTimer = null;
     };
     const release = (entry: ActiveViewer | null): void => {
-      if (entry === null) return;
+      if (entry === null || entry.released) return;
+      entry.released = true;
       if (active === entry) active = null;
       entry.controller.abort();
       if (entry.heartbeatTimer !== null) window.clearInterval(entry.heartbeatTimer);
@@ -165,17 +170,24 @@ export function useCameraViewer(deviceId: string, videoRef: RefObject<HTMLVideoE
     };
     const connect = async (): Promise<void> => {
       if (disposed || !viewerWanted || active !== null) return;
+      let viewerId: string;
+      try {
+        viewerId = createViewerId();
+      } catch {
+        setStatus("error");
+        return;
+      }
       const entry: ActiveViewer = {
         controller: new AbortController(), disconnectedTimer: null, firstFrameReceived: false, firstFrameTimer: null,
         generation: ++sequence, heartbeatController: null, heartbeatInFlight: false, heartbeatTimer: null,
-        loadedDataHandler: null, peerConnection: null, sessionId: null, viewerId: createViewerId(),
+        loadedDataHandler: null, peerConnection: null, released: false, sessionId: null, viewerId,
       };
       active = entry;
       setStatus(retryCount === 0 ? "connecting" : "reconnecting");
       try {
         await activateViewer(deviceId, entry.viewerId, entry.controller.signal);
         if (!isCurrent(entry)) {
-          void releaseViewer(deviceId, entry.viewerId).catch(() => undefined);
+          release(entry);
           return;
         }
         entry.heartbeatTimer = window.setInterval(() => { void heartbeat(entry); }, HEARTBEAT_INTERVAL_MS);

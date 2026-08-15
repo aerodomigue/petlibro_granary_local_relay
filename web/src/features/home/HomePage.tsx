@@ -18,7 +18,7 @@ const HOME_REFRESH_MS = 3_000;
 interface DeviceCardProps {
   device: DailyDevice;
   displayName: string;
-  onVisibilityChange: (deviceId: string, visible: boolean) => void;
+  onVisibilityChange: (deviceId: string, visibilityRatio: number) => void;
   previewActive: boolean;
 }
 
@@ -33,17 +33,17 @@ function DeviceCard({ device, displayName, onVisibilityChange, previewActive }: 
     const element = cardRef.current;
     if (element === null) return undefined;
     if (!("IntersectionObserver" in window)) {
-      onVisibilityChange(device.device_id, true);
-      return () => onVisibilityChange(device.device_id, false);
+      onVisibilityChange(device.device_id, 1);
+      return () => onVisibilityChange(device.device_id, 0);
     }
     const observer = new IntersectionObserver(
-      (entries) => onVisibilityChange(device.device_id, entries.some((entry) => entry.isIntersecting)),
-      { rootMargin: HOME_PREVIEW_ROOT_MARGIN, threshold: 0.01 },
+      (entries) => onVisibilityChange(device.device_id, Math.max(...entries.map((entry) => entry.isIntersecting ? entry.intersectionRatio : 0))),
+      { rootMargin: HOME_PREVIEW_ROOT_MARGIN, threshold: [0, 0.01, 0.25, 0.5, 0.75, 1] },
     );
     observer.observe(element);
     return () => {
       observer.disconnect();
-      onVisibilityChange(device.device_id, false);
+      onVisibilityChange(device.device_id, 0);
     };
   }, [device.device_id, onVisibilityChange]);
   return (
@@ -70,23 +70,24 @@ function DeviceCard({ device, displayName, onVisibilityChange, previewActive }: 
 
 export function HomePage(): JSX.Element {
   const { deviceNames } = usePreferences();
-  const [visibleDeviceIds, setVisibleDeviceIds] = useState<ReadonlySet<string>>(new Set());
+  const [visibilityRatios, setVisibilityRatios] = useState<ReadonlyMap<string, number>>(new Map());
   const [previewDeviceId, setPreviewDeviceId] = useState<string | null>(null);
   const home = useQuery({ queryKey: queryKeys.home, queryFn: ({ signal }) => getHome(signal), refetchInterval: HOME_REFRESH_MS });
-  const onVisibilityChange = useCallback((deviceId: string, visible: boolean): void => {
-    setVisibleDeviceIds((current) => {
-      if (current.has(deviceId) === visible) return current;
-      const next = new Set(current);
-      if (visible) next.add(deviceId); else next.delete(deviceId);
+  const onVisibilityChange = useCallback((deviceId: string, visibilityRatio: number): void => {
+    setVisibilityRatios((current) => {
+      if (current.get(deviceId) === visibilityRatio) return current;
+      const next = new Map(current);
+      if (visibilityRatio > 0) next.set(deviceId, visibilityRatio); else next.delete(deviceId);
       return next;
     });
   }, []);
   useEffect(() => {
     const availableVisibleIds = home.data?.devices
-      .filter((device) => visibleDeviceIds.has(device.device_id) && device.camera.bridge_registered && device.camera.go2rtc_reachable && device.camera.bridge_reachable !== false)
+      .filter((device) => (visibilityRatios.get(device.device_id) ?? 0) > 0 && device.camera.bridge_registered && device.camera.go2rtc_reachable && device.camera.bridge_reachable !== false)
+      .sort((left, right) => (visibilityRatios.get(right.device_id) ?? 0) - (visibilityRatios.get(left.device_id) ?? 0))
       .map((device) => device.device_id) ?? [];
-    setPreviewDeviceId((current) => current !== null && availableVisibleIds.includes(current) ? current : availableVisibleIds[0] ?? null);
-  }, [home.data?.devices, visibleDeviceIds]);
+    setPreviewDeviceId(availableVisibleIds[0] ?? null);
+  }, [home.data?.devices, visibilityRatios]);
   if (!home.data && home.isPending) return <p className="state-message">Loading feeders…</p>;
   if (!home.data && home.isError) return <p className="state-message state-message--error">Unable to reach the relay: {home.error.message}</p>;
   return <section aria-labelledby="home-title"><header className="page-heading"><div><h1 id="home-title">Your feeders</h1><p>At-a-glance local status and today’s meals.</p>{home.isError && <p className="refresh-warning" role="status">Updating feeder status failed. Live video is unchanged.</p>}</div></header>{home.data!.devices.length === 0 ? <p className="state-message">No local feeders are available yet.</p> : <div className="device-grid">{home.data!.devices.map((device) => <DeviceCard device={device} displayName={deviceNames[device.device_id]?.trim() || device.product_id || "PETLIBRO feeder"} key={device.device_id} onVisibilityChange={onVisibilityChange} previewActive={previewDeviceId === device.device_id} />)}</div>}</section>;

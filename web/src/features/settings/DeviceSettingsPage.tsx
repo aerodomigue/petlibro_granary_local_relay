@@ -1,4 +1,4 @@
-import { useEffect, useState, type Dispatch, type JSX, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type JSX, type SetStateAction } from "react";
 import { useForm } from "react-hook-form";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
@@ -51,16 +51,25 @@ function SettingInput({ field, form }: { field: SettingField; form: ReturnType<t
   return <label className="field" htmlFor={inputId}>{field.label}<input id={inputId} max={field.max} min={field.min} type="number" {...form.register(field.key, { valueAsNumber: true })} /></label>;
 }
 
-function SettingGroupCard({ group, values, capability, deviceId, savingGroup, setSavingGroup }: { group: DeviceSettingGroup; values: Readonly<Record<string, SettingValue>>; capability: ControlCapability | undefined; deviceId: string; savingGroup: ControlGroup | null; setSavingGroup: Dispatch<SetStateAction<ControlGroup | null>> }): JSX.Element {
+function SettingGroupCard({ group, values, capability, deviceId, savingGroup, setSavingGroup, onAcknowledged }: { group: DeviceSettingGroup; values: Readonly<Record<string, SettingValue>>; capability: ControlCapability | undefined; deviceId: string; savingGroup: ControlGroup | null; setSavingGroup: Dispatch<SetStateAction<ControlGroup | null>>; onAcknowledged: (update: ControlUpdate) => void }): JSX.Element {
   const queryClient = useQueryClient();
   const [feedback, setFeedback] = useState<string | null>(null);
   const form = useForm<DeviceSettingFormValues>({ defaultValues: initialValues(group, values) });
+  const serverSnapshot = useMemo(() => initialValues(group, values), [group, values]);
+  const serverSnapshotKey = useMemo(() => JSON.stringify(serverSnapshot), [serverSnapshot]);
+  const lastServerSnapshotKey = useRef(serverSnapshotKey);
   const mutation = useMutation({ mutationFn: (update: ControlUpdate) => updateControlGroup(deviceId, group.route as ControlGroup, update) });
   const unavailable = !capability?.writable || !capability.device_online || !capability.required_state_available || capability.pending;
   const saving = savingGroup !== null;
   useEffect(() => {
-    form.reset(initialValues(group, values), { keepDirty: true, keepDirtyValues: true, keepTouched: true });
-  }, [form, group, values]);
+    if (lastServerSnapshotKey.current === serverSnapshotKey) return;
+    lastServerSnapshotKey.current = serverSnapshotKey;
+    for (const field of group.fields) {
+      if (!form.getFieldState(field.key).isDirty) {
+        form.setValue(field.key, serverSnapshot[field.key], { shouldDirty: false });
+      }
+    }
+  }, [form, group, serverSnapshot, serverSnapshotKey]);
   const submit = form.handleSubmit(async (draft) => {
     const update = updatedValues(group, draft, form.formState.dirtyFields);
     if (Object.keys(update).length === 0 || saving) return;
@@ -69,6 +78,7 @@ function SettingGroupCard({ group, values, capability, deviceId, savingGroup, se
     try {
       await mutation.mutateAsync(update);
       form.reset({ ...initialValues(group, values), ...update });
+      onAcknowledged(update);
       setFeedback("Saved. Feeder confirmed the change.");
       await Promise.all([queryClient.invalidateQueries({ queryKey: queryKeys.settings(deviceId) }), queryClient.invalidateQueries({ queryKey: queryKeys.home })]);
     } catch (error) {
@@ -91,10 +101,24 @@ function FeederNameCard({ deviceId }: { deviceId: string }): JSX.Element {
 export function DeviceSettingsPage(): JSX.Element {
   const { deviceId } = useParams();
   const [savingGroup, setSavingGroup] = useState<ControlGroup | null>(null);
+  const [acknowledgedValues, setAcknowledgedValues] = useState<Readonly<Record<string, SettingValue>>>({});
   const detail = useQuery({ enabled: Boolean(deviceId), queryKey: queryKeys.settings(deviceId ?? ""), queryFn: ({ signal }) => getDailyDevice(deviceId ?? "", signal), refetchInterval: SETTINGS_REFRESH_MS });
+  const serverValues = useMemo(
+    () => detail.data === undefined
+      ? {}
+      : Object.fromEntries([...detail.data.state.desired, ...detail.data.state.local_confirmed].map(({ key, value }) => [key, value])),
+    [detail.data],
+  );
+  useEffect(() => {
+    setAcknowledgedValues((current) => Object.fromEntries(Object.entries(current).filter(([key, value]) => serverValues[key] !== value)));
+  }, [serverValues]);
+  const values = useMemo(() => ({ ...serverValues, ...acknowledgedValues }), [acknowledgedValues, serverValues]);
+  const acknowledge = useCallback((update: ControlUpdate): void => {
+    setAcknowledgedValues((current) => ({ ...current, ...update }));
+  }, []);
   if (!deviceId) return <p className="state-message state-message--error">Unknown feeder.</p>;
   if (!detail.data && detail.isPending) return <p className="state-message">Loading feeder settings…</p>;
   if (!detail.data && detail.isError) return <p className="state-message state-message--error">Settings are unavailable: {detail.error.message}</p>;
-  const values = Object.fromEntries([...detail.data!.state.desired, ...detail.data!.state.local_confirmed].map(({ key, value }) => [key, value]));
-  return <section aria-labelledby="device-settings-title"><header className="page-heading"><div><h1 id="device-settings-title">Feeder settings</h1><p>Everyday preferences saved directly by your feeder.</p>{detail.isError && <p className="refresh-warning" role="status">Updating feeder settings failed. Showing the last confirmed values.</p>}</div></header><DeviceNavigation active="settings" deviceId={deviceId} /><div className="settings-grid"><FeederNameCard deviceId={deviceId} key={deviceId} />{DEVICE_SETTING_GROUPS.map((group) => <SettingGroupCard capability={detail.data!.controls[group.primary]} deviceId={deviceId} group={group} key={`${deviceId}-${group.route}`} savingGroup={savingGroup} setSavingGroup={setSavingGroup} values={values} />)}</div></section>;
+  const supportedGroups = DEVICE_SETTING_GROUPS.filter((group) => detail.data!.controls[group.primary] !== undefined);
+  return <section aria-labelledby="device-settings-title"><header className="page-heading"><div><h1 id="device-settings-title">Feeder settings</h1><p>Everyday preferences saved directly by your feeder.</p>{detail.isError && <p className="refresh-warning" role="status">Updating feeder settings failed. Showing the last confirmed values.</p>}</div></header><DeviceNavigation active="settings" deviceId={deviceId} /><div className="settings-grid"><FeederNameCard deviceId={deviceId} key={deviceId} />{supportedGroups.map((group) => <SettingGroupCard capability={detail.data!.controls[group.primary]} deviceId={deviceId} group={group} key={`${deviceId}-${group.route}`} onAcknowledged={acknowledge} savingGroup={savingGroup} setSavingGroup={setSavingGroup} values={values} />)}</div></section>;
 }

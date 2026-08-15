@@ -1,4 +1,5 @@
 import { request } from "./client";
+import { parseDailyDeviceDetail } from "./contracts";
 import type {
   DailyDeviceDetail,
   Schedule,
@@ -66,7 +67,8 @@ export function parseSchedules(detail: DailyDeviceDetail): ScheduleSnapshot[] {
 
 /** Fetch the device-scoped, non-diagnostic schedule snapshot. */
 export async function getSchedules(deviceId: string, signal?: AbortSignal): Promise<ScheduleData> {
-  const detail = await request<DailyDeviceDetail>(`/api/devices/${encodeURIComponent(deviceId)}/daily`, { signal });
+  const response = await request<unknown>(`/api/devices/${encodeURIComponent(deviceId)}/daily`, { signal });
+  const detail = parseDailyDeviceDetail(response);
   return { device: detail.device, schedules: parseSchedules(detail) };
 }
 

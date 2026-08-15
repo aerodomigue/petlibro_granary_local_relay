@@ -205,7 +205,6 @@ def main() -> None:
             dashboard_context,
             config.web_host,
             config.web_port,
-            frontend=config.web_frontend,
         )
         dashboard_server.start()
 

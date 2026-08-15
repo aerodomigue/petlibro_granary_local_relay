@@ -52,7 +52,6 @@ def make_config(tmp_path: Path) -> RelayConfigFactory:
             "web_enabled": False,
             "web_host": "127.0.0.1",
             "web_port": 8080,
-            "web_frontend": "legacy",
             "max_queue_size": 100,
             "log_level": "INFO",
             "replay_rate_per_device": 5.0,

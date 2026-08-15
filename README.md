@@ -77,8 +77,8 @@ depending on PETLIBRO servers. The building blocks are present, but this is
   PLAF203 feeders.
 - Transparent MQTT relay with separate cloud sessions, durable queues, replay
   policies, local state shadow, and cloud-outage telemetry.
-- Local dashboard with Home, device overview, camera, schedule, activity,
-  settings, and an optional Advanced view.
+- React dashboard with Home, device overview, camera, schedule, activity,
+  settings, and an optional bounded Advanced view.
 - ACK-backed local manual dispense, typed device settings, and persisted local
   feeding schedules. Interactive actions are never replayed later.
 - Feature-flagged local fallback for confirmed NTP, cached configuration, and

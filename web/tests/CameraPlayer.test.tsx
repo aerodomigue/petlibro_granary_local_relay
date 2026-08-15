@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -113,6 +114,18 @@ describe("CameraPlayer", () => {
     expect(releaseWebRtc).toHaveBeenCalledTimes(1);
   });
 
+  it("cleans up the development StrictMode probe before retaining one viewer", async () => {
+    vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
+    vi.stubGlobal("MediaStream", FakeMediaStream);
+    configureSuccessfulCameraApi();
+
+    const view = render(<StrictMode><CameraPlayer deviceId="device-a" /></StrictMode>);
+    await waitFor(() => expect(activateViewer).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(releaseViewer).toHaveBeenCalledTimes(1));
+    view.unmount();
+    await waitFor(() => expect(releaseViewer).toHaveBeenCalledTimes(2));
+  });
+
   it("closes the prior viewer before connecting a replacement device", async () => {
     vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
     vi.stubGlobal("MediaStream", FakeMediaStream);
@@ -126,8 +139,8 @@ describe("CameraPlayer", () => {
     expect(releaseViewer).toHaveBeenCalledWith("device-a", expect.any(String));
   });
 
-  it("creates a viewer when the browser does not expose crypto.randomUUID", async () => {
-    vi.stubGlobal("crypto", {});
+  it("creates a viewer from browser cryptographic entropy without randomUUID", async () => {
+    vi.stubGlobal("crypto", { getRandomValues: (bytes: Uint8Array): Uint8Array => bytes.fill(1) });
     vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
     vi.stubGlobal("MediaStream", FakeMediaStream);
     configureSuccessfulCameraApi();
@@ -208,7 +221,7 @@ describe("CameraPlayer", () => {
     await waitFor(() => expect(releaseWebRtc).toHaveBeenCalledWith("device-a", "late-session"));
   });
 
-  it("releases a viewer when an activation response arrives after teardown", async () => {
+  it("releases a viewer only once when activation resolves after teardown", async () => {
     vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
     vi.stubGlobal("MediaStream", FakeMediaStream);
     const activation = deferred<void>();
@@ -222,7 +235,7 @@ describe("CameraPlayer", () => {
     await act(async () => { activation.resolve(); });
 
     expect(releaseViewer).toHaveBeenCalledWith("device-a", viewerId);
-    expect(releaseViewer).toHaveBeenCalledTimes(2);
+    expect(releaseViewer).toHaveBeenCalledTimes(1);
   });
 
   it("does not let a stale heartbeat release a replacement viewer", async () => {

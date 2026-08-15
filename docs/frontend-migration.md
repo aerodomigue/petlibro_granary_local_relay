@@ -1,145 +1,68 @@
-# React frontend migration
+# React dashboard architecture
 
-The legacy dashboard remains the production UI while the React implementation
-is developed on `feat/react-frontend`. This gives deployments an immediate
-rollback path: use the existing inline dashboard until the React parity matrix
-is complete and the new static bundle is explicitly enabled.
+The dashboard is a single React/TypeScript application bundled with Vite and
+served by FastAPI. The former inline dashboard was removed after route, form,
+camera-lifecycle and real-device parity checks. There is no runtime frontend
+switch and no `PETLIBRO_WEB_FRONTEND` setting.
 
-## Legacy inventory
+## Final parity matrix
 
-| Feature | Legacy | React | Unit | E2E | VM |
+| Feature | React | Unit | E2E | VM |
 | --- | --- | --- | --- | --- |
-| Home device cards and status | Yes | Stabilized | Basic | Yes | Validated |
-| Home camera auto-start | Yes | Stabilized | Lifecycle | Yes | Validated Live |
-| Viewer UUID lifecycle | Yes | Stabilized | Lifecycle | Yes | Validated |
-| Camera close / idle stop | Yes | Stabilized | Lifecycle | Yes | Validated (10 s grace) |
-| Camera browser controls (mute, volume, fullscreen) | Yes | Implemented | Yes | Pending | Pending |
-| Device Overview | Yes | Implemented | Yes | Yes | Pending |
-| Manual dispense | Yes | Stabilized, VM pending | Basic | Yes | Pending |
-| Schedule list | Yes | Implemented | Yes | Yes | Validated read-only |
-| Schedule create / edit | Yes | Implemented, feeder ACK required | Yes | Yes | Pending safe feeder mutation validation |
-| Schedule enable / disable | Yes | Implemented, pessimistic | Yes | Yes | Pending safe feeder mutation validation |
-| Schedule delete | Yes | Implemented, confirmed | Yes | Yes | Pending safe feeder mutation validation |
-| Schedule polling-safe draft and focus | Partial | Implemented | Yes | Yes | Validated on live poll |
-| Schedule mobile layout | Yes | Implemented | Yes | Yes | Validated at 390x844 |
-| Global settings and Advanced preference | Yes | Implemented | Yes | Yes | Validated |
-| Typed device settings | Yes | Implemented | Yes | Yes | Validated draft/poll; feeder write mock-only |
-| Advanced diagnostics | Yes | Implemented, bounded safe projection | Yes | Yes | Validated |
-| Activity timeline | Yes | Implemented from feeder-reported events only | Yes | Yes | Validated empty state |
+| Home, status and device cards | Yes | Yes | Yes | Validated |
+| Home camera auto-preview | Yes | Lifecycle | Yes | Validated Live |
+| Camera lifecycle and idle stop | Yes | Lifecycle | Yes | Validated (10 s grace) |
+| Overview and device navigation | Yes | Yes | Yes | Validated |
+| Manual dispense dialog | Yes | Yes | Yes | Mocked feeder ACK |
+| Schedule list/create/edit/enable/delete | Yes | Yes | Yes | Read-only VM validation |
+| Schedule and Settings polling-safe drafts | Yes | Yes | Yes | Validated |
+| Activity | Yes | Yes | Yes | Validated |
+| Global and device Settings | Yes | Yes | Yes | Validated without a feeder write |
+| Advanced diagnostics | Yes | Yes | Yes | Validated and redacted |
+| Mobile layouts | Yes | Yes | Yes | Validated at 390x844 |
 
-## Coexistence and rollback
+Physical dispense, schedule mutation and settings mutation remain deliberately
+mock-tested in this migration. They use existing ACK-backed APIs and are never
+triggered by an automated VM test.
 
-The backend APIs stay unchanged. React owns Home, every normal device route
-(Overview, Camera, Schedule, Activity, Settings and Advanced), and global
-Settings. Existing device hash bookmarks are translated to React routes. The
-remaining global diagnostic compatibility URLs still route to the legacy shell
-until the final cutover audit decides their safe replacement or deprecation.
-Vite runs independently in development and
-proxies `/api` to the relay. The final runtime will copy a static Vite build
-into the existing Python image; Node will not run in production.
+## Routes and compatibility
 
-The migration must not switch the production shell or remove the legacy UI
-until every row above has React parity, frontend tests, Playwright coverage and
-a VM lifecycle validation. A failure in the new UI therefore rolls back by
-selecting the legacy shell, without touching feeder, MQTT, camera, queue or
-state data.
+The canonical browser routes are `/`, `/settings` and
+`/devices/:deviceId/{overview,camera,schedule,activity,settings,advanced}`.
+Old device hash bookmarks such as `/devices/:deviceId#camera` are converted by
+the client to their canonical route. Former global dashboard URLs (`/devices`,
+`/cloud`, `/queues`, `/state`, `/ntp`, `/logs`, `/system`) historically showed
+Home and now permanently redirect there.
 
-## Frontend state ownership
+Only browser routes receive the SPA shell. Every unknown `/api/*` route stays
+an HTTP 404.
 
-| State | Owner |
-| --- | --- |
-| Devices, daily detail, camera availability and activity | TanStack Query |
-| Route, dialogs, view-only preferences | React / browser state |
-| React dispense dialog | React local state and mutation state |
-| Schedule lists | TanStack Query, device-scoped |
-| Schedule create/edit draft | React Hook Form, owned by the open dialog |
-| WebRTC peer connection, viewer UUID, retries and teardown | `CameraPlayer` hook |
-| Advanced preference and browser-local feeder display name | `PreferencesProvider` / localStorage |
-| Feeder settings form drafts | React Hook Form, one stable form per device and setting group |
+## State and refresh ownership
 
-Query refetches may update server data but never overwrite a dirty form or
-create a media consumer. Home starts at most one intersection-visible preview;
-the player does not remount during server polling. Camera lifecycle is
-device-scoped and independent of the page polling cadence. A hidden tab is
-released after its grace period and remains paused until an explicit reconnect.
+TanStack Query owns server projections. React Hook Form owns open Schedule and
+Settings drafts; refetches never overwrite dirty values or focus. Camera state
+(viewer UUID, peer connection, heartbeat, retry, AbortController and teardown)
+lives in the shared `CameraPlayer` hook, so ordinary component rerenders never
+create another media consumer.
 
-## Overview parity and constraints
+The normal UI uses only `/api/home`, `/api/devices/:id/daily`,
+`/api/devices/:id/camera`, and explicit typed action endpoints. Advanced uses
+the bounded `/api/devices/:id/advanced` projection. Legacy raw diagnostics,
+raw MQTT state, queue payloads and the global log stream are not public HTTP
+endpoints anymore.
 
-Overview uses the same safe daily projection as Home and Settings. It shows
-only a browser-local feeder name (when set), local presence, a human-readable
-Wi-Fi quality, the day’s configured meals, immediate dispense, and a Camera
-link. It deliberately omits device identifiers, IP/MAC addresses, raw RSSI,
-firmware internals and relay diagnostics. Camera playback remains on Home and
-Camera: Overview never creates a second viewer.
+## Development
 
-The shared player retains browser-local mute, volume and fullscreen controls.
-They never send a feeder command or change the MQTT/control pipeline.
-
-## Schedule parity and constraints
-
-React reads the safe `GET /api/devices/:id/daily` projection and sends only
-the existing typed Schedule API payloads. Every create, edit, disable/enable
-and delete action waits for the feeder acknowledgement; there is no optimistic
-state or durable replay. The feeder accepts a complete schedule snapshot, so
-the backend remains the sole owner of MQTT payload construction.
-
-The legacy meaning of `repeatDay: []` is preserved as **Disabled**. React
-remembers the previous days for a plan disabled in the current browser session.
-After a browser reload, an unknown disabled plan opens the editor and requires
-the user to choose its days before re-enabling it; the UI never invents a
-schedule. The home view only marks meals as scheduled (`○`) because the daily
-API does not yet expose a feeder-confirmed delivery event; it never infers
-success merely from the current time.
-
-The validation VM confirmed the direct Schedule route, the real feeder's
-read-only list and a draft preserved with focus across multiple three-second
-polls. Create, edit, enable/disable and delete have exhaustive mocked E2E
-coverage, but remain explicitly pending a separate deliberately-safe feeder
-mutation run.
-
-## Settings, Advanced and Activity parity
-
-Global Settings owns browser-local preferences only. Advanced diagnostics is
-off by default and persists through the existing `petlibro-advanced-mode`
-localStorage key. The technical route is hidden from device navigation and
-does not fetch diagnostics while the preference is off. It is an interface
-preference, not authorization; the dashboard remains intended for a trusted
-LAN.
-
-Device Settings uses the existing allowlisted, typed control endpoints. Each
-group retains its React Hook Form draft and focus across the three-second
-daily-data refresh. Feeder settings are submitted only through their fixed
-group endpoint and retain the draft if the feeder rejects or times out the
-change. The display name is explicitly browser-local and does not update the
-PETLIBRO account.
-
-The Advanced endpoint is a separate bounded projection: it includes only
-diagnostic summaries and a limited set of sanitized per-device logs. It
-excludes raw MQTT payloads, URLs, process paths, credentials, camera UIDs and
-TUTK details. The normal Activity screen records only direct feeder reports
-of dispensing activity and feeder errors. Technical relay/cloud telemetry is
-excluded; Activity deliberately does not claim whether a meal succeeded until
-the backend has a reliable outcome-aware feeding-history contract.
-
-VM validation confirmed browser preference persistence across a reload, the
-blocked Advanced route while the preference is off, and a Device Settings
-draft retaining its value and keyboard focus across multiple live polls. It
-intentionally made no feeder-setting write. Home and Camera both reached Live;
-leaving Camera then produced viewer disconnect and a durable idle stream stop
-after the ten-second grace period, with no phantom reconnect during the next
-thirty seconds.
-
-## Development commands
-
-```bash
+```sh
 cd web
 npm ci
 npm run dev
 npm run typecheck
 npm test
+npm run test:e2e
 npm run build
-npx playwright test
 ```
 
-The Vite development server listens on port 5173 and proxies `/api` to a relay
-on port 8080 by default. Override `VITE_RELAY_URL` when the relay is elsewhere.
+Vite proxies `/api` to `http://127.0.0.1:8080` by default. Override
+`VITE_RELAY_URL` for another local relay. The production Docker build uses
+Node only for this build stage; FastAPI serves the generated static files.
