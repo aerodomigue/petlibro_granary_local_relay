@@ -10,10 +10,12 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..sound_switch_control import (
@@ -33,6 +35,8 @@ MAX_CAMERA_WEBRTC_OFFER_BYTES = 256_000
 SSE_WAIT_SECONDS = 15.0
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 WEBRTC_SESSION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+REACT_FRONTEND = "react"
+FRONTEND_DIST_DIRECTORY = Path(__file__).with_name("dist")
 
 
 class ControlRequest(BaseModel):
@@ -194,19 +198,33 @@ class ScheduleUpdateRequest(_StrictRequest):
         return value
 
 
-def create_app(context: DashboardContext) -> FastAPI:
+def create_app(context: DashboardContext, frontend: str = "legacy") -> FastAPI:
     """Create the dashboard app with the one narrow sound write route."""
     app = FastAPI(title="PETLIBRO Local Relay", version="0.1.0", docs_url=None, redoc_url=None)
+    react_enabled = frontend == REACT_FRONTEND and FRONTEND_DIST_DIRECTORY.is_dir()
+    if frontend == REACT_FRONTEND and not react_enabled:
+        raise RuntimeError("React dashboard was selected but the static bundle is unavailable")
+    if react_enabled:
+        app.mount("/assets", StaticFiles(directory=FRONTEND_DIST_DIRECTORY / "assets"), name="assets")
+
+    def dashboard_shell() -> Response:
+        """Return the selected dashboard shell without affecting API routes."""
+        if react_enabled:
+            return FileResponse(
+                FRONTEND_DIST_DIRECTORY / "index.html",
+                headers={"Cache-Control": "no-cache"},
+            )
+        return HTMLResponse(DASHBOARD_HTML)
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    def dashboard() -> str:
+    def dashboard() -> Response:
         """Serve the self-contained dashboard UI."""
-        return DASHBOARD_HTML
+        return dashboard_shell()
 
     @app.get("/devices", response_class=HTMLResponse, include_in_schema=False)
-    def devices_dashboard() -> str:
+    def devices_dashboard() -> Response:
         """Serve the fleet view of the dashboard."""
-        return DASHBOARD_HTML
+        return dashboard_shell()
 
     @app.get("/cloud", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/queues", response_class=HTMLResponse, include_in_schema=False)
@@ -215,16 +233,16 @@ def create_app(context: DashboardContext) -> FastAPI:
     @app.get("/logs", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/system", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
-    def global_dashboard_route() -> str:
+    def global_dashboard_route() -> Response:
         """Serve the shell for a deep link to a global dashboard view."""
-        return DASHBOARD_HTML
+        return dashboard_shell()
 
     @app.get("/devices/{device_id}", response_class=HTMLResponse, include_in_schema=False)
-    def device_dashboard(device_id: str) -> str:
+    def device_dashboard(device_id: str) -> Response:
         """Serve a device-scoped dashboard only for a known safe device id."""
         if not DEVICE_ID_PATTERN.fullmatch(device_id) or context.device_detail(device_id, 1) is None:
             raise HTTPException(status_code=404, detail="Unknown device")
-        return DASHBOARD_HTML
+        return dashboard_shell()
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:
@@ -476,6 +494,15 @@ def create_app(context: DashboardContext) -> FastAPI:
     def system() -> dict[str, object]:
         """Return process and local database metadata."""
         return context.system()
+
+    if react_enabled:
+
+        @app.get("/{frontend_path:path}", include_in_schema=False)
+        def react_spa_fallback(frontend_path: str) -> Response:
+            """Serve the React shell for browser routes, never for missing APIs."""
+            if frontend_path == "api" or frontend_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="Unknown API route")
+            return dashboard_shell()
 
     return app
 

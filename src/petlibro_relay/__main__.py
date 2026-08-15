@@ -201,7 +201,12 @@ def main() -> None:
 
     dashboard_server: DashboardServer | None = None
     if config.web_enabled:
-        dashboard_server = DashboardServer(dashboard_context, config.web_host, config.web_port)
+        dashboard_server = DashboardServer(
+            dashboard_context,
+            config.web_host,
+            config.web_port,
+            frontend=config.web_frontend,
+        )
         dashboard_server.start()
 
     capture_proxy = CredentialCaptureProxy(

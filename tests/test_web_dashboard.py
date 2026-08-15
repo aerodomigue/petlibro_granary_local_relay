@@ -28,6 +28,7 @@ from petlibro_relay.observability.log_buffer import RingBufferLogHandler
 from petlibro_relay.observability.telemetry import RelayTelemetry
 from petlibro_relay.state_cache import StateCache
 from petlibro_relay.state_shadow import StateShadow
+from petlibro_relay.web import app as web_app
 from petlibro_relay.web.app import _stream_logs, create_app
 from petlibro_relay.web.context import DashboardContext
 from petlibro_relay.web.static import DASHBOARD_HTML
@@ -80,6 +81,25 @@ class FakeCameraProvider:
             bridge_registered=True,
             player_available=True,
         )
+
+
+def test_react_shell_keeps_api_routes_out_of_spa_fallback(
+    dashboard: tuple[DashboardContext, RingBufferLogHandler],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Serve deep React routes while preserving explicit API 404 semantics."""
+    context, _ = dashboard
+    dist = tmp_path / "web-dist"
+    assets = dist / "assets"
+    assets.mkdir(parents=True)
+    (dist / "index.html").write_text("<div id=\"root\"></div>", encoding="utf-8")
+    monkeypatch.setattr(web_app, "FRONTEND_DIST_DIRECTORY", dist)
+
+    client = TestClient(create_app(context, frontend="react"))
+
+    assert client.get(f"/devices/{DEVICE_A}/overview").status_code == 200
+    assert client.get("/api/does-not-exist").status_code == 404
 
 
 @pytest.fixture

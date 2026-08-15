@@ -17,9 +17,11 @@ SERVER_START_TIMEOUT_SECONDS = 5.0
 class DashboardServer:
     """Run FastAPI away from MQTT callback and delivery threads."""
 
-    def __init__(self, context: DashboardContext, host: str, port: int) -> None:
+    def __init__(self, context: DashboardContext, host: str, port: int, frontend: str = "legacy") -> None:
         self._server = uvicorn.Server(
-            uvicorn.Config(create_app(context), host=host, port=port, log_config=None, access_log=False)
+            uvicorn.Config(
+                create_app(context, frontend=frontend), host=host, port=port, log_config=None, access_log=False
+            )
         )
         self._thread = threading.Thread(target=self._server.run, name="web-dashboard", daemon=True)
 
