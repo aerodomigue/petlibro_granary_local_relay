@@ -1,11 +1,10 @@
 import { useCallback, useRef, useState, type JSX, type RefObject } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 
 import { createSchedule, deleteSchedule, getSchedules, updateSchedule } from "../../api/schedules";
 import { queryKeys } from "../../api/queryKeys";
 import type { Schedule, ScheduleCreateRequest, ScheduleFormValues, ScheduleSnapshot, ScheduleUpdateRequest } from "../../types/api";
-import { legacyDeviceUrl } from "../../routes/LegacyDeviceRedirect";
 import { DeviceNavigation } from "../../components/DeviceNavigation";
 import { ScheduleDeleteDialog } from "./ScheduleDeleteDialog";
 import { ScheduleEditor } from "./ScheduleEditor";
@@ -111,7 +110,7 @@ export function SchedulePage(): JSX.Element {
   const pending = mutation.isPending || refreshingMutation;
   const actionDisabled = pending || !feederOnline;
   return <section aria-labelledby="schedule-title">
-    <header className="page-heading schedule-page-heading"><div><a href={legacyDeviceUrl(deviceId, "overview")}>← Feeder overview</a><h1 id="schedule-title">Schedule</h1><p>Meals are sent directly to your feeder and saved after its confirmation.</p>{!feederOnline && <p className="refresh-warning" role="status">Feeder offline. Schedule changes are unavailable until it reconnects.</p>}{schedules.isError && <p className="refresh-warning" role="status">Could not refresh the schedule. Showing the last confirmed version. <button className="text-button" onClick={() => { void schedules.refetch(); }} type="button">Try again</button></p>}</div><button className="primary-button schedule-add-button" disabled={actionDisabled} onClick={openCreate} ref={addTriggerRef} type="button">+ Add a meal</button></header>
+    <header className="page-heading schedule-page-heading"><div><Link to={`/devices/${encodeURIComponent(deviceId)}/overview`}>← Feeder overview</Link><h1 id="schedule-title">Schedule</h1><p>Meals are sent directly to your feeder and saved after its confirmation.</p>{!feederOnline && <p className="refresh-warning" role="status">Feeder offline. Schedule changes are unavailable until it reconnects.</p>}{schedules.isError && <p className="refresh-warning" role="status">Could not refresh the schedule. Showing the last confirmed version. <button className="text-button" onClick={() => { void schedules.refetch(); }} type="button">Try again</button></p>}</div><button className="primary-button schedule-add-button" disabled={actionDisabled} onClick={openCreate} ref={addTriggerRef} type="button">+ Add a meal</button></header>
     <DeviceNavigation active="schedule" deviceId={deviceId} />
     {actionError && <p className="form-error schedule-action-error" role="alert">{actionError}</p>}
     <ScheduleList disabled={actionDisabled} entries={entries} onDelete={deleteEntry} onEdit={openEdit} onToggle={handleToggle} />

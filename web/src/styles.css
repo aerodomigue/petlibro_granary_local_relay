@@ -52,12 +52,25 @@ body { margin: 0; }
 .camera-player video { background: #03070b; height: 100%; object-fit: contain; width: 100%; }
 .camera-player__status { background: rgb(8 14 20 / 80%); border: 1px solid #304353; border-radius: 999px; bottom: 12px; color: #f1b355; font-size: 12px; left: 12px; padding: 4px 9px; position: absolute; }
 .camera-player__reconnect { background: #347dae; border: 1px solid #53a6dc; border-radius: 10px; bottom: 12px; color: #edf4f8; font-weight: 700; min-height: 44px; padding: 8px 12px; position: absolute; right: 12px; }
+.camera-player__controls { align-items: center; background: rgb(8 14 20 / 82%); border: 1px solid #304353; border-radius: 10px; bottom: 12px; display: flex; gap: 8px; padding: 5px; position: absolute; right: 12px; }
+.camera-player__control { align-items: center; background: transparent; border: 0; color: #edf4f8; display: inline-flex; font-size: 18px; justify-content: center; min-height: 38px; min-width: 38px; }
+.camera-player__volume { accent-color: #53a6dc; min-height: 38px; width: min(120px, 25vw); }
+.camera-player:has(.camera-player__reconnect) .camera-player__controls { bottom: 66px; }
 .camera-placeholder { color: #9aacba; gap: 8px; overflow-wrap: anywhere; padding: 18px; text-align: center; }
 .camera-placeholder strong { color: #edf4f8; }
 
 .schedule-summary { padding: 16px; }
 .schedule-summary h3 { font-size: 14px; margin: 0 0 10px; }
 .schedule-summary ul { display: grid; gap: 7px; list-style: none; margin: 0; padding: 0; }
+
+.overview-grid { display: grid; gap: 16px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.overview-card { background: #15212d; border: 1px solid #304353; border-radius: 14px; display: grid; gap: 14px; min-width: 0; padding: 17px; }
+.overview-card .schedule-summary { padding: 0; }
+.overview-card h2 { font-size: 18px; margin: 0; }
+.overview-card p { color: #9aacba; margin: 0; }
+.overview-card--actions .primary-button { align-self: end; }
+.button { align-items: center; border: 1px solid #304353; border-radius: 10px; color: #edf4f8; display: inline-flex; font-weight: 700; justify-content: center; min-height: 44px; padding: 8px 12px; text-decoration: none; width: fit-content; }
+.button--secondary { background: #223647; }
 
 .primary-button { background: #347dae; border: 1px solid #53a6dc; border-radius: 10px; color: #edf4f8; font-weight: 700; min-height: 44px; width: 100%; }
 .primary-button:disabled, button:disabled { cursor: not-allowed; opacity: .55; }
@@ -154,4 +167,7 @@ body { margin: 0; }
   .settings-card__save { width: 100%; }
   .advanced-values > div { grid-template-columns: 1fr; gap: 3px; }
   .advanced-values dd { text-align: left; }
+  .overview-grid { grid-template-columns: 1fr; }
+  .camera-player__controls { min-height: 44px; }
+  .camera-player__control { min-height: 44px; min-width: 44px; }
 }

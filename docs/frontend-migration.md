@@ -13,6 +13,8 @@ is complete and the new static bundle is explicitly enabled.
 | Home camera auto-start | Yes | Stabilized | Lifecycle | Yes | Validated Live |
 | Viewer UUID lifecycle | Yes | Stabilized | Lifecycle | Yes | Validated |
 | Camera close / idle stop | Yes | Stabilized | Lifecycle | Yes | Validated (10 s grace) |
+| Camera browser controls (mute, volume, fullscreen) | Yes | Implemented | Yes | Pending | Pending |
+| Device Overview | Yes | Implemented | Yes | Yes | Pending |
 | Manual dispense | Yes | Stabilized, VM pending | Basic | Yes | Pending |
 | Schedule list | Yes | Implemented | Yes | Yes | Validated read-only |
 | Schedule create / edit | Yes | Implemented, feeder ACK required | Yes | Yes | Pending safe feeder mutation validation |
@@ -27,10 +29,12 @@ is complete and the new static bundle is explicitly enabled.
 
 ## Coexistence and rollback
 
-The backend APIs stay unchanged. React currently owns only Home and the
-device Camera page. All unmigrated device tabs and global views deliberately
-redirect to the legacy shell through `?ui=legacy`; they are not React
-placeholders. Vite runs independently in development and
+The backend APIs stay unchanged. React owns Home, every normal device route
+(Overview, Camera, Schedule, Activity, Settings and Advanced), and global
+Settings. Existing device hash bookmarks are translated to React routes. The
+remaining global diagnostic compatibility URLs still route to the legacy shell
+until the final cutover audit decides their safe replacement or deprecation.
+Vite runs independently in development and
 proxies `/api` to the relay. The final runtime will copy a static Vite build
 into the existing Python image; Node will not run in production.
 
@@ -58,6 +62,18 @@ create a media consumer. Home starts at most one intersection-visible preview;
 the player does not remount during server polling. Camera lifecycle is
 device-scoped and independent of the page polling cadence. A hidden tab is
 released after its grace period and remains paused until an explicit reconnect.
+
+## Overview parity and constraints
+
+Overview uses the same safe daily projection as Home and Settings. It shows
+only a browser-local feeder name (when set), local presence, a human-readable
+Wi-Fi quality, the day’s configured meals, immediate dispense, and a Camera
+link. It deliberately omits device identifiers, IP/MAC addresses, raw RSSI,
+firmware internals and relay diagnostics. Camera playback remains on Home and
+Camera: Overview never creates a second viewer.
+
+The shared player retains browser-local mute, volume and fullscreen controls.
+They never send a feeder command or change the MQTT/control pipeline.
 
 ## Schedule parity and constraints
 

@@ -84,12 +84,12 @@ class FakeCameraProvider:
         )
 
 
-def test_react_shell_preserves_unmigrated_legacy_routes_and_api_404s(
+def test_react_shell_serves_migrated_device_routes_and_preserves_legacy_globals(
     dashboard: tuple[DashboardContext, RingBufferLogHandler],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Use the legacy UI for unmigrated routes while preserving API 404 semantics."""
+    """Serve every migrated device route while preserving API 404 semantics."""
     context, _ = dashboard
     dist = tmp_path / "web-dist"
     assets = dist / "assets"
@@ -99,15 +99,12 @@ def test_react_shell_preserves_unmigrated_legacy_routes_and_api_404s(
 
     client = TestClient(create_app(context, frontend="react"))
 
-    device_route = client.get(f"/devices/{DEVICE_A}/overview", follow_redirects=False)
-    assert device_route.status_code == 302
-    assert device_route.headers["location"] == f"/devices/{DEVICE_A}?ui=legacy#overview"
     for legacy_path in ("/devices", "/cloud", "/queues", "/state", "/ntp", "/logs", "/system"):
         legacy_route = client.get(legacy_path, follow_redirects=False)
         assert legacy_route.status_code == 302
         assert legacy_route.headers["location"] == f"{legacy_path}?ui=legacy"
     assert client.get("/settings").text == "<div id=\"root\"></div>"
-    for react_path in ("activity", "advanced", "camera", "schedule", "settings"):
+    for react_path in ("activity", "advanced", "camera", "overview", "schedule", "settings"):
         react_route = client.get(f"/devices/{DEVICE_A}/{react_path}")
         assert react_route.status_code == 200
         assert react_route.text == "<div id=\"root\"></div>"

@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CameraPlayer } from "../src/features/camera/CameraPlayer";
@@ -80,6 +80,22 @@ afterEach(() => {
 });
 
 describe("CameraPlayer", () => {
+  it("keeps browser-local audio and fullscreen controls independent from the viewer lifecycle", async () => {
+    vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
+    vi.stubGlobal("MediaStream", FakeMediaStream);
+    configureSuccessfulCameraApi();
+
+    const view = render(<CameraPlayer deviceId="device-a" />);
+    const video = view.container.querySelector("video");
+    expect(video).not.toBeNull();
+    fireEvent.click(view.getByRole("button", { name: "Unmute camera" }));
+    await waitFor(() => expect(video?.muted).toBe(false));
+    fireEvent.change(view.getByRole("slider", { name: "Camera volume" }), { target: { value: "0.4" } });
+    await waitFor(() => expect(video?.volume).toBeCloseTo(0.4));
+    expect(view.getByRole("button", { name: "Toggle camera fullscreen" })).toBeVisible();
+    expect(activateViewer).toHaveBeenCalledTimes(1);
+  });
+
   it("registers one viewer and keeps it across ordinary rerenders", async () => {
     vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
     vi.stubGlobal("MediaStream", FakeMediaStream);
