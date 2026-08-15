@@ -83,7 +83,13 @@ export interface ScheduleMutationResult {
 }
 
 export interface DailyDeviceDetail {
-  device: DailyDevice;
+  /**
+   * The device detail projection intentionally keeps camera availability at
+   * the response root. Home embeds it in each device card, while /daily does
+   * not. Keeping that difference explicit prevents a runtime-only mismatch.
+   */
+  device: Omit<DailyDevice, "camera">;
+  camera: CameraAvailability;
   state: {
     desired: SettingEntry[];
     local_confirmed: SettingEntry[];
@@ -189,6 +195,6 @@ export interface AdvancedLogEntry {
 }
 
 export interface ScheduleData {
-  device: DailyDevice;
+  device: Omit<DailyDevice, "camera">;
   schedules: ScheduleSnapshot[];
 }

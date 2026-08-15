@@ -31,10 +31,10 @@ export function OverviewPage(): JSX.Element {
   if (!detail.data && detail.isPending) return <p className="state-message">Loading feeder…</p>;
   if (!detail.data && detail.isError) return <p className="state-message state-message--error">Feeder overview is unavailable: {detail.error.message}</p>;
 
-  const { device } = detail.data!;
+  const { camera, device } = detail.data!;
   const online = device.local_state === "LOCAL_ONLINE";
   const displayName = deviceNames[deviceId]?.trim() || device.product_id || "PETLIBRO feeder";
-  const cameraAvailable = device.camera.bridge_registered && device.camera.go2rtc_reachable && device.camera.bridge_reachable !== false;
+  const cameraAvailable = camera.bridge_registered && camera.go2rtc_reachable && camera.bridge_reachable !== false;
 
   return <section aria-labelledby="overview-title">
     <header className="page-heading">

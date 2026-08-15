@@ -15,7 +15,6 @@ const DAILY = {
   camera: { available: false, bridge_registered: false, go2rtc_reachable: false, media_consumers: 0, online: false },
   controls: {},
   device: {
-    camera: { available: false, bridge_registered: false, go2rtc_reachable: false, media_consumers: 0, online: false },
     device_id: DEVICE_ID,
     last_seen_at: Math.floor(Date.now() / 1_000),
     local_state: "LOCAL_ONLINE",

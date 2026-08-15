@@ -5,7 +5,8 @@ import type { DailyDeviceDetail } from "../src/types/api";
 
 function detailWithPlans(plans: unknown[]): DailyDeviceDetail {
   return {
-    device: { camera: { available: false, bridge_registered: false, go2rtc_reachable: false, media_consumers: 0, online: false }, device_id: "device-a", last_seen_at: null, local_state: "LOCAL_ONLINE", product_id: "PLAF203", rssi: null, schedule: [] },
+    camera: { available: false, bridge_registered: false, go2rtc_reachable: false, media_consumers: 0, online: false },
+    device: { device_id: "device-a", last_seen_at: null, local_state: "LOCAL_ONLINE", product_id: "PLAF203", rssi: null, schedule: [] },
     state: { desired: [], local_confirmed: [], schedule_plans: plans.map((plan) => ({ plan, source: "local", updated_at: 123 })) },
     controls: {},
     activity: [],
