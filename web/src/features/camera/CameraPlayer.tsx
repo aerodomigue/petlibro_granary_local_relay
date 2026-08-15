@@ -14,7 +14,9 @@ interface CameraPlayerProps {
 }
 
 function viewerId(): string {
-  return crypto.randomUUID().replaceAll("-", "");
+  const generated = globalThis.crypto?.randomUUID?.();
+  if (generated) return generated.replaceAll("-", "");
+  return Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
 }
 
 async function completeOffer(peerConnection: RTCPeerConnection): Promise<string> {

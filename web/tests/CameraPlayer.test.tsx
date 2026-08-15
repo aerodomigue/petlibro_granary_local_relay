@@ -99,6 +99,17 @@ describe("CameraPlayer", () => {
     expect(releaseViewer).toHaveBeenCalledWith("device-a", expect.any(String));
   });
 
+  it("creates a viewer when the browser does not expose crypto.randomUUID", async () => {
+    vi.stubGlobal("crypto", {});
+    vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
+    vi.stubGlobal("MediaStream", FakeMediaStream);
+    configureSuccessfulCameraApi();
+
+    render(<CameraPlayer deviceId="device-a" />);
+    await waitFor(() => expect(activateViewer).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(activateViewer).mock.calls[0]?.[1]).toMatch(/^[0-9a-f]{32}$/);
+  });
+
   it("sends heartbeats after activation and stops them on teardown", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
