@@ -5,10 +5,13 @@ export interface RelayStatus {
 }
 
 export interface CameraAvailability {
+  available: boolean;
+  bridge_reachable?: boolean;
   bridge_registered: boolean;
   go2rtc_reachable: boolean;
   online: boolean;
   media_consumers: number;
+  webrtc?: boolean;
   reason?: string;
 }
 
@@ -31,10 +34,4 @@ export interface DailyDevice {
 export interface HomeResponse {
   status: RelayStatus;
   devices: DailyDevice[];
-}
-
-export interface DailyDeviceResponse {
-  device: DailyDevice;
-  camera: CameraAvailability;
-  activity: unknown[];
 }

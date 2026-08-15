@@ -5,6 +5,13 @@ export interface WebRtcExchange {
   sessionId: string | null;
 }
 
+export class WebRtcExchangeError extends Error {
+  public constructor(message: string, public readonly sessionId: string | null) {
+    super(message);
+    this.name = "WebRtcExchangeError";
+  }
+}
+
 function viewerPath(deviceId: string, viewerId: string): string {
   return `/api/devices/${encodeURIComponent(deviceId)}/camera/viewers/${encodeURIComponent(viewerId)}`;
 }
@@ -13,8 +20,8 @@ export function activateViewer(deviceId: string, viewerId: string, signal: Abort
   return request<void>(viewerPath(deviceId, viewerId), { method: "POST", signal });
 }
 
-export function heartbeatViewer(deviceId: string, viewerId: string): Promise<void> {
-  return request<void>(viewerPath(deviceId, viewerId), { method: "PUT", keepalive: true });
+export function heartbeatViewer(deviceId: string, viewerId: string, signal: AbortSignal): Promise<void> {
+  return request<void>(viewerPath(deviceId, viewerId), { method: "PUT", signal });
 }
 
 export function releaseViewer(deviceId: string, viewerId: string): Promise<void> {
@@ -29,7 +36,13 @@ export async function exchangeWebRtc(deviceId: string, viewerId: string, offer: 
     body: offer,
   });
   if (!response.ok) throw new Error(`Camera negotiation failed: HTTP ${response.status}`);
-  return { answer: await response.text(), sessionId: response.headers.get("X-Relay-WebRTC-Session") };
+  const sessionId = response.headers.get("X-Relay-WebRTC-Session");
+  try {
+    return { answer: await response.text(), sessionId };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Camera negotiation response could not be read";
+    throw new WebRtcExchangeError(message, sessionId);
+  }
 }
 
 export function releaseWebRtc(deviceId: string, sessionId: string): Promise<void> {

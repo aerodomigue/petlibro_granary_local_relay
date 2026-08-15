@@ -1,12 +1,24 @@
-import { Navigate, useLocation, useParams } from "react-router-dom";
-import type { JSX } from "react";
+import { useEffect, type JSX } from "react";
+import { useLocation, useParams } from "react-router-dom";
 
 const DEVICE_TABS = new Set(["overview", "camera", "schedule", "activity", "settings", "advanced"]);
 
+export function legacyDeviceUrl(deviceId: string, tab: string): string {
+  return `/devices/${encodeURIComponent(deviceId)}?ui=legacy#${encodeURIComponent(tab)}`;
+}
+
 export function LegacyDeviceRedirect(): JSX.Element {
-  const { deviceId } = useParams();
+  const { deviceId, tab: routeTab } = useParams();
   const { hash } = useLocation();
-  const tab = hash.slice(1);
-  const target = DEVICE_TABS.has(tab) ? tab : "overview";
-  return <Navigate replace to={`/devices/${encodeURIComponent(deviceId ?? "")}/${target}`} />;
+  const requestedTab = routeTab ?? hash.slice(1);
+  const tab = DEVICE_TABS.has(requestedTab) ? requestedTab : "overview";
+  useEffect(() => {
+    if (deviceId) window.location.replace(legacyDeviceUrl(deviceId, tab));
+  }, [deviceId, tab]);
+  return <p className="state-message">Opening the classic feeder view…</p>;
+}
+
+export function LegacyGlobalRedirect({ path }: { path: string }): JSX.Element {
+  useEffect(() => { window.location.replace(`/${path}?ui=legacy`); }, [path]);
+  return <p className="state-message">Opening the classic settings view…</p>;
 }

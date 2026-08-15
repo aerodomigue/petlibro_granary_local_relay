@@ -9,11 +9,11 @@ is complete and the new static bundle is explicitly enabled.
 
 | Feature | Legacy | React | Unit | E2E | VM |
 | --- | --- | --- | --- | --- |
-| Home device cards and status | Yes | Validated | Basic | Yes | Yes |
-| Home camera auto-start | Yes | Validated | Lifecycle | Yes | Yes |
-| Viewer UUID lifecycle | Yes | Validated | Lifecycle | Yes | Yes |
-| Camera close / idle stop | Yes | Validated | Lifecycle | Yes | Yes |
-| Manual dispense | Yes | Ready for VM | Basic | Yes | Todo |
+| Home device cards and status | Yes | Stabilized, VM pending | Basic | Yes | Pending |
+| Home camera auto-start | Yes | Stabilized, VM pending | Lifecycle | Yes | Pending |
+| Viewer UUID lifecycle | Yes | Stabilized, VM pending | Lifecycle | Yes | Pending |
+| Camera close / idle stop | Yes | Stabilized, VM pending | Lifecycle | Yes | Pending |
+| Manual dispense | Yes | Stabilized, VM pending | Basic | Yes | Pending |
 | Schedule list/create/edit/delete/enable | Yes | Todo | Todo | Todo | Todo |
 | Activity timeline | Yes | Todo | Todo | Todo | Todo |
 | Typed device settings | Yes | Todo | Todo | Todo | Todo |
@@ -21,7 +21,10 @@ is complete and the new static bundle is explicitly enabled.
 
 ## Coexistence and rollback
 
-The backend APIs stay unchanged. Vite runs independently in development and
+The backend APIs stay unchanged. React currently owns only Home and the
+device Camera page. All unmigrated device tabs and global views deliberately
+redirect to the legacy shell through `?ui=legacy`; they are not React
+placeholders. Vite runs independently in development and
 proxies `/api` to the relay. The final runtime will copy a static Vite build
 into the existing Python image; Node will not run in production.
 
@@ -37,12 +40,15 @@ state data.
 | --- | --- |
 | Devices, daily detail, camera availability and activity | TanStack Query |
 | Route, dialogs, view-only preferences | React / browser state |
-| Schedule, settings and dispense edits | React Hook Form draft state |
+| React dispense dialog | React local state and mutation state |
+| Schedule and settings drafts | Legacy dashboard until their migration starts |
 | WebRTC peer connection, viewer UUID, retries and teardown | `CameraPlayer` hook |
 
 Query refetches may update server data but never overwrite a dirty form or
-create a media consumer. Camera lifecycle is device-scoped and independent of
-the page polling cadence.
+create a media consumer. Home starts at most one intersection-visible preview;
+the player does not remount during server polling. Camera lifecycle is
+device-scoped and independent of the page polling cadence. A hidden tab is
+released after its grace period and remains paused until an explicit reconnect.
 
 ## Development commands
 

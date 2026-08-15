@@ -13,6 +13,9 @@ export default defineConfig({
   },
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
-    { name: "mobile-chromium", use: { ...devices["iPhone 13"], browserName: "chromium" } },
+    { name: "mobile-360", use: { browserName: "chromium", hasTouch: true, isMobile: true, viewport: { width: 360, height: 800 } } },
+    { name: "mobile-390", use: { ...devices["iPhone 13"], browserName: "chromium" } },
+    { name: "mobile-430", use: { browserName: "chromium", hasTouch: true, isMobile: true, viewport: { width: 430, height: 932 } } },
+    { name: "tablet-768", use: { browserName: "chromium", hasTouch: true, isMobile: true, viewport: { width: 768, height: 1024 } } },
   ],
 });

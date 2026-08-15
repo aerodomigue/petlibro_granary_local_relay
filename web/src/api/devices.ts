@@ -1,5 +1,5 @@
 import { request } from "./client";
-import type { DailyDeviceResponse, HomeResponse } from "../types/api";
+import type { CameraAvailability, HomeResponse } from "../types/api";
 
 export function getHome(signal?: AbortSignal): Promise<HomeResponse> {
   return request<HomeResponse>("/api/home", { signal });
@@ -13,6 +13,6 @@ export function dispense(deviceId: string, grainNum: number): Promise<void> {
   });
 }
 
-export function getDailyDevice(deviceId: string, signal?: AbortSignal): Promise<DailyDeviceResponse> {
-  return request<DailyDeviceResponse>(`/api/devices/${encodeURIComponent(deviceId)}/daily`, { signal });
+export function getCameraStatus(deviceId: string, signal?: AbortSignal): Promise<CameraAvailability> {
+  return request<CameraAvailability>(`/api/devices/${encodeURIComponent(deviceId)}/camera`, { signal });
 }

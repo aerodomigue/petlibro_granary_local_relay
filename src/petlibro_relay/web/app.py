@@ -12,9 +12,10 @@ import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -37,6 +38,8 @@ DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 WEBRTC_SESSION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 REACT_FRONTEND = "react"
 FRONTEND_DIST_DIRECTORY = Path(__file__).with_name("dist")
+LEGACY_FRONTEND_QUERY_VALUE = "legacy"
+LEGACY_FRONTEND_QUERY_KEY = "ui"
 
 
 class ControlRequest(BaseModel):
@@ -207,9 +210,9 @@ def create_app(context: DashboardContext, frontend: str = "legacy") -> FastAPI:
     if react_enabled:
         app.mount("/assets", StaticFiles(directory=FRONTEND_DIST_DIRECTORY / "assets"), name="assets")
 
-    def dashboard_shell() -> Response:
+    def dashboard_shell(request: Request) -> Response:
         """Return the selected dashboard shell without affecting API routes."""
-        if react_enabled:
+        if react_enabled and request.query_params.get(LEGACY_FRONTEND_QUERY_KEY) != LEGACY_FRONTEND_QUERY_VALUE:
             return FileResponse(
                 FRONTEND_DIST_DIRECTORY / "index.html",
                 headers={"Cache-Control": "no-cache"},
@@ -217,14 +220,18 @@ def create_app(context: DashboardContext, frontend: str = "legacy") -> FastAPI:
         return HTMLResponse(DASHBOARD_HTML)
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    def dashboard() -> Response:
+    def dashboard(request: Request) -> Response:
         """Serve the self-contained dashboard UI."""
-        return dashboard_shell()
+        return dashboard_shell(request)
 
     @app.get("/devices", response_class=HTMLResponse, include_in_schema=False)
-    def devices_dashboard() -> Response:
+    def devices_dashboard(request: Request) -> Response:
         """Serve the fleet view of the dashboard."""
-        return dashboard_shell()
+        if react_enabled and request.query_params.get(LEGACY_FRONTEND_QUERY_KEY) != LEGACY_FRONTEND_QUERY_VALUE:
+            return RedirectResponse(
+                url=f"/devices?{LEGACY_FRONTEND_QUERY_KEY}={LEGACY_FRONTEND_QUERY_VALUE}", status_code=302
+            )
+        return dashboard_shell(request)
 
     @app.get("/cloud", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/queues", response_class=HTMLResponse, include_in_schema=False)
@@ -233,16 +240,20 @@ def create_app(context: DashboardContext, frontend: str = "legacy") -> FastAPI:
     @app.get("/logs", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/system", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
-    def global_dashboard_route() -> Response:
+    def global_dashboard_route(request: Request) -> Response:
         """Serve the shell for a deep link to a global dashboard view."""
-        return dashboard_shell()
+        if react_enabled and request.query_params.get(LEGACY_FRONTEND_QUERY_KEY) != LEGACY_FRONTEND_QUERY_VALUE:
+            return RedirectResponse(
+                url=f"{request.url.path}?{LEGACY_FRONTEND_QUERY_KEY}={LEGACY_FRONTEND_QUERY_VALUE}", status_code=302
+            )
+        return dashboard_shell(request)
 
     @app.get("/devices/{device_id}", response_class=HTMLResponse, include_in_schema=False)
-    def device_dashboard(device_id: str) -> Response:
+    def device_dashboard(device_id: str, request: Request) -> Response:
         """Serve a device-scoped dashboard only for a known safe device id."""
         if not DEVICE_ID_PATTERN.fullmatch(device_id) or context.device_detail(device_id, 1) is None:
             raise HTTPException(status_code=404, detail="Unknown device")
-        return dashboard_shell()
+        return dashboard_shell(request)
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:
@@ -498,11 +509,22 @@ def create_app(context: DashboardContext, frontend: str = "legacy") -> FastAPI:
     if react_enabled:
 
         @app.get("/{frontend_path:path}", include_in_schema=False)
-        def react_spa_fallback(frontend_path: str) -> Response:
+        def react_spa_fallback(frontend_path: str, request: Request) -> Response:
             """Serve the React shell for browser routes, never for missing APIs."""
             if frontend_path == "api" or frontend_path.startswith("api/"):
                 raise HTTPException(status_code=404, detail="Unknown API route")
-            return dashboard_shell()
+            device_route = re.fullmatch(r"devices/([^/]+)/([^/]+)", frontend_path)
+            if device_route is not None and device_route.group(2) != "camera":
+                device_id, tab = device_route.groups()
+                return RedirectResponse(
+                    url=f"/devices/{quote(device_id)}?{LEGACY_FRONTEND_QUERY_KEY}={LEGACY_FRONTEND_QUERY_VALUE}#{quote(tab)}",
+                    status_code=302,
+                )
+            if frontend_path in {"cloud", "queues", "state", "ntp", "logs", "system", "settings"}:
+                return RedirectResponse(
+                    url=f"/{frontend_path}?{LEGACY_FRONTEND_QUERY_KEY}={LEGACY_FRONTEND_QUERY_VALUE}", status_code=302
+                )
+            return dashboard_shell(request)
 
     return app
 

@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type TestInfo } from "@playwright/test";
 
 const DEVICE_ID = "device-a";
 
@@ -22,9 +22,14 @@ async function mockMediaBrowser(page: Page): Promise<void> {
       public async setRemoteDescription(): Promise<void> { this.ontrack?.({ track: { kind: "video" } }); }
       public close(): void {}
     }
+    const sources = new WeakMap<HTMLMediaElement, unknown>();
     Object.defineProperty(HTMLMediaElement.prototype, "srcObject", {
       configurable: true,
-      set(): void { queueMicrotask(() => this.dispatchEvent(new Event("loadeddata"))); },
+      get(): unknown { return sources.get(this); },
+      set(source: unknown): void {
+        sources.set(this, source);
+        queueMicrotask(() => this.dispatchEvent(new Event("loadeddata")));
+      },
     });
     Object.defineProperty(HTMLMediaElement.prototype, "play", { configurable: true, value: async (): Promise<void> => undefined });
     Object.assign(window, { MediaStream: FakeMediaStream, RTCPeerConnection: FakePeerConnection });
@@ -47,8 +52,8 @@ async function mockRelay(page: Page): Promise<RelayCalls> {
     const request = route.request();
     const url = new URL(request.url());
     const json = (body: unknown, status = 200): Promise<void> => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
-    if (url.pathname === "/api/home") return json({ status: { relay: { status: "running", uptime_seconds: 1 }, local_mqtt: { connected: true }, devices: { known: 1, local_online: 1, cloud_online: 1 } }, devices: [{ device_id: DEVICE_ID, product_id: "PLAF203", local_state: "LOCAL_ONLINE", last_seen_at: 1, rssi: -42, schedule: [{ execution_time: "07:30", grain_num: 3, repeat_day: [1] }], camera: { bridge_registered: true, go2rtc_reachable: true, online: true, media_consumers: 0 } }] });
-    if (url.pathname === `/api/devices/${DEVICE_ID}/daily`) return json({ device: { device_id: DEVICE_ID, product_id: "PLAF203", local_state: "LOCAL_ONLINE", last_seen_at: 1, rssi: -42, schedule: [], camera: { bridge_registered: true, go2rtc_reachable: true, online: true, media_consumers: 0 } }, camera: { bridge_registered: true, go2rtc_reachable: true, online: true, media_consumers: 0 }, activity: [] });
+    if (url.pathname === "/api/home") return json({ status: { relay: { status: "running", uptime_seconds: 1 }, local_mqtt: { connected: true }, devices: { known: 1, local_online: 1, cloud_online: 1 } }, devices: [{ device_id: DEVICE_ID, product_id: "PLAF203", local_state: "LOCAL_ONLINE", last_seen_at: 1, rssi: -42, schedule: [{ execution_time: "07:30", grain_num: 3, repeat_day: [1] }], camera: { available: true, bridge_registered: true, go2rtc_reachable: true, online: true, media_consumers: 0 } }] });
+    if (url.pathname === `/api/devices/${DEVICE_ID}/camera`) return json({ available: true, bridge_registered: true, go2rtc_reachable: true, online: true, media_consumers: 0 });
     if (url.pathname.includes("/camera/viewers/")) {
       if (request.method() === "POST") registrations.push(url.pathname);
       if (request.method() === "DELETE") deletes.push(url.pathname);
@@ -68,6 +73,13 @@ async function mockRelay(page: Page): Promise<RelayCalls> {
   return { deletes, registrations, whepOffers, dispenseBodies };
 }
 
+async function mockLegacyOverview(page: Page): Promise<void> {
+  await page.route((url) => url.pathname === `/devices/${DEVICE_ID}` && url.searchParams.get("ui") === "legacy", (route) => route.fulfill({
+    contentType: "text/html",
+    body: "<main><h1>Legacy feeder overview</h1></main>",
+  }));
+}
+
 test("Home and Camera use one player lifecycle per mounted page", async ({ page }) => {
   const errors: string[] = [];
   const failedResources: string[] = [];
@@ -78,6 +90,7 @@ test("Home and Camera use one player lifecycle per mounted page", async ({ page 
   });
   await mockMediaBrowser(page);
   const calls = await mockRelay(page);
+  await mockLegacyOverview(page);
 
   await page.goto("/");
   await page.waitForTimeout(100);
@@ -85,7 +98,8 @@ test("Home and Camera use one player lifecycle per mounted page", async ({ page 
   expect(errors).toEqual([]);
   await expect(page.getByRole("heading", { name: "PLAF203" })).toBeVisible();
   await expect(page.getByText("Live", { exact: true })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Open feeder settings" })).toHaveAttribute("href", `/devices/${DEVICE_ID}/overview`);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth === document.documentElement.clientWidth)).toBe(true);
+  await expect(page.getByRole("link", { name: "Open feeder settings" })).toHaveAttribute("href", `/devices/${DEVICE_ID}?ui=legacy#overview`);
   expect(calls.registrations).toHaveLength(1);
   expect(calls.whepOffers).toEqual(["offer"]);
 
@@ -98,14 +112,100 @@ test("Home and Camera use one player lifecycle per mounted page", async ({ page 
   await page.getByRole("button", { name: "Dispense", exact: true }).click();
   await expect.poll(() => calls.dispenseBodies).toEqual(["{\"grainNum\":2}"]);
 
-  await page.getByRole("link", { name: "Open feeder settings" }).click();
-  await expect(page.getByText("Device migration preview")).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
   await expect.poll(() => calls.deletes.length).toBe(1);
+  await page.getByRole("link", { name: "Open feeder settings" }).click();
+  await expect(page.getByRole("heading", { name: "Legacy feeder overview" })).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/devices/${DEVICE_ID}\\?ui=legacy#overview$`));
 
   await page.goto(`/devices/${DEVICE_ID}/camera`);
   await expect(page.getByRole("heading", { name: "Camera" })).toBeVisible();
   await expect(page.getByText("Live", { exact: true })).toBeVisible();
   expect(calls.registrations).toHaveLength(2);
   expect(calls.whepOffers).toHaveLength(2);
+
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+    await expect.poll(() => calls.deletes.length).toBe(cycle + 2);
+    await page.goto(`/devices/${DEVICE_ID}/camera`);
+    await expect(page.getByText("Live", { exact: true })).toBeVisible();
+  }
+  expect(calls.registrations).toHaveLength(5);
+  expect(calls.whepOffers).toHaveLength(5);
   expect(errors).toEqual([]);
+});
+
+test("Camera keeps its viewer dormant when the relay reports it unavailable", async ({ page }) => {
+  await mockMediaBrowser(page);
+  const registrations: string[] = [];
+  await page.route((url) => url.pathname.startsWith("/api/"), async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === `/api/devices/${DEVICE_ID}/camera`) {
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ available: false, online: false, bridge_registered: false, go2rtc_reachable: false, reason: "Camera bridge offline" }) });
+    }
+    if (url.pathname.includes("/camera/viewers/") && request.method() === "POST") registrations.push(url.pathname);
+    return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+  });
+
+  await page.goto(`/devices/${DEVICE_ID}/camera`);
+  await expect(page.getByText("Camera unavailable", { exact: true })).toBeVisible();
+  expect(registrations).toEqual([]);
+});
+
+test("Home keeps a single live preview when multiple feeder cards are visible", async ({ page }) => {
+  await mockMediaBrowser(page);
+  const registrations: string[] = [];
+  await page.route((url) => url.pathname.startsWith("/api/"), async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const json = (body: unknown, status = 200): Promise<void> => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+    if (url.pathname === "/api/home") {
+      return json({ status: { relay: { status: "running", uptime_seconds: 1 }, local_mqtt: { connected: true }, devices: { known: 2, local_online: 2, cloud_online: 2 } }, devices: [DEVICE_ID, "device-b"].map((device_id) => ({ device_id, product_id: "PLAF203", local_state: "LOCAL_ONLINE", last_seen_at: 1, rssi: -42, schedule: [], camera: { available: true, bridge_registered: true, go2rtc_reachable: true, online: true, media_consumers: 0 } })) });
+    }
+    if (url.pathname.includes("/camera/viewers/") && request.method() === "POST") {
+      registrations.push(url.pathname);
+      return route.fulfill({ status: 204 });
+    }
+    if (url.pathname.endsWith("/camera/webrtc") && request.method() === "POST") {
+      return route.fulfill({ status: 201, contentType: "application/sdp", headers: { "X-Relay-WebRTC-Session": "b".repeat(32) }, body: "answer" });
+    }
+    if (request.method() === "DELETE" || request.method() === "PUT") return route.fulfill({ status: 204 });
+    return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "PLAF203" })).toHaveCount(2);
+  await expect.poll(() => registrations.length).toBe(1);
+  expect(await page.evaluate(() => document.querySelectorAll("[aria-label='Live feeder camera']").length)).toBe(1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth === document.documentElement.clientWidth)).toBe(true);
+});
+
+test("Home retains an active player when a later status poll fails", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "The polling error lifecycle is viewport-independent.");
+  await mockMediaBrowser(page);
+  const registrations: string[] = [];
+  let homeRequests = 0;
+  await page.route((url) => url.pathname.startsWith("/api/"), async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === "/api/home") {
+      homeRequests += 1;
+      if (homeRequests > 1) return route.fulfill({ status: 503, contentType: "application/json", body: "{\"detail\":\"Relay busy\"}" });
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: { relay: { status: "running", uptime_seconds: 1 }, local_mqtt: { connected: true }, devices: { known: 1, local_online: 1, cloud_online: 1 } }, devices: [{ device_id: DEVICE_ID, product_id: "PLAF203", local_state: "LOCAL_ONLINE", last_seen_at: 1, rssi: -42, schedule: [], camera: { available: true, bridge_registered: true, go2rtc_reachable: true, online: true, media_consumers: 0 } }] }) });
+    }
+    if (url.pathname.includes("/camera/viewers/") && request.method() === "POST") {
+      registrations.push(url.pathname);
+      return route.fulfill({ status: 204 });
+    }
+    if (url.pathname.endsWith("/camera/webrtc") && request.method() === "POST") return route.fulfill({ status: 201, contentType: "application/sdp", headers: { "X-Relay-WebRTC-Session": "c".repeat(32) }, body: "answer" });
+    if (request.method() === "DELETE" || request.method() === "PUT") return route.fulfill({ status: 204 });
+    return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("Live", { exact: true })).toBeVisible();
+  await expect(page.getByText("Updating feeder status failed. Live video is unchanged.")).toBeVisible({ timeout: 6_000 });
+  expect(registrations).toHaveLength(1);
+  await expect(page.getByText("Live", { exact: true })).toBeVisible();
 });
