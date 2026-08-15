@@ -37,6 +37,7 @@ SSE_WAIT_SECONDS = 15.0
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 WEBRTC_SESSION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 REACT_FRONTEND = "react"
+REACT_DEVICE_ROUTES = frozenset({"camera", "schedule"})
 FRONTEND_DIST_DIRECTORY = Path(__file__).with_name("dist")
 LEGACY_FRONTEND_QUERY_VALUE = "legacy"
 LEGACY_FRONTEND_QUERY_KEY = "ui"
@@ -514,7 +515,7 @@ def create_app(context: DashboardContext, frontend: str = "legacy") -> FastAPI:
             if frontend_path == "api" or frontend_path.startswith("api/"):
                 raise HTTPException(status_code=404, detail="Unknown API route")
             device_route = re.fullmatch(r"devices/([^/]+)/([^/]+)", frontend_path)
-            if device_route is not None and device_route.group(2) != "camera":
+            if device_route is not None and device_route.group(2) not in REACT_DEVICE_ROUTES:
                 device_id, tab = device_route.groups()
                 return RedirectResponse(
                     url=f"/devices/{quote(device_id)}?{LEGACY_FRONTEND_QUERY_KEY}={LEGACY_FRONTEND_QUERY_VALUE}#{quote(tab)}",

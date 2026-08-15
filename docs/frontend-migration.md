@@ -14,7 +14,12 @@ is complete and the new static bundle is explicitly enabled.
 | Viewer UUID lifecycle | Yes | Stabilized, VM pending | Lifecycle | Yes | Pending |
 | Camera close / idle stop | Yes | Stabilized, VM pending | Lifecycle | Yes | Pending |
 | Manual dispense | Yes | Stabilized, VM pending | Basic | Yes | Pending |
-| Schedule list/create/edit/delete/enable | Yes | Todo | Todo | Todo | Todo |
+| Schedule list | Yes | Implemented | Yes | Yes | Pending |
+| Schedule create / edit | Yes | Implemented, feeder ACK required | Yes | Yes | Pending |
+| Schedule enable / disable | Yes | Implemented, pessimistic | Yes | Yes | Pending |
+| Schedule delete | Yes | Implemented, confirmed | Yes | Yes | Pending |
+| Schedule polling-safe draft and focus | Partial | Implemented | Yes | Yes | Pending |
+| Schedule mobile layout | Yes | Implemented | Yes | Yes | Pending |
 | Activity timeline | Yes | Todo | Todo | Todo | Todo |
 | Typed device settings | Yes | Todo | Todo | Todo | Todo |
 | Advanced mode and diagnostics | Yes | Todo | Todo | Todo | Todo |
@@ -41,7 +46,8 @@ state data.
 | Devices, daily detail, camera availability and activity | TanStack Query |
 | Route, dialogs, view-only preferences | React / browser state |
 | React dispense dialog | React local state and mutation state |
-| Schedule and settings drafts | Legacy dashboard until their migration starts |
+| Schedule lists | TanStack Query, device-scoped |
+| Schedule create/edit draft | React Hook Form, owned by the open dialog |
 | WebRTC peer connection, viewer UUID, retries and teardown | `CameraPlayer` hook |
 
 Query refetches may update server data but never overwrite a dirty form or
@@ -49,6 +55,22 @@ create a media consumer. Home starts at most one intersection-visible preview;
 the player does not remount during server polling. Camera lifecycle is
 device-scoped and independent of the page polling cadence. A hidden tab is
 released after its grace period and remains paused until an explicit reconnect.
+
+## Schedule parity and constraints
+
+React reads the safe `GET /api/devices/:id/daily` projection and sends only
+the existing typed Schedule API payloads. Every create, edit, disable/enable
+and delete action waits for the feeder acknowledgement; there is no optimistic
+state or durable replay. The feeder accepts a complete schedule snapshot, so
+the backend remains the sole owner of MQTT payload construction.
+
+The legacy meaning of `repeatDay: []` is preserved as **Disabled**. React
+remembers the previous days for a plan disabled in the current browser session.
+After a browser reload, an unknown disabled plan opens the editor and requires
+the user to choose its days before re-enabling it; the UI never invents a
+schedule. The home view only marks meals as scheduled (`○`) because the daily
+API does not yet expose a feeder-confirmed delivery event; it never infers
+success merely from the current time.
 
 ## Development commands
 

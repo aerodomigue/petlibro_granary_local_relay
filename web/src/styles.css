@@ -29,6 +29,7 @@ body { margin: 0; }
 .page-heading { margin-bottom: 20px; }
 .page-heading h1 { font-size: 28px; margin: 0; }
 .refresh-warning { color: #f1b355 !important; font-size: 14px; }
+.text-button { background: transparent; border: 0; color: #9bd3fa; font: inherit; font-weight: 700; min-height: 32px; padding: 0 4px; text-decoration: underline; }
 
 .device-grid { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
 .device-card { background: #15212d; border: 1px solid #304353; border-radius: 14px; min-width: 0; overflow: hidden; }
@@ -76,8 +77,49 @@ body { margin: 0; }
 .quantity-control { align-items: center; display: grid; gap: 12px; grid-template-columns: 52px 1fr 52px; margin: 20px 0; }
 .quantity-control output { font-size: 28px; font-weight: 700; text-align: center; }
 
+.schedule-page-heading { align-items: end; display: flex; gap: 16px; justify-content: space-between; }
+.schedule-page-heading h1 { margin-top: 8px; }
+.schedule-add-button { flex: 0 0 auto; width: auto; }
+.device-route-nav { display: flex; flex-wrap: wrap; gap: 8px; margin: -8px 0 18px; }
+.device-route-nav a, .device-route-nav span { border: 1px solid #304353; border-radius: 999px; color: #9aacba; min-height: 44px; padding: 8px 12px; text-decoration: none; }
+.device-route-nav span { color: #edf4f8; }
+.schedule-list { display: grid; gap: 12px; }
+.schedule-card, .empty-state { background: #15212d; border: 1px solid #304353; border-radius: 14px; padding: 16px; }
+.schedule-card { align-items: center; display: flex; gap: 16px; justify-content: space-between; }
+.schedule-card__summary { min-width: 0; }
+.schedule-card time { display: block; font-size: 28px; font-variant-numeric: tabular-nums; font-weight: 800; line-height: 1; margin-bottom: 8px; }
+.schedule-card strong { display: block; }
+.schedule-card p { color: #9aacba; margin: 8px 0 0; overflow-wrap: anywhere; }
+.schedule-status { font-weight: 700; }
+.schedule-status--active { color: #37c785; }
+.schedule-status--disabled { color: #9aacba; }
+.schedule-card__actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.schedule-card__actions button, .schedule-dialog button { background: #223647; border: 1px solid #304353; border-radius: 10px; color: #edf4f8; font-weight: 700; min-height: 44px; padding: 8px 12px; }
+.danger-button { background: #552a31 !important; border-color: #a84d5a !important; }
+.schedule-dialog { max-width: 560px; max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); overflow: auto; }
+.schedule-dialog form { display: grid; gap: 14px; }
+.form-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.field { color: #c8d8e3; display: grid; font-weight: 700; gap: 7px; }
+.field input, .field select { background: #0f1922; border: 1px solid #465e70; border-radius: 9px; color: #edf4f8; font: inherit; min-height: 44px; padding: 8px 10px; }
+.switch-row { align-items: center; display: flex; font-weight: 700; gap: 12px; justify-content: space-between; min-height: 44px; }
+.switch-row input { block-size: 24px; inline-size: 24px; }
+.schedule-days { border: 0; margin: 0; padding: 0; }
+.schedule-days legend { font-weight: 700; margin-bottom: 8px; }
+.schedule-days > div { display: grid; gap: 7px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.schedule-days label { align-items: center; background: #0f1922; border: 1px solid #304353; border-radius: 9px; display: flex; gap: 6px; justify-content: center; min-height: 44px; }
+.schedule-action-error { margin-top: 0; }
+.empty-state h2 { font-size: 18px; margin: 0 0 6px; }
+.empty-state p { color: #9aacba; margin: 0; }
+
 @media (max-width: 620px) {
   .app-header { align-items: flex-start; }
   .application { padding: 18px 13px; }
   .page-heading h1 { font-size: 24px; }
+  .schedule-page-heading { align-items: stretch; flex-direction: column; }
+  .schedule-add-button { width: 100%; }
+  .schedule-card { align-items: stretch; flex-direction: column; }
+  .schedule-card__actions { justify-content: stretch; }
+  .schedule-card__actions button { flex: 1 1 100%; }
+  .form-grid { grid-template-columns: 1fr; }
+  .schedule-days > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

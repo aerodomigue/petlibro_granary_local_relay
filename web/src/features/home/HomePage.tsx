@@ -12,6 +12,11 @@ import { DispenseDialog } from "../devices/DispenseDialog";
 const HOME_PREVIEW_ROOT_MARGIN = "0px";
 const HOME_REFRESH_MS = 3_000;
 
+function todaySchedules(device: DailyDevice): DailyDevice["schedule"] {
+  const mondayBasedDay = ((new Date().getDay() + 6) % 7) + 1;
+  return device.schedule.filter((plan) => plan.repeat_day.includes(mondayBasedDay));
+}
+
 function wifiLabel(rssi: number | null): string {
   if (rssi === null) return "Wi-Fi unknown";
   if (rssi > -50) return "Wi-Fi excellent";
@@ -33,6 +38,7 @@ function DeviceCard({ device, onVisibilityChange, previewActive }: DeviceCardPro
   const closeDispense = useCallback((): void => setDispenseOpen(false), []);
   const online = device.local_state === "LOCAL_ONLINE";
   const cameraAvailable = device.camera.bridge_registered && device.camera.go2rtc_reachable && device.camera.bridge_reachable !== false;
+  const scheduledToday = todaySchedules(device);
   useEffect(() => {
     const element = cardRef.current;
     if (element === null) return undefined;
@@ -67,7 +73,7 @@ function DeviceCard({ device, onVisibilityChange, previewActive }: DeviceCardPro
         : <section className="camera-placeholder"><strong>{cameraAvailable ? "Camera preview paused" : "Camera unavailable"}</strong><span>{cameraAvailable ? "Scroll this feeder into view to start live video." : device.camera.reason ?? "Waiting for the local camera connection."}</span></section>}
       <section className="schedule-summary">
         <h3>Today’s schedule</h3>
-        {device.schedule.length === 0 ? <p>No meal planned today.</p> : <ul>{device.schedule.map((plan) => <li key={`${plan.execution_time}-${plan.grain_num}`}>○ {plan.execution_time} · {plan.grain_num} portions</li>)}</ul>}
+        {scheduledToday.length === 0 ? <p>No meal planned today.</p> : <ul>{scheduledToday.map((plan) => <li key={`${plan.execution_time}-${plan.grain_num}`}>○ {plan.execution_time} · {plan.grain_num} portions</li>)}</ul>}
       </section>
       <footer className="device-card__footer"><button className="primary-button" disabled={!online} onClick={() => setDispenseOpen(true)} ref={dispenseTriggerRef} type="button">Dispense now</button></footer>
       {dispenseOpen && <DispenseDialog deviceId={device.device_id} onClose={closeDispense} triggerRef={dispenseTriggerRef} />}

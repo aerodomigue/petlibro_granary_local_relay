@@ -105,9 +105,10 @@ def test_react_shell_preserves_unmigrated_legacy_routes_and_api_404s(
         legacy_route = client.get(legacy_path, follow_redirects=False)
         assert legacy_route.status_code == 302
         assert legacy_route.headers["location"] == f"{legacy_path}?ui=legacy"
-    camera_route = client.get(f"/devices/{DEVICE_A}/camera")
-    assert camera_route.status_code == 200
-    assert camera_route.text == "<div id=\"root\"></div>"
+    for react_path in ("camera", "schedule"):
+        react_route = client.get(f"/devices/{DEVICE_A}/{react_path}")
+        assert react_route.status_code == 200
+        assert react_route.text == "<div id=\"root\"></div>"
     assert client.get(f"/devices/{DEVICE_A}?ui=legacy").text == DASHBOARD_HTML
     assert client.get("/api/does-not-exist").status_code == 404
 
