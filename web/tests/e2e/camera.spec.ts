@@ -1,4 +1,4 @@
-import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type Page, type TestInfo } from "./fixtures";
 
 const DEVICE_ID = "device-a";
 
@@ -74,11 +74,8 @@ async function mockRelay(page: Page): Promise<RelayCalls> {
   return { deletes, registrations, whepOffers, dispenseBodies };
 }
 
-test("Home and Camera use one player lifecycle per mounted page", async ({ page }) => {
-  const errors: string[] = [];
+test("Home and Camera use one player lifecycle per mounted page", async ({ page, browserAudit }) => {
   const failedResources: string[] = [];
-  page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-  page.on("pageerror", (error) => errors.push(error.message));
   page.on("response", (response) => {
     if (response.status() >= 400) failedResources.push(`${response.status()} ${response.url()}`);
   });
@@ -88,7 +85,8 @@ test("Home and Camera use one player lifecycle per mounted page", async ({ page 
   await page.goto("/");
   await page.waitForTimeout(100);
   expect(failedResources).toEqual([]);
-  expect(errors).toEqual([]);
+  expect(browserAudit.consoleErrors).toEqual([]);
+  expect(browserAudit.pageErrors).toEqual([]);
   await expect(page.getByRole("heading", { name: "PLAF203" })).toBeVisible();
   await expect(page.getByText("Live", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth === document.documentElement.clientWidth)).toBe(true);
@@ -125,7 +123,8 @@ test("Home and Camera use one player lifecycle per mounted page", async ({ page 
   }
   expect(calls.registrations).toHaveLength(5);
   expect(calls.whepOffers).toHaveLength(5);
-  expect(errors).toEqual([]);
+  expect(browserAudit.consoleErrors).toEqual([]);
+  expect(browserAudit.pageErrors).toEqual([]);
 });
 
 test("Overview is a React route and upgrades legacy hash bookmarks", async ({ page }) => {
@@ -138,6 +137,21 @@ test("Overview is a React route and upgrades legacy hash bookmarks", async ({ pa
   await expect(page.getByText("07:30 · 3 portions")).toBeVisible();
   await page.getByRole("link", { name: "Open camera" }).click();
   await expect(page.getByRole("heading", { name: "Camera" })).toBeVisible();
+});
+
+test("legacy device bookmarks resolve to canonical React routes", async ({ page }) => {
+  await mockMediaBrowser(page);
+  await mockRelay(page);
+  const expectedTabs = ["overview", "camera", "schedule", "activity", "settings", "advanced"];
+
+  await page.goto(`/devices/${DEVICE_ID}`);
+  await expect(page).toHaveURL(new RegExp(`/devices/${DEVICE_ID}/overview$`));
+  for (const tab of expectedTabs) {
+    await page.goto(`/devices/${DEVICE_ID}#${tab}`);
+    await expect(page).toHaveURL(new RegExp(`/devices/${DEVICE_ID}/${tab}$`));
+  }
+  await page.goto(`/devices/${DEVICE_ID}#not-a-tab`);
+  await expect(page).toHaveURL(new RegExp(`/devices/${DEVICE_ID}/overview$`));
 });
 
 test("Camera keeps its viewer dormant when the relay reports it unavailable", async ({ page }) => {
@@ -156,6 +170,25 @@ test("Camera keeps its viewer dormant when the relay reports it unavailable", as
   await page.goto(`/devices/${DEVICE_ID}/camera`);
   await expect(page.getByText("Camera unavailable", { exact: true })).toBeVisible();
   expect(registrations).toEqual([]);
+});
+
+test("Camera visibly retries one rejected WHEP exchange without retaining a viewer", async ({ page }) => {
+  await mockMediaBrowser(page);
+  const calls = await mockRelay(page);
+  let whepRequests = 0;
+  await page.route((url) => url.pathname.endsWith("/camera/webrtc"), async (route) => {
+    whepRequests += 1;
+    if (whepRequests === 1) {
+      return route.fulfill({ status: 503, contentType: "application/json", body: "{\"detail\":\"Camera relay unavailable\"}" });
+    }
+    return route.fulfill({ status: 201, contentType: "application/sdp", headers: { "X-Relay-WebRTC-Session": "d".repeat(32) }, body: "answer" });
+  });
+
+  await page.goto(`/devices/${DEVICE_ID}/camera`);
+  await expect(page.getByText("Reconnecting…", { exact: true })).toBeVisible();
+  await expect(page.getByText("Live", { exact: true })).toBeVisible({ timeout: 4_000 });
+  expect(calls.registrations).toHaveLength(2);
+  expect(calls.deletes).toHaveLength(1);
 });
 
 test("Home keeps a single live preview when multiple feeder cards are visible", async ({ page }) => {

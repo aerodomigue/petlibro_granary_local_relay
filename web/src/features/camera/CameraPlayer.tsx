@@ -11,7 +11,9 @@ const CAMERA_VOLUME_STORAGE_KEY = "petlibro-camera-volume";
 
 function initialVolume(): number {
   try {
-    const stored = Number(window.localStorage.getItem(CAMERA_VOLUME_STORAGE_KEY));
+    const rawValue = window.localStorage.getItem(CAMERA_VOLUME_STORAGE_KEY);
+    if (rawValue === null) return 1;
+    const stored = Number(rawValue);
     return Number.isFinite(stored) && stored >= 0 && stored <= 1 ? stored : 1;
   } catch {
     return 1;
@@ -40,5 +42,5 @@ export function CameraPlayer({ deviceId, compact = false }: CameraPlayerProps): 
     if (player instanceof HTMLElement && document.fullscreenElement === null) void player.requestFullscreen().catch(() => undefined);
     else if (document.fullscreenElement !== null) void document.exitFullscreen().catch(() => undefined);
   };
-  return <section className={`camera-player ${compact ? "camera-player--compact" : ""}`} aria-label="Live feeder camera"><video ref={videoRef} autoPlay muted={muted} playsInline /><span aria-live="polite" className={`camera-player__status camera-player__status--${status}`}>{label}</span><div className="camera-player__controls" aria-label="Camera controls"><button aria-label={muted ? "Unmute camera" : "Mute camera"} className="camera-player__control" onClick={() => setMuted((current) => !current)} type="button">{muted ? "🔇" : "🔊"}</button><input aria-label="Camera volume" className="camera-player__volume" max="1" min="0" onChange={(event) => updateVolume(Number(event.target.value))} step="0.05" type="range" value={volume} /><button aria-label="Toggle camera fullscreen" className="camera-player__control" onClick={requestFullscreen} type="button">⛶</button></div>{canReconnect && <button className="camera-player__reconnect" onClick={reconnect} type="button">Reconnect camera</button>}</section>;
+  return <section className={`camera-player ${compact ? "camera-player--compact" : ""}`} aria-label="Live feeder camera"><video ref={videoRef} autoPlay muted={muted} playsInline /><span aria-live="polite" className={`camera-player__status camera-player__status--${status}`}>{label}</span><div aria-label="Camera controls" className="camera-player__controls" role="group"><button aria-label={muted ? "Unmute camera" : "Mute camera"} className="camera-player__control" onClick={() => setMuted((current) => !current)} type="button">{muted ? "🔇" : "🔊"}</button><input aria-label="Camera volume" className="camera-player__volume" max="1" min="0" onChange={(event) => updateVolume(Number(event.target.value))} step="0.05" type="range" value={volume} /><div aria-label="Video quality is unavailable" className="camera-player__quality" role="group"><button aria-label="SD quality profile unavailable" disabled type="button">SD</button><button aria-label="HD quality profile unavailable" disabled type="button">HD</button></div><button aria-label="Toggle camera fullscreen" className="camera-player__control" onClick={requestFullscreen} type="button">⛶</button></div>{canReconnect && <button className="camera-player__reconnect" onClick={reconnect} type="button">Reconnect camera</button>}</section>;
 }

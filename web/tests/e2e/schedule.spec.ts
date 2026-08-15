@@ -1,4 +1,4 @@
-import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type Page } from "./fixtures";
 
 const DEVICE_ID = "device-a";
 
@@ -71,8 +71,7 @@ test("Schedule is usable without horizontal overflow at every supported viewport
   expect(await page.evaluate(() => document.documentElement.scrollWidth === document.documentElement.clientWidth)).toBe(true);
 });
 
-test("Schedule create, edit, disable and delete use feeder-confirmed APIs", async ({ page }, testInfo: TestInfo) => {
-  test.skip(testInfo.project.name !== "chromium", "Mutation behavior is viewport-independent.");
+test("Schedule create, edit, disable and delete use feeder-confirmed APIs", async ({ page }) => {
   const calls = await mockScheduleApi(page);
   await page.goto(`/devices/${DEVICE_ID}/schedule`);
   await page.getByRole("button", { name: "+ Add a meal" }).click();
@@ -97,8 +96,7 @@ test("Schedule create, edit, disable and delete use feeder-confirmed APIs", asyn
   await expect.poll(() => calls.deletes).toContain(-2);
 });
 
-test("Schedule editor retains its draft and focus across a real polling refetch", async ({ page }, testInfo: TestInfo) => {
-  test.skip(testInfo.project.name !== "chromium", "The polling draft race is viewport-independent.");
+test("Schedule editor retains its draft and focus across a real polling refetch", async ({ page }) => {
   await mockScheduleApi(page);
   await page.goto(`/devices/${DEVICE_ID}/schedule`);
   await page.getByRole("button", { name: "Edit scheduled meal at 07:30" }).click();
@@ -110,8 +108,7 @@ test("Schedule editor retains its draft and focus across a real polling refetch"
   expect(await page.evaluate(() => document.activeElement?.id)).toBe("schedule-portions");
 });
 
-test("Schedule mutation errors preserve the user's draft", async ({ page }, testInfo: TestInfo) => {
-  test.skip(testInfo.project.name !== "chromium", "Error behavior is viewport-independent.");
+test("Schedule mutation errors preserve the user's draft", async ({ page }) => {
   await mockScheduleApi(page, { fail: "create" });
   await page.goto(`/devices/${DEVICE_ID}/schedule`);
   await page.getByRole("button", { name: "+ Add a meal" }).click();

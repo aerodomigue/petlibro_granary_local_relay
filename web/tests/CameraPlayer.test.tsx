@@ -92,6 +92,8 @@ describe("CameraPlayer", () => {
     await waitFor(() => expect(video?.muted).toBe(false));
     fireEvent.change(view.getByRole("slider", { name: "Camera volume" }), { target: { value: "0.4" } });
     await waitFor(() => expect(video?.volume).toBeCloseTo(0.4));
+    expect(view.getByRole("button", { name: "SD quality profile unavailable" })).toBeDisabled();
+    expect(view.getByRole("button", { name: "HD quality profile unavailable" })).toBeDisabled();
     expect(view.getByRole("button", { name: "Toggle camera fullscreen" })).toBeVisible();
     expect(activateViewer).toHaveBeenCalledTimes(1);
   });

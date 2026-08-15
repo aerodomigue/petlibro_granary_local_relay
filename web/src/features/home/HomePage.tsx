@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 
 import { getHome } from "../../api/devices";
 import { queryKeys } from "../../api/queryKeys";
@@ -55,7 +56,7 @@ function DeviceCard({ device, displayName, onVisibilityChange, previewActive }: 
             <StatusBadge tone="neutral">{wifiLabel(device.rssi)}</StatusBadge>
           </div>
         </div>
-        <a aria-label="Open feeder settings" className="icon-link" href={`/devices/${encodeURIComponent(device.device_id)}/overview`}>⚙</a>
+        <Link aria-label="Open feeder settings" className="icon-link" to={`/devices/${encodeURIComponent(device.device_id)}/overview`}>⚙</Link>
       </header>
       {cameraAvailable && previewActive
         ? <CameraPlayer deviceId={device.device_id} compact />

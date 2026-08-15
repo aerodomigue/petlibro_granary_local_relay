@@ -14,6 +14,6 @@ export function TodaySchedule({ schedule }: TodayScheduleProps): JSX.Element {
     <h3>Today’s schedule</h3>
     {plannedMeals.length === 0
       ? <p>No meal planned today.</p>
-      : <ul>{plannedMeals.map((plan) => <li key={`${plan.execution_time}-${plan.grain_num}`}>○ {plan.execution_time} · {plan.grain_num} portions</li>)}</ul>}
+      : <ul>{plannedMeals.map((plan) => <li key={`${plan.execution_time}-${plan.grain_num}-${plan.repeat_day.join("-")}`}>○ {plan.execution_time} · {plan.grain_num} portions</li>)}</ul>}
   </section>;
 }

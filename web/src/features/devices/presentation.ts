@@ -3,7 +3,10 @@ import type { DailySchedulePlan } from "../../types/api";
 /** Return only meals configured for the current local weekday. */
 export function todaySchedules(schedule: readonly DailySchedulePlan[]): DailySchedulePlan[] {
   const mondayBasedDay = ((new Date().getDay() + 6) % 7) + 1;
-  return schedule.filter((plan) => plan.repeat_day.includes(mondayBasedDay));
+  return schedule
+    .filter((plan) => plan.repeat_day.includes(mondayBasedDay))
+    .slice()
+    .sort((first, second) => first.execution_time.localeCompare(second.execution_time));
 }
 
 /** Describe signal quality without exposing a raw RSSI value in daily views. */
