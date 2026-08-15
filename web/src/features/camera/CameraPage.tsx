@@ -22,7 +22,7 @@ export function CameraPage(): JSX.Element {
   if (!camera.data && camera.isError) return <p className="state-message state-message--error">Camera status is unavailable: {camera.error.message}</p>;
   const availability = camera.data!;
   const available = availability.bridge_registered && availability.go2rtc_reachable && availability.bridge_reachable !== false;
-  return <CameraPageContent available={available} availabilityReason={availability.reason} deviceId={deviceId} refreshFailed={camera.isError} />;
+  return <CameraPageContent available={available} availabilityReason={availability.reason} deviceId={deviceId} key={deviceId} refreshFailed={camera.isError} />;
 }
 
 function CameraPageContent({ available, availabilityReason, deviceId, refreshFailed }: { available: boolean; availabilityReason?: string; deviceId: string; refreshFailed: boolean }): JSX.Element {

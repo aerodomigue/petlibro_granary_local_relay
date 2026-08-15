@@ -27,6 +27,16 @@ describe("HomePage", () => {
     await waitFor(() => expect(document.querySelectorAll("[aria-label='Camera player']")).toHaveLength(1));
   });
 
+  it("keeps the active preview mounted through one degraded home refresh", async () => {
+    const response = { status: { relay: { status: "running", uptime_seconds: 1 }, local_mqtt: { connected: true }, devices: { known: 1, local_online: 1, cloud_online: 1 } }, devices: [{ device_id: "device-a", product_id: "PLAF203", local_state: "LOCAL_ONLINE", last_seen_at: 1, rssi: -42, schedule: [], camera: { available: true, bridge_registered: true, go2rtc_reachable: true, online: true } }] };
+    vi.mocked(getHome).mockResolvedValue(response);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><MemoryRouter><HomePage /></MemoryRouter></QueryClientProvider>);
+    await waitFor(() => expect(document.querySelectorAll("[aria-label='Camera player']")).toHaveLength(1));
+    client.setQueryData(["home"], { ...response, devices: [{ ...response.devices[0]!, camera: { ...response.devices[0]!.camera, bridge_registered: false, go2rtc_reachable: false } }] });
+    await waitFor(() => expect(document.querySelectorAll("[aria-label='Camera player']")).toHaveLength(1));
+  });
+
   it("moves the preview to the feeder with the largest visible area", async () => {
     const observerCallbacks: IntersectionObserverCallback[] = [];
     class TestIntersectionObserver {

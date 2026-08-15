@@ -82,11 +82,14 @@ export function HomePage(): JSX.Element {
     });
   }, []);
   useEffect(() => {
-    const availableVisibleIds = home.data?.devices
-      .filter((device) => (visibilityRatios.get(device.device_id) ?? 0) > 0 && device.camera.bridge_registered && device.camera.go2rtc_reachable && device.camera.bridge_reachable !== false)
+    const visibleDevices = home.data?.devices
+      .filter((device) => (visibilityRatios.get(device.device_id) ?? 0) > 0)
       .sort((left, right) => (visibilityRatios.get(right.device_id) ?? 0) - (visibilityRatios.get(left.device_id) ?? 0))
-      .map((device) => device.device_id) ?? [];
-    setPreviewDeviceId(availableVisibleIds[0] ?? null);
+      ?? [];
+    setPreviewDeviceId((current) => {
+      if (current !== null && visibleDevices.some((device) => device.device_id === current)) return current;
+      return visibleDevices.find((device) => device.camera.bridge_registered && device.camera.go2rtc_reachable && device.camera.bridge_reachable !== false)?.device_id ?? null;
+    });
   }, [home.data?.devices, visibilityRatios]);
   if (!home.data && home.isPending) return <p className="state-message">Loading feeders…</p>;
   if (!home.data && home.isError) return <p className="state-message state-message--error">Unable to reach the relay: {home.error.message}</p>;

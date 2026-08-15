@@ -10,7 +10,8 @@ export interface CameraAvailability {
   bridge_registered: boolean;
   go2rtc_reachable: boolean;
   online: boolean;
-  media_consumers: number;
+  /** Detailed camera diagnostics only; daily projections deliberately omit it. */
+  media_consumers?: number;
   webrtc?: boolean;
   reason?: string;
 }

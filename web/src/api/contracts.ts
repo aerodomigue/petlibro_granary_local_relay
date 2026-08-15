@@ -14,7 +14,7 @@ function hasCameraShape(value: unknown): value is CameraAvailability {
     && typeof value.bridge_registered === "boolean"
     && typeof value.go2rtc_reachable === "boolean"
     && typeof value.online === "boolean"
-    && typeof value.media_consumers === "number";
+    && (value.media_consumers === undefined || typeof value.media_consumers === "number");
 }
 
 function hasDailyDeviceShape(value: unknown): boolean {
