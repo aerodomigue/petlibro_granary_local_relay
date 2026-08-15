@@ -9,10 +9,10 @@ is complete and the new static bundle is explicitly enabled.
 
 | Feature | Legacy | React | Unit | E2E | VM |
 | --- | --- | --- | --- | --- |
-| Home device cards and status | Yes | Ready for VM | Basic | Yes | Todo |
-| Home camera auto-start | Yes | Ready for VM | Lifecycle | Yes | Todo |
-| Viewer UUID lifecycle | Yes | Ready for VM | Lifecycle | Yes | Todo |
-| Camera close / idle stop | Yes | Ready for VM | Lifecycle | Yes | Todo |
+| Home device cards and status | Yes | Validated | Basic | Yes | Yes |
+| Home camera auto-start | Yes | Validated | Lifecycle | Yes | Yes |
+| Viewer UUID lifecycle | Yes | Validated | Lifecycle | Yes | Yes |
+| Camera close / idle stop | Yes | Validated | Lifecycle | Yes | Yes |
 | Manual dispense | Yes | Ready for VM | Basic | Yes | Todo |
 | Schedule list/create/edit/delete/enable | Yes | Todo | Todo | Todo | Todo |
 | Activity timeline | Yes | Todo | Todo | Todo | Todo |
