@@ -9,10 +9,10 @@ is complete and the new static bundle is explicitly enabled.
 
 | Feature | Legacy | React | Unit | E2E | VM |
 | --- | --- | --- | --- | --- |
-| Home device cards and status | Yes | Stabilized, VM pending | Basic | Yes | Pending |
-| Home camera auto-start | Yes | Stabilized, VM pending | Lifecycle | Yes | Pending |
-| Viewer UUID lifecycle | Yes | Stabilized, VM pending | Lifecycle | Yes | Pending |
-| Camera close / idle stop | Yes | Stabilized, VM pending | Lifecycle | Yes | Pending |
+| Home device cards and status | Yes | Stabilized | Basic | Yes | Validated |
+| Home camera auto-start | Yes | Stabilized | Lifecycle | Yes | Validated Live |
+| Viewer UUID lifecycle | Yes | Stabilized | Lifecycle | Yes | Validated |
+| Camera close / idle stop | Yes | Stabilized | Lifecycle | Yes | Validated (10 s grace) |
 | Manual dispense | Yes | Stabilized, VM pending | Basic | Yes | Pending |
 | Schedule list | Yes | Implemented | Yes | Yes | Validated read-only |
 | Schedule create / edit | Yes | Implemented, feeder ACK required | Yes | Yes | Pending safe feeder mutation validation |
@@ -20,10 +20,10 @@ is complete and the new static bundle is explicitly enabled.
 | Schedule delete | Yes | Implemented, confirmed | Yes | Yes | Pending safe feeder mutation validation |
 | Schedule polling-safe draft and focus | Partial | Implemented | Yes | Yes | Validated on live poll |
 | Schedule mobile layout | Yes | Implemented | Yes | Yes | Validated at 390x844 |
-| Global settings and Advanced preference | Yes | Implemented | Yes | Yes | VM pending |
-| Typed device settings | Yes | Implemented | Yes | Yes | VM pending |
-| Advanced diagnostics | Yes | Implemented, bounded safe projection | Yes | Yes | VM pending |
-| Activity timeline | Yes | Implemented from confirmed feeder events only | Yes | Yes | VM pending |
+| Global settings and Advanced preference | Yes | Implemented | Yes | Yes | Validated |
+| Typed device settings | Yes | Implemented | Yes | Yes | Validated draft/poll; feeder write mock-only |
+| Advanced diagnostics | Yes | Implemented, bounded safe projection | Yes | Yes | Validated |
+| Activity timeline | Yes | Implemented from feeder-reported events only | Yes | Yes | Validated empty state |
 
 ## Coexistence and rollback
 
@@ -100,9 +100,18 @@ PETLIBRO account.
 The Advanced endpoint is a separate bounded projection: it includes only
 diagnostic summaries and a limited set of sanitized per-device logs. It
 excludes raw MQTT payloads, URLs, process paths, credentials, camera UIDs and
-TUTK details. The normal Activity screen intentionally shows only events with
-a confirmed feeder command; technical relay and cloud telemetry is excluded
-until the backend has a reliable user-facing feeding-history contract.
+TUTK details. The normal Activity screen records only direct feeder reports
+of dispensing activity and feeder errors. Technical relay/cloud telemetry is
+excluded; Activity deliberately does not claim whether a meal succeeded until
+the backend has a reliable outcome-aware feeding-history contract.
+
+VM validation confirmed browser preference persistence across a reload, the
+blocked Advanced route while the preference is off, and a Device Settings
+draft retaining its value and keyboard focus across multiple live polls. It
+intentionally made no feeder-setting write. Home and Camera both reached Live;
+leaving Camera then produced viewer disconnect and a durable idle stream stop
+after the ten-second grace period, with no phantom reconnect during the next
+thirty seconds.
 
 ## Development commands
 
