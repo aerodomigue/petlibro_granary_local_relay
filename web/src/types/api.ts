@@ -85,12 +85,107 @@ export interface ScheduleMutationResult {
 export interface DailyDeviceDetail {
   device: DailyDevice;
   state: {
+    desired: SettingEntry[];
+    local_confirmed: SettingEntry[];
     schedule_plans: Array<{
       plan: unknown;
       source: unknown;
       updated_at: unknown;
     }>;
   };
+  controls: ControlCapabilities;
+  activity: ActivityEvent[];
+}
+
+export type SettingValue = boolean | number | string;
+
+export interface SettingEntry {
+  key: string;
+  value: SettingValue;
+}
+
+export interface ControlCapability {
+  control: string;
+  writable: boolean;
+  device_ack_confirmed: boolean;
+  cloud_sync_confirmed: boolean;
+  device_online: boolean;
+  required_state_available: boolean;
+  pending: boolean;
+}
+
+export type ControlCapabilities = Record<string, ControlCapability> & { counters?: Record<string, number> };
+
+export interface ActivityEvent {
+  kind: "feeder_dispensing" | "feeder_error";
+  /** Unix epoch seconds, as provided by relay telemetry. */
+  timestamp: number | null;
+}
+
+export interface AdvancedDeviceDetail {
+  device: {
+    device_id: string;
+    product_id: string | null;
+    firmware: string | null;
+    mac: string | null;
+    ip: string | null;
+    rssi: number | null;
+    local_state: string;
+    cloud_state: string;
+    last_seen_at: number | null;
+  };
+  connectivity: AdvancedConnectivity;
+  camera: AdvancedCamera;
+  relay: AdvancedRelay;
+  state_summary: AdvancedStateSummary;
+  logs: AdvancedLogEntry[];
+}
+
+export interface AdvancedConnectivity {
+  upstream_state: string | null;
+  availability: Record<"15m" | "1h" | "24h", number>;
+  counters: Record<string, number>;
+  outage: {
+    started_at: number | null;
+    downtime_seconds: number | null;
+    attempts: number;
+    failed_attempts: number;
+    last_reason: string | null;
+  };
+  queue_pending: number;
+}
+
+export interface AdvancedCamera {
+  available: boolean;
+  online: boolean;
+  webrtc: boolean;
+  bridge_registered: boolean;
+  go2rtc_reachable: boolean;
+  media_consumers: number;
+  reason: string | null;
+  uid_learned: boolean;
+}
+
+export interface AdvancedRelay {
+  local_responder: boolean;
+  ntp_enabled: boolean;
+  config_enabled: boolean;
+  feeding_plan_enabled: boolean;
+}
+
+export interface AdvancedStateSummary {
+  reported_values: number;
+  desired_values: number;
+  local_confirmed_values: number;
+  schedule_plans: number;
+}
+
+export interface AdvancedLogEntry {
+  component: string;
+  device_id?: string;
+  level: string;
+  message: string;
+  timestamp: number | string | null;
 }
 
 export interface ScheduleData {

@@ -20,9 +20,10 @@ is complete and the new static bundle is explicitly enabled.
 | Schedule delete | Yes | Implemented, confirmed | Yes | Yes | Pending safe feeder mutation validation |
 | Schedule polling-safe draft and focus | Partial | Implemented | Yes | Yes | Validated on live poll |
 | Schedule mobile layout | Yes | Implemented | Yes | Yes | Validated at 390x844 |
-| Activity timeline | Yes | Todo | Todo | Todo | Todo |
-| Typed device settings | Yes | Todo | Todo | Todo | Todo |
-| Advanced mode and diagnostics | Yes | Todo | Todo | Todo | Todo |
+| Global settings and Advanced preference | Yes | Implemented | Yes | Yes | VM pending |
+| Typed device settings | Yes | Implemented | Yes | Yes | VM pending |
+| Advanced diagnostics | Yes | Implemented, bounded safe projection | Yes | Yes | VM pending |
+| Activity timeline | Yes | Implemented from confirmed feeder events only | Yes | Yes | VM pending |
 
 ## Coexistence and rollback
 
@@ -49,6 +50,8 @@ state data.
 | Schedule lists | TanStack Query, device-scoped |
 | Schedule create/edit draft | React Hook Form, owned by the open dialog |
 | WebRTC peer connection, viewer UUID, retries and teardown | `CameraPlayer` hook |
+| Advanced preference and browser-local feeder display name | `PreferencesProvider` / localStorage |
+| Feeder settings form drafts | React Hook Form, one stable form per device and setting group |
 
 Query refetches may update server data but never overwrite a dirty form or
 create a media consumer. Home starts at most one intersection-visible preview;
@@ -77,6 +80,29 @@ read-only list and a draft preserved with focus across multiple three-second
 polls. Create, edit, enable/disable and delete have exhaustive mocked E2E
 coverage, but remain explicitly pending a separate deliberately-safe feeder
 mutation run.
+
+## Settings, Advanced and Activity parity
+
+Global Settings owns browser-local preferences only. Advanced diagnostics is
+off by default and persists through the existing `petlibro-advanced-mode`
+localStorage key. The technical route is hidden from device navigation and
+does not fetch diagnostics while the preference is off. It is an interface
+preference, not authorization; the dashboard remains intended for a trusted
+LAN.
+
+Device Settings uses the existing allowlisted, typed control endpoints. Each
+group retains its React Hook Form draft and focus across the three-second
+daily-data refresh. Feeder settings are submitted only through their fixed
+group endpoint and retain the draft if the feeder rejects or times out the
+change. The display name is explicitly browser-local and does not update the
+PETLIBRO account.
+
+The Advanced endpoint is a separate bounded projection: it includes only
+diagnostic summaries and a limited set of sanitized per-device logs. It
+excludes raw MQTT payloads, URLs, process paths, credentials, camera UIDs and
+TUTK details. The normal Activity screen intentionally shows only events with
+a confirmed feeder command; technical relay and cloud telemetry is excluded
+until the backend has a reliable user-facing feeding-history contract.
 
 ## Development commands
 

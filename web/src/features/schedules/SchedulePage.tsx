@@ -6,6 +6,7 @@ import { createSchedule, deleteSchedule, getSchedules, updateSchedule } from "..
 import { queryKeys } from "../../api/queryKeys";
 import type { Schedule, ScheduleCreateRequest, ScheduleFormValues, ScheduleSnapshot, ScheduleUpdateRequest } from "../../types/api";
 import { legacyDeviceUrl } from "../../routes/LegacyDeviceRedirect";
+import { DeviceNavigation } from "../../components/DeviceNavigation";
 import { ScheduleDeleteDialog } from "./ScheduleDeleteDialog";
 import { ScheduleEditor } from "./ScheduleEditor";
 import { ScheduleList } from "./ScheduleList";
@@ -111,7 +112,7 @@ export function SchedulePage(): JSX.Element {
   const actionDisabled = pending || !feederOnline;
   return <section aria-labelledby="schedule-title">
     <header className="page-heading schedule-page-heading"><div><a href={legacyDeviceUrl(deviceId, "overview")}>← Feeder overview</a><h1 id="schedule-title">Schedule</h1><p>Meals are sent directly to your feeder and saved after its confirmation.</p>{!feederOnline && <p className="refresh-warning" role="status">Feeder offline. Schedule changes are unavailable until it reconnects.</p>}{schedules.isError && <p className="refresh-warning" role="status">Could not refresh the schedule. Showing the last confirmed version. <button className="text-button" onClick={() => { void schedules.refetch(); }} type="button">Try again</button></p>}</div><button className="primary-button schedule-add-button" disabled={actionDisabled} onClick={openCreate} ref={addTriggerRef} type="button">+ Add a meal</button></header>
-    <nav aria-label="Feeder navigation" className="device-route-nav"><a href={legacyDeviceUrl(deviceId, "overview")}>Overview</a><a href={`/devices/${encodeURIComponent(deviceId)}/camera`}>Camera</a><span aria-current="page">Schedule</span></nav>
+    <DeviceNavigation active="schedule" deviceId={deviceId} />
     {actionError && <p className="form-error schedule-action-error" role="alert">{actionError}</p>}
     <ScheduleList disabled={actionDisabled} entries={entries} onDelete={deleteEntry} onEdit={openEdit} onToggle={handleToggle} />
     {editor && <ScheduleEditor initialError={editor.initialError} initialValues={editor.initialValues} onClose={closeEditor} onSave={(values, changes) => saveEditor(editor.plan, editor.plan ? changes : values)} pending={mutation.isPending} plan={editor.plan} saveDisabled={actionDisabled} triggerRef={editor.triggerRef} />}

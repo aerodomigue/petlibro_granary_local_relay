@@ -397,6 +397,22 @@ def test_local_fallback_answers_from_its_own_device_state(responder_harness: Har
 # -- metrics isolation -----------------------------------------------------------------
 
 
+def test_feeder_activity_events_are_recorded_only_for_the_reporting_device(harness: Harness) -> None:
+    """Actual feeder events become user activity without importing technical telemetry."""
+    harness.deliver_local(TOPIC_A, b'{"cmd":"GRAIN_OUTPUT_EVENT"}')
+    harness.deliver_local(TOPIC_B, b'{"cmd":"ERROR_EVENT"}')
+
+    activity_a = harness.telemetry.events(device_id="DEVICE-A")
+    activity_b = harness.telemetry.events(device_id="DEVICE-B")
+
+    assert [event["kind"] for event in activity_a if event["kind"].startswith("feeder_")] == [
+        "feeder_dispensing"
+    ]
+    assert [event["kind"] for event in activity_b if event["kind"].startswith("feeder_")] == [
+        "feeder_error"
+    ]
+
+
 def test_metrics_are_counted_per_device(harness: Harness) -> None:
     """A's traffic increments A's counters only."""
     harness.deliver_local(TOPIC_A)

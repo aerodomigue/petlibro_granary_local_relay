@@ -25,6 +25,7 @@ from petlibro_relay.device_presence import DevicePresenceTracker
 from petlibro_relay.device_registry import DeviceIdentity, DeviceRegistry
 from petlibro_relay.message_queue import MessageQueue
 from petlibro_relay.observability.log_buffer import RingBufferLogHandler
+from petlibro_relay.observability.sanitizer import REDACTED_VALUE, sanitize_text, sanitize_value
 from petlibro_relay.observability.telemetry import RelayTelemetry
 from petlibro_relay.state_cache import StateCache
 from petlibro_relay.state_shadow import StateShadow
@@ -101,11 +102,12 @@ def test_react_shell_preserves_unmigrated_legacy_routes_and_api_404s(
     device_route = client.get(f"/devices/{DEVICE_A}/overview", follow_redirects=False)
     assert device_route.status_code == 302
     assert device_route.headers["location"] == f"/devices/{DEVICE_A}?ui=legacy#overview"
-    for legacy_path in ("/devices", "/cloud", "/queues", "/state", "/ntp", "/logs", "/system", "/settings"):
+    for legacy_path in ("/devices", "/cloud", "/queues", "/state", "/ntp", "/logs", "/system"):
         legacy_route = client.get(legacy_path, follow_redirects=False)
         assert legacy_route.status_code == 302
         assert legacy_route.headers["location"] == f"{legacy_path}?ui=legacy"
-    for react_path in ("camera", "schedule"):
+    assert client.get("/settings").text == "<div id=\"root\"></div>"
+    for react_path in ("activity", "advanced", "camera", "schedule", "settings"):
         react_route = client.get(f"/devices/{DEVICE_A}/{react_path}")
         assert react_route.status_code == 200
         assert react_route.text == "<div id=\"root\"></div>"
@@ -203,6 +205,7 @@ def client(dashboard: tuple[DashboardContext, RingBufferLogHandler]) -> TestClie
         "/api/cloud",
         "/api/devices",
         f"/api/devices/{DEVICE_A}",
+        f"/api/devices/{DEVICE_A}/advanced",
         f"/api/devices/{DEVICE_A}/camera",
         f"/api/queues?device_id={DEVICE_A}",
         f"/api/state?device_id={DEVICE_A}",
@@ -217,6 +220,89 @@ def test_read_only_api_endpoints_return_json(client: TestClient, path: str) -> N
 
     assert response.status_code == 200
     assert isinstance(response.json(), dict)
+
+
+def test_advanced_projection_is_bounded_and_redacts_sensitive_aliases(
+    dashboard: tuple[DashboardContext, RingBufferLogHandler], client: TestClient
+) -> None:
+    """Advanced never reuses the raw diagnostic endpoint or exposes identity aliases."""
+    _context, _ = dashboard
+    response = client.get(f"/api/devices/{DEVICE_A}/advanced")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "raw_messages" not in json.dumps(body)
+    assert set(body) == {"device", "connectivity", "camera", "relay", "state_summary", "logs"}
+    assert sanitize_value({"deviceUuid": "uuid", "apiKey": "key", "p2pKey": "p2p"}) == {
+        "deviceUuid": REDACTED_VALUE,
+        "apiKey": REDACTED_VALUE,
+        "p2pKey": REDACTED_VALUE,
+    }
+
+
+def test_advanced_projection_redacts_log_aliases_and_limits_entries(
+    dashboard: tuple[DashboardContext, RingBufferLogHandler], client: TestClient
+) -> None:
+    """Advanced logs remain bounded and never disclose credential aliases."""
+    _context, logs = dashboard
+    secret_message = (
+        "device_id=TESTDEVICE0000000001 DL_PRODUCT_KEY=product-secret "
+        "deviceUsername=user-secret deviceUuid=uuid-secret apiKey=api-secret "
+        "p2pKey=p2p-secret mqttAddress=mqtt-secret"
+    )
+    structured_secret_message = (
+        '{"apiKey":"api-secret","deviceUuid":"uuid-secret"} '
+        "{'DL_PRODUCT_KEY': 'product-secret', 'p2pKey': 'p2p-secret'}"
+    )
+    assert "<redacted>" in sanitize_text(secret_message)
+    assert "api-secret" not in sanitize_text(structured_secret_message)
+    assert "uuid-secret" not in sanitize_text(structured_secret_message)
+    assert "product-secret" not in sanitize_text(structured_secret_message)
+    assert "p2p-secret" not in sanitize_text(structured_secret_message)
+    for index in range(105):
+        log_record = logging.makeLogRecord(
+            {
+                "name": "petlibro_relay.web",
+                "levelno": logging.INFO,
+                "levelname": "INFO",
+                "msg": f"{secret_message} index={index}",
+                "device_id": DEVICE_A,
+            }
+        )
+        logs.emit(log_record)
+
+    response = client.get(f"/api/devices/{DEVICE_A}/advanced")
+
+    assert response.status_code == 200
+    logs_payload = response.json()["logs"]
+    serialized = json.dumps(logs_payload)
+    assert len(logs_payload) == 100
+    for value in ("product-secret", "user-secret", "uuid-secret", "api-secret", "p2p-secret", "mqtt-secret"):
+        assert value not in serialized
+    assert "<redacted>" in serialized
+
+
+def test_daily_activity_exposes_only_real_feeder_activity(
+    dashboard: tuple[DashboardContext, RingBufferLogHandler], client: TestClient
+) -> None:
+    """Normal Activity excludes technical telemetry and preserves epoch-second timestamps."""
+    context, _ = dashboard
+    context._telemetry.record_event("upstream_online", "Technical", device_id=DEVICE_A, timestamp=100.0)
+    context._telemetry.record_event(
+        "feeder_dispensing", "Dispensing", device_id=DEVICE_A, timestamp=101.0
+    )
+    context._telemetry.record_event("feeder_error", "Error", device_id=DEVICE_A, timestamp=102.0)
+    for index in range(31):
+        context._telemetry.record_event(
+            "upstream_retry_failed", "Technical", device_id=DEVICE_A, timestamp=103.0 + index
+        )
+
+    activity = client.get(f"/api/devices/{DEVICE_A}/daily").json()["activity"]
+
+    assert activity == [
+        {"timestamp": 101.0, "kind": "feeder_dispensing"},
+        {"timestamp": 102.0, "kind": "feeder_error"},
+    ]
 
 
 def test_health_remains_ok_when_petlibro_is_down(client: TestClient) -> None:

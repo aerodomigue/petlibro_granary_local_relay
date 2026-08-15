@@ -53,6 +53,7 @@ async function mockRelay(page: Page): Promise<RelayCalls> {
     const url = new URL(request.url());
     const json = (body: unknown, status = 200): Promise<void> => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
     if (url.pathname === "/api/home") return json({ status: { relay: { status: "running", uptime_seconds: 1 }, local_mqtt: { connected: true }, devices: { known: 1, local_online: 1, cloud_online: 1 } }, devices: [{ device_id: DEVICE_ID, product_id: "PLAF203", local_state: "LOCAL_ONLINE", last_seen_at: 1, rssi: -42, schedule: [{ execution_time: "07:30", grain_num: 3, repeat_day: [1] }], camera: { available: true, bridge_registered: true, go2rtc_reachable: true, online: true, media_consumers: 0 } }] });
+    if (url.pathname === `/api/devices/${DEVICE_ID}/daily`) return json({ device: { device_id: DEVICE_ID, product_id: "PLAF203", local_state: "LOCAL_ONLINE", last_seen_at: 1, rssi: -42, camera: { available: true, bridge_registered: true, go2rtc_reachable: true, online: true, media_consumers: 0 } }, state: { desired: [], local_confirmed: [], schedule_plans: [] }, controls: {}, activity: [] });
     if (url.pathname === `/api/devices/${DEVICE_ID}/camera`) return json({ available: true, bridge_registered: true, go2rtc_reachable: true, online: true, media_consumers: 0 });
     if (url.pathname.includes("/camera/viewers/")) {
       if (request.method() === "POST") registrations.push(url.pathname);
@@ -90,7 +91,6 @@ test("Home and Camera use one player lifecycle per mounted page", async ({ page 
   });
   await mockMediaBrowser(page);
   const calls = await mockRelay(page);
-  await mockLegacyOverview(page);
 
   await page.goto("/");
   await page.waitForTimeout(100);
@@ -99,7 +99,7 @@ test("Home and Camera use one player lifecycle per mounted page", async ({ page 
   await expect(page.getByRole("heading", { name: "PLAF203" })).toBeVisible();
   await expect(page.getByText("Live", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth === document.documentElement.clientWidth)).toBe(true);
-  await expect(page.getByRole("link", { name: "Open feeder settings" })).toHaveAttribute("href", `/devices/${DEVICE_ID}?ui=legacy#overview`);
+  await expect(page.getByRole("link", { name: "Open feeder settings" })).toHaveAttribute("href", `/devices/${DEVICE_ID}/settings`);
   expect(calls.registrations).toHaveLength(1);
   expect(calls.whepOffers).toEqual(["offer"]);
 
@@ -115,8 +115,8 @@ test("Home and Camera use one player lifecycle per mounted page", async ({ page 
   await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
   await expect.poll(() => calls.deletes.length).toBe(1);
   await page.getByRole("link", { name: "Open feeder settings" }).click();
-  await expect(page.getByRole("heading", { name: "Legacy feeder overview" })).toBeVisible();
-  await expect(page).toHaveURL(new RegExp(`/devices/${DEVICE_ID}\\?ui=legacy#overview$`));
+  await expect(page.getByRole("heading", { name: "Feeder settings" })).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/devices/${DEVICE_ID}/settings$`));
 
   await page.goto(`/devices/${DEVICE_ID}/camera`);
   await expect(page.getByRole("heading", { name: "Camera" })).toBeVisible();

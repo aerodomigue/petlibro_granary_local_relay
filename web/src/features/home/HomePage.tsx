@@ -3,7 +3,6 @@ import { useQuery } from "@tanstack/react-query";
 
 import { getHome } from "../../api/devices";
 import { queryKeys } from "../../api/queryKeys";
-import { legacyDeviceUrl } from "../../routes/LegacyDeviceRedirect";
 import type { DailyDevice } from "../../types/api";
 import { StatusBadge } from "../../components/StatusBadge";
 import { CameraPlayer } from "../camera/CameraPlayer";
@@ -66,7 +65,7 @@ function DeviceCard({ device, onVisibilityChange, previewActive }: DeviceCardPro
             <StatusBadge tone="neutral">{wifiLabel(device.rssi)}</StatusBadge>
           </div>
         </div>
-        <a aria-label="Open feeder settings" className="icon-link" href={legacyDeviceUrl(device.device_id, "overview")}>⚙</a>
+        <a aria-label="Open feeder settings" className="icon-link" href={`/devices/${encodeURIComponent(device.device_id)}/settings`}>⚙</a>
       </header>
       {cameraAvailable && previewActive
         ? <CameraPlayer deviceId={device.device_id} compact />

@@ -311,6 +311,11 @@ class DeviceTelemetry:
         with self._lock:
             self._counters[counter] += amount
 
+    def record_event(self, kind: str, message: str) -> None:
+        """Mirror a user-facing event into the relay timeline for this device."""
+        if self._sink is not None:
+            self._sink.record_event(kind, message, device_id=self._device_id, timestamp=self._clock())
+
     def snapshot(self) -> dict[str, Any]:
         """Return one consistent, JSON-ready view of this device's metrics."""
         now = self._clock()

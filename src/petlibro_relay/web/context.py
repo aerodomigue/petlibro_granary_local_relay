@@ -22,7 +22,7 @@ from ..device_registry import DeviceRegistry, DeviceRegistryEntry
 from ..message_queue import MessageQueue
 from ..observability.log_buffer import RingBufferLogHandler
 from ..observability.sanitizer import mask_username, sanitize_value
-from ..observability.telemetry import RelayTelemetry
+from ..observability.telemetry import EVENT_HISTORY_LIMIT, RelayTelemetry
 from ..state_shadow import StateShadow
 from ..sound_switch_control import SoundSwitchController
 
@@ -32,6 +32,7 @@ DAILY_SETTING_KEYS = frozenset(
         "afterManualFeedingTime",
         "automaticRecording",
         "beforeFeedingPlanTime",
+        "bowlMode",
         "cameraAgingType",
         "cameraEndTime",
         "cameraStartTime",
@@ -284,6 +285,59 @@ class DashboardContext:
             ),
         )
 
+    def advanced_device_detail(self, device_id: str) -> dict[str, Any] | None:
+        """Return a bounded, safe diagnostics projection for the Advanced UI.
+
+        This intentionally differs from the legacy all-details endpoint: it
+        exposes no raw MQTT messages, event payloads, URLs or process paths.
+        """
+        entry = next((item for item in self._registry.entries() if item.client_id == device_id), None)
+        if entry is None:
+            return None
+        device = self._device_row(entry)
+        upstream = self._device_metrics(device_id)["upstream"]
+        camera = self.camera(device_id, entry.product_id)
+        responder = self.responder(device_id)
+        return cast(
+            dict[str, Any],
+            sanitize_value(
+                {
+                    "device": {
+                        key: device.get(key)
+                        for key in ("device_id", "product_id", "firmware", "mac", "ip", "rssi", "local_state", "cloud_state", "last_seen_at")
+                    },
+                    "connectivity": {
+                        "upstream_state": upstream.get("state"),
+                        "availability": upstream.get("availability"),
+                        "counters": upstream.get("counters"),
+                        "outage": upstream.get("outage"),
+                        "queue_pending": self._queue.count(device_id, LOCAL_TO_UPSTREAM) + self._queue.count(device_id, UPSTREAM_TO_LOCAL),
+                    },
+                    "camera": {
+                        key: camera.get(key)
+                        for key in ("available", "online", "webrtc", "bridge_registered", "go2rtc_reachable", "media_consumers", "reason", "uid_learned")
+                    },
+                    "relay": {
+                        "local_responder": responder.get("enabled"),
+                        "ntp_enabled": responder.get("ntp_enabled"),
+                        "config_enabled": responder.get("config_enabled"),
+                        "feeding_plan_enabled": responder.get("feeding_plan_enabled"),
+                    },
+                    "state_summary": {
+                        "reported_values": len(self._shadow.get_reported(device_id)),
+                        "desired_values": len(self._shadow.get_desired(device_id)),
+                        "local_confirmed_values": len(self._shadow.get_local_confirmed(device_id)),
+                        "schedule_plans": len(self._shadow.get_schedule_plans(device_id)),
+                    },
+                    "logs": [
+                        {key: value for key, value in log_entry.items() if key in {"timestamp", "level", "component", "message", "device_id", "cmd", "msg_id"}}
+                        for log_entry in self._logs.snapshot(100)
+                        if log_entry.get("device_id") == device_id
+                    ],
+                }
+            ),
+        )
+
     def camera(self, device_id: str, product_id: str | None = None) -> dict[str, object]:
         """Return the safe go2rtc camera status for one known device."""
         if product_id is None:
@@ -528,11 +582,13 @@ class DashboardContext:
         }
 
     def _daily_activity(self, device_id: str) -> list[dict[str, Any]]:
-        """Project activity without a raw protocol payload."""
-        return [
-            {"timestamp": event.get("timestamp"), "cmd": event.get("cmd")}
-            for event in self._telemetry.events(30, device_id=device_id)
+        """Project only known feeder command activity, never technical telemetry."""
+        feeder_events = [
+            {"timestamp": event.get("timestamp"), "kind": event.get("kind")}
+            for event in self._telemetry.events(EVENT_HISTORY_LIMIT, device_id=device_id)
+            if event.get("kind") in {"feeder_dispensing", "feeder_error"}
         ]
+        return feeder_events[-30:]
 
 
 def _summarize(rows: list[dict[str, Any]], auto_enroll: bool) -> dict[str, Any]:

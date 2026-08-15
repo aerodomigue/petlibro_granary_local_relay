@@ -37,7 +37,7 @@ SSE_WAIT_SECONDS = 15.0
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 WEBRTC_SESSION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 REACT_FRONTEND = "react"
-REACT_DEVICE_ROUTES = frozenset({"camera", "schedule"})
+REACT_DEVICE_ROUTES = frozenset({"activity", "advanced", "camera", "schedule", "settings"})
 FRONTEND_DIST_DIRECTORY = Path(__file__).with_name("dist")
 LEGACY_FRONTEND_QUERY_VALUE = "legacy"
 LEGACY_FRONTEND_QUERY_KEY = "ui"
@@ -243,6 +243,8 @@ def create_app(context: DashboardContext, frontend: str = "legacy") -> FastAPI:
     @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
     def global_dashboard_route(request: Request) -> Response:
         """Serve the shell for a deep link to a global dashboard view."""
+        if react_enabled and request.url.path == "/settings":
+            return dashboard_shell(request)
         if react_enabled and request.query_params.get(LEGACY_FRONTEND_QUERY_KEY) != LEGACY_FRONTEND_QUERY_VALUE:
             return RedirectResponse(
                 url=f"{request.url.path}?{LEGACY_FRONTEND_QUERY_KEY}={LEGACY_FRONTEND_QUERY_VALUE}", status_code=302
@@ -312,6 +314,16 @@ def create_app(context: DashboardContext, frontend: str = "legacy") -> FastAPI:
     ) -> dict[str, object]:
         """Return the full per-device view: cloud, queues, state, NTP."""
         detail = context.device_detail(device_id, raw_limit)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        return detail
+
+    @app.get("/api/devices/{device_id}/advanced")
+    def advanced_device_detail(device_id: str) -> dict[str, object]:
+        """Return bounded diagnostics for the opt-in Advanced UI."""
+        if not DEVICE_ID_PATTERN.fullmatch(device_id):
+            raise HTTPException(status_code=404, detail="Unknown device")
+        detail = context.advanced_device_detail(device_id)
         if detail is None:
             raise HTTPException(status_code=404, detail="Unknown device")
         return detail

@@ -258,6 +258,7 @@ class DeviceContext:
         """
         self._state_cache.update(topic, payload)
         self._observe_ntp(payload, source="device")
+        self._record_feeder_activity(payload)
 
         if self._responder is not None:
             action = self._responder.decide(
@@ -475,6 +476,14 @@ class DeviceContext:
             self._telemetry.increment("ntp_requests")
         elif command == protocol.Command.NTP_SYNC:
             self._telemetry.increment(f"ntp_sync_from_{source}")
+
+    def _record_feeder_activity(self, payload: bytes) -> None:
+        """Retain only user-facing events directly reported by this feeder."""
+        command = extract_command(payload)
+        if command == protocol.Command.GRAIN_OUTPUT_EVENT:
+            self._telemetry.record_event("feeder_dispensing", "Feeder reported dispensing activity")
+        elif command == protocol.Command.ERROR_EVENT:
+            self._telemetry.record_event("feeder_error", "Feeder reported an error")
 
     def _log_upstream_transition(self, transition: UpstreamTransition) -> None:
         """Emit semantically accurate upstream logs from telemetry decisions."""

@@ -6,10 +6,16 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
-PASSWORD_FIELD_PATTERN = re.compile(r'(?i)(password|secret)\s*([=:])\s*[^\s,}\]]+')
-TOKEN_FIELD_PATTERN = re.compile(r'(?i)(authorization|token)\s*([=:])\s*[^\s,}\]]+')
-IDENTITY_FIELD_PATTERN = re.compile(
-    r'(?i)\b(uuid|uid|tutk(?:[a-z0-9_]*)?|kalay(?:[a-z0-9_]*)?)\s*([=:])\s*[^\s,}\]]+'
+SENSITIVE_TEXT_FIELD_PATTERN = re.compile(
+    r"(?i)(?:[\"'])?(?P<field>"
+    r"password|secret|authorization|token|"
+    r"(?:dl[_-]?)?product[_-]?key|"
+    r"(?:device|mqtt)?[_-]?username|"
+    r"(?:device)?[_-]?(?:uuid|uid)|"
+    r"(?:api|p2p)[_-]?key|"
+    r"mqtt(?:[_-]?(?:addr|address))?|https?addr|internalurl|"
+    r"tutk(?:[a-z0-9_-]*)?|kalay(?:[a-z0-9_-]*)?"
+    r")(?:[\"'])?\s*[=:]\s*(?:[\"'])?[^\s,}\]]+(?:[\"'])?"
 )
 REDACTED_VALUE = "<redacted>"
 
@@ -24,9 +30,7 @@ def sanitize_text(message: str, secrets: Iterable[str] = ()) -> str:
     Returns:
         Sanitized text safe to expose via the dashboard.
     """
-    sanitized = PASSWORD_FIELD_PATTERN.sub(r"\1\2" + REDACTED_VALUE, message)
-    sanitized = TOKEN_FIELD_PATTERN.sub(r"\1\2" + REDACTED_VALUE, sanitized)
-    sanitized = IDENTITY_FIELD_PATTERN.sub(r"\1\2" + REDACTED_VALUE, sanitized)
+    sanitized = SENSITIVE_TEXT_FIELD_PATTERN.sub(r"\g<field>=" + REDACTED_VALUE, message)
     for secret in secrets:
         if secret:
             sanitized = sanitized.replace(secret, REDACTED_VALUE)
@@ -81,7 +85,7 @@ def sanitize_upstream_service_payload(value: Any) -> Any:
 def _is_sensitive_key(key: str) -> bool:
     """Return whether a JSON property name may carry a secret."""
     normalized = key.lower()
-    return normalized in {"username", "user", "uuid", "uid", "mqttaddr", "httpsaddr", "internalurl"} or any(
+    return normalized in {"username", "user", "uuid", "uid", "mqttaddr", "mqttaddress", "httpsaddr", "httpaddr", "internalurl"} or any(
         fragment in normalized
         for fragment in (
             "password",
@@ -89,6 +93,11 @@ def _is_sensitive_key(key: str) -> bool:
             "authorization",
             "token",
             "credential",
+            "uuid",
+            "uid",
+            "apikey",
+            "api_key",
+            "p2p",
             "tutk",
             "kalay",
         )

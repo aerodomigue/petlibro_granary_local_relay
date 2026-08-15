@@ -111,6 +111,34 @@ body { margin: 0; }
 .empty-state h2 { font-size: 18px; margin: 0 0 6px; }
 .empty-state p { color: #9aacba; margin: 0; }
 
+.settings-page, .settings-grid { display: grid; gap: 16px; }
+.settings-page { max-width: 720px; }
+.settings-card, .advanced-section { background: #15212d; border: 1px solid #304353; border-radius: 14px; padding: 17px; }
+.settings-card h2 { font-size: 18px; margin: 0 0 6px; }
+.settings-card > p, .settings-card small { color: #9aacba; display: block; margin: 0 0 14px; }
+.settings-card fieldset { border: 0; margin: 0; min-width: 0; padding: 0; }
+.settings-fields { display: grid; gap: 12px; }
+.settings-card__footer { align-items: center; display: flex; gap: 12px; justify-content: space-between; margin-top: 14px; }
+.settings-card__footer p { margin: 0; }
+.settings-card__save { width: auto; }
+.advanced-grid { display: grid; gap: 12px; }
+.advanced-section { margin: 0; }
+.advanced-section summary { align-items: center; cursor: pointer; display: flex; font-weight: 800; min-height: 44px; }
+.advanced-values { display: grid; gap: 8px; margin: 14px 0 0; }
+.advanced-values > div { display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.advanced-values dt { color: #9aacba; }
+.advanced-values dd { margin: 0; overflow-wrap: anywhere; text-align: right; }
+.advanced-logs { display: grid; gap: 10px; list-style: none; margin: 14px 0 0; padding: 0; }
+.advanced-logs li { border-left: 2px solid #304353; display: grid; gap: 3px; padding-left: 10px; }
+.advanced-logs span { color: #c8d8e3; overflow-wrap: anywhere; }
+.activity-timeline { display: grid; gap: 14px; list-style: none; margin: 0; padding: 0; }
+.activity-timeline__item { align-items: flex-start; border-left: 2px solid #405363; display: grid; gap: 11px; grid-template-columns: 24px 1fr; padding: 0 0 0 14px; }
+.activity-timeline__item > span { font-weight: 900; margin-left: -27px; text-align: center; }
+.activity-timeline__item p, .activity-timeline__item time { color: #9aacba; display: block; margin: 3px 0 0; }
+.activity-timeline__item--success > span { color: #37c785; }
+.activity-timeline__item--failure > span { color: #ef7474; }
+.activity-timeline__item--neutral > span { color: #9aacba; }
+
 @media (max-width: 620px) {
   .app-header { align-items: flex-start; }
   .application { padding: 18px 13px; }
@@ -122,4 +150,8 @@ body { margin: 0; }
   .schedule-card__actions button { flex: 1 1 100%; }
   .form-grid { grid-template-columns: 1fr; }
   .schedule-days > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-card__footer { align-items: stretch; flex-direction: column; }
+  .settings-card__save { width: 100%; }
+  .advanced-values > div { grid-template-columns: 1fr; gap: 3px; }
+  .advanced-values dd { text-align: left; }
 }
