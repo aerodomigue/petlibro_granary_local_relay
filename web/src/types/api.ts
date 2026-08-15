@@ -32,3 +32,9 @@ export interface HomeResponse {
   status: RelayStatus;
   devices: DailyDevice[];
 }
+
+export interface DailyDeviceResponse {
+  device: DailyDevice;
+  camera: CameraAvailability;
+  activity: unknown[];
+}
