@@ -7,17 +7,17 @@ is complete and the new static bundle is explicitly enabled.
 
 ## Legacy inventory
 
-| Feature | Legacy | React | Automated coverage |
-| --- | --- | --- | --- |
-| Home device cards and status | Yes | In progress | Backend tests |
-| Home camera auto-start | Yes | Todo | Lifecycle tests |
-| Viewer UUID lifecycle | Yes | Todo | Backend and browser tests |
-| Camera close / idle stop | Yes | Todo | Lifecycle tests |
-| Manual dispense | Yes | Todo | API tests |
-| Schedule list/create/edit/delete/enable | Yes | Todo | API tests |
-| Activity timeline | Yes | Todo | Backend tests |
-| Typed device settings | Yes | Todo | API tests |
-| Advanced mode and diagnostics | Yes | Todo | Backend tests |
+| Feature | Legacy | React | Unit | E2E | VM |
+| --- | --- | --- | --- | --- |
+| Home device cards and status | Yes | In progress | Basic | Todo | Todo |
+| Home camera auto-start | Yes | Todo | Todo | Todo | Todo |
+| Viewer UUID lifecycle | Yes | Todo | Todo | Todo | Todo |
+| Camera close / idle stop | Yes | Todo | Todo | Todo | Todo |
+| Manual dispense | Yes | Todo | Todo | Todo | Todo |
+| Schedule list/create/edit/delete/enable | Yes | Todo | Todo | Todo | Todo |
+| Activity timeline | Yes | Todo | Todo | Todo | Todo |
+| Typed device settings | Yes | Todo | Todo | Todo | Todo |
+| Advanced mode and diagnostics | Yes | Todo | Todo | Todo | Todo |
 
 ## Coexistence and rollback
 

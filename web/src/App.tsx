@@ -1,7 +1,10 @@
 import { Link, Navigate, Route, Routes, useParams } from "react-router-dom";
 import type { JSX } from "react";
 
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { HomePage } from "./features/home/HomePage";
+import { ApplicationLayout } from "./layouts/ApplicationLayout";
+import { LegacyDeviceRedirect } from "./routes/LegacyDeviceRedirect";
 
 function DeviceMigrationPage(): JSX.Element {
   const { deviceId } = useParams();
@@ -9,5 +12,5 @@ function DeviceMigrationPage(): JSX.Element {
 }
 
 export function App(): JSX.Element {
-  return <main className="application"><Routes><Route path="/" element={<HomePage />} /><Route path="/devices/:deviceId" element={<Navigate to="overview" replace />} /><Route path="/devices/:deviceId/:tab" element={<DeviceMigrationPage />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></main>;
+  return <ErrorBoundary><Routes><Route element={<ApplicationLayout />}><Route path="/" element={<HomePage />} /><Route path="/settings" element={<section className="migration-page"><h1>Settings migration preview</h1></section>} /><Route path="/devices/:deviceId" element={<LegacyDeviceRedirect />} /><Route path="/devices/:deviceId/:tab" element={<DeviceMigrationPage />} /><Route path="*" element={<Navigate to="/" replace />} /></Route></Routes></ErrorBoundary>;
 }

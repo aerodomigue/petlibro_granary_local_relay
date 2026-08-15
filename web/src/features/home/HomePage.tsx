@@ -3,6 +3,7 @@ import type { JSX } from "react";
 import { Link } from "react-router-dom";
 
 import { getHome } from "../../api/devices";
+import { queryKeys } from "../../api/queryKeys";
 import { StatusBadge } from "../../components/StatusBadge";
 import type { DailyDevice } from "../../types/api";
 
@@ -43,7 +44,11 @@ function DeviceCard({ device }: { device: DailyDevice }): JSX.Element {
 }
 
 export function HomePage(): JSX.Element {
-  const home = useQuery({ queryKey: ["home"], queryFn: ({ signal }) => getHome(signal), refetchInterval: HOME_REFRESH_MS });
+  const home = useQuery({
+    queryKey: queryKeys.home,
+    queryFn: ({ signal }) => getHome(signal),
+    refetchInterval: HOME_REFRESH_MS,
+  });
   if (home.isPending) return <p className="state-message">Loading feeders…</p>;
   if (home.isError) return <p className="state-message state-message--error">Unable to reach the relay: {home.error.message}</p>;
   return <section aria-labelledby="home-title"><header className="page-heading"><div><h1 id="home-title">Your feeders</h1><p>At-a-glance local status and today’s meals.</p></div></header><div className="device-grid">{home.data.devices.map((device) => <DeviceCard key={device.device_id} device={device} />)}</div></section>;
